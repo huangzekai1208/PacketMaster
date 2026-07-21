@@ -1,4 +1,4 @@
-# TCP 测速速率不达标诊断 Agent 设计
+# PacketMaster TCP 测速速率不达标诊断 Agent 设计
 
 日期：2026-07-20
 
@@ -8,7 +8,7 @@
 
 项目已有 speed-analyze skill。它接收 pcapng 报文和分析方向，通过 speed_filter_strip.py 分别筛选下载和上行测速流，再通过 tcp_extract.py 提取 TCP 字段并计算吞吐量、RTT、重传、窗口和 TCP 选项等指标。现有 SKILL.md 最后由大模型读取 JSON 并生成诊断结果。
 
-本项目的目标不是再包装一次 skill，而是在其确定性报文处理能力之上构建一个可控、可追溯、能主动补充证据的交互式 Agent。
+本项目名为 PacketMaster。目标不是再包装一次 skill，而是在其确定性报文处理能力之上构建一个可控、可追溯、能主动补充证据的交互式 Agent。
 
 ## 2. 第一版目标
 
@@ -184,7 +184,7 @@ CLI 负责收集参数、显示当前阶段、已处理报文数或字节数、�
 
 建议命令形式：
 
-    speed-agent diagnose <pcap_path> \
+    packetmaster diagnose <pcap_path> \
       --standard 1000 \
       --actual 300
 
@@ -196,7 +196,7 @@ Agent 维护单次任务的共享状态，并执行确定的诊断流程。它�
 
 ### 5.3 FastMCP Server
 
-FastMCP Server 隔离 Agent 与底层脚本。Agent 只依赖 MCP Schema，不依赖 speed-analyze 的文件名和内部实现。
+FastMCP Server 对外名称为 packetmaster，负责隔离 Agent 与底层脚本。Agent 只依赖 MCP Schema，不依赖 speed-analyze 的文件名和内部实现。
 
 ### 5.4 Adapter
 

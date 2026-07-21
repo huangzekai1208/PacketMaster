@@ -1,10 +1,12 @@
-# TCP 测速诊断 Agent 第一版实施计划
+# PacketMaster TCP 测速诊断 Agent 第一版实施计划
 
 > 面向执行智能体：逐任务实施并使用复选框跟踪。推荐使用 superpowers:subagent-driven-development，也可以使用 superpowers:executing-plans。
 
-目标：构建一个 CLI 形式的 TCP 测速诊断 Agent。默认分析下载速率不达标原因；仅当用户明确要求时分析上行或双向。Agent 通过 FastMCP 调用真实 speed-analyze，对完整报文做全量流式聚合，并在 LangGraph 中执行最多三轮的证据驱动诊断。
+目标：构建名为 PacketMaster 的 CLI 形式 TCP 测速诊断 Agent。默认分析下载速率不达标原因；仅当用户明确要求时分析上行或双向。PacketMaster 通过 FastMCP 调用真实 speed-analyze，对完整报文做全量流式聚合，并在 LangGraph 中执行最多三轮的证据驱动诊断。
 
 架构：原始 pcap/pcapng 始终留在本机，由 speed-analyze 和 TShark 流式处理。聚合摘要与异常证据写入 JSON 和 SQLite，模型只接收覆盖范围、紧凑指标和分页证据。Windows 是正式运行与发布平台，macOS 是当前开发与兼容平台。
+
+项目标识：Python 分发包和导入包使用 packetmaster，CLI 命令使用 packetmaster，FastMCP Server 名称使用 packetmaster；speed-analyze 保持为底层 skill 名称。
 
 技术栈：Python 3.11-3.13、Pydantic 2、FastMCP 2、LangGraph 1、langchain-openai 1、Typer、SQLite、Scapy、TShark、pytest、pytest-asyncio、Ruff。
 
@@ -32,25 +34,25 @@
 
 ## 文件结构
 
-### Agent 包
+### PacketMaster 包
 
 - pyproject.toml：依赖、CLI 入口、pytest 和 Ruff 配置。
-- src/speed_agent/config.py：环境配置和默认值。
-- src/speed_agent/domain.py：Pydantic 领域模型。
-- src/speed_agent/errors.py：结构化错误。
-- src/speed_agent/platform.py：Windows/macOS 路径、进程和编码辅助能力。
-- src/speed_agent/artifacts.py：任务目录、磁盘预检、保留策略和轨迹。
-- src/speed_agent/analyzer/base.py：Analyzer Adapter 协议。
-- src/speed_agent/analyzer/mock.py：测试 Adapter。
-- src/speed_agent/analyzer/real.py：真实 speed-analyze 子进程 Adapter。
-- src/speed_agent/mcp/server.py：FastMCP 工具服务。
-- src/speed_agent/mcp/client.py：FastMCP stdio Client。
-- src/speed_agent/context.py：模型上下文构建。
-- src/speed_agent/model.py：结构化模型调用。
-- src/speed_agent/graph.py：LangGraph 状态、节点和路由。
-- src/speed_agent/report.py：报告生成和保存。
-- src/speed_agent/cli.py：命令行入口和进度输出。
-- src/speed_agent/prompts/：假设生成与证据复核 Prompt。
+- src/packetmaster/config.py：环境配置和默认值。
+- src/packetmaster/domain.py：Pydantic 领域模型。
+- src/packetmaster/errors.py：结构化错误。
+- src/packetmaster/platform.py：Windows/macOS 路径、进程和编码辅助能力。
+- src/packetmaster/artifacts.py：任务目录、磁盘预检、保留策略和轨迹。
+- src/packetmaster/analyzer/base.py：Analyzer Adapter 协议。
+- src/packetmaster/analyzer/mock.py：测试 Adapter。
+- src/packetmaster/analyzer/real.py：真实 speed-analyze 子进程 Adapter。
+- src/packetmaster/mcp/server.py：名为 packetmaster 的 FastMCP 工具服务。
+- src/packetmaster/mcp/client.py：FastMCP stdio Client。
+- src/packetmaster/context.py：模型上下文构建。
+- src/packetmaster/model.py：结构化模型调用。
+- src/packetmaster/graph.py：LangGraph 状态、节点和路由。
+- src/packetmaster/report.py：报告生成和保存。
+- src/packetmaster/cli.py：命令行入口和进度输出。
+- src/packetmaster/prompts/：假设生成与证据复核 Prompt。
 
 ### speed-analyze 加固
 
@@ -81,10 +83,10 @@
 文件：
 
 - 创建 pyproject.toml
-- 创建 src/speed_agent/__init__.py
-- 创建 src/speed_agent/config.py
-- 创建 src/speed_agent/domain.py
-- 创建 src/speed_agent/errors.py
+- 创建 src/packetmaster/__init__.py
+- 创建 src/packetmaster/config.py
+- 创建 src/packetmaster/domain.py
+- 创建 src/packetmaster/errors.py
 - 创建 tests/unit/test_domain.py
 
 接口：
@@ -111,8 +113,8 @@
 
 文件：
 
-- 创建 src/speed_agent/platform.py
-- 创建 src/speed_agent/artifacts.py
+- 创建 src/packetmaster/platform.py
+- 创建 src/packetmaster/artifacts.py
 - 创建 tests/unit/test_platform.py
 - 创建 tests/unit/test_artifacts.py
 
@@ -225,11 +227,11 @@
 
 文件：
 
-- 创建 src/speed_agent/analyzer/base.py
-- 创建 src/speed_agent/analyzer/mock.py
-- 创建 src/speed_agent/analyzer/real.py
-- 创建 src/speed_agent/mcp/server.py
-- 创建 src/speed_agent/mcp/client.py
+- 创建 src/packetmaster/analyzer/base.py
+- 创建 src/packetmaster/analyzer/mock.py
+- 创建 src/packetmaster/analyzer/real.py
+- 创建 src/packetmaster/mcp/server.py
+- 创建 src/packetmaster/mcp/client.py
 - 创建 tests/contract/test_mcp_tools.py
 - 创建 tests/fixtures/mock_analysis.json
 
@@ -256,10 +258,10 @@
 
 文件：
 
-- 创建 src/speed_agent/context.py
-- 创建 src/speed_agent/model.py
-- 创建 src/speed_agent/prompts/hypothesis.md
-- 创建 src/speed_agent/prompts/verification.md
+- 创建 src/packetmaster/context.py
+- 创建 src/packetmaster/model.py
+- 创建 src/packetmaster/prompts/hypothesis.md
+- 创建 src/packetmaster/prompts/verification.md
 - 创建 tests/unit/test_context.py
 
 接口：
@@ -284,7 +286,7 @@
 
 文件：
 
-- 创建 src/speed_agent/graph.py
+- 创建 src/packetmaster/graph.py
 - 创建 tests/fakes.py
 - 创建 tests/unit/test_graph.py
 
@@ -310,14 +312,14 @@
 
 文件：
 
-- 创建 src/speed_agent/report.py
-- 创建 src/speed_agent/cli.py
+- 创建 src/packetmaster/report.py
+- 创建 src/packetmaster/cli.py
 - 创建 tests/integration/test_cli.py
 - 创建 README.md
 
 接口：
 
-- speed-agent diagnose PATH --standard FLOAT --actual FLOAT 启动默认下载诊断。
+- packetmaster diagnose PATH --standard FLOAT --actual FLOAT 启动默认下载诊断。
 - --target upload 和 --target both 用于用户明确要求的上行或双向诊断。
 - report.json 保存结构化 DiagnosticReport。
 
@@ -328,7 +330,7 @@
 - [ ] 步骤 5：实现终端报告和 JSON 报告，报告必须明确分析方向、覆盖范围、证据和限制。
 - [ ] 步骤 6：编写 README，首先展示不带 --target 的默认下载命令，再展示上行和双向命令。
 - [ ] 步骤 7：记录 Windows 的 TShark 安装与 TSHARK_PATH 配置，同时记录 macOS 开发环境配置。
-- [ ] 步骤 8：运行 python -m pytest tests/integration/test_cli.py -v 和 python -m speed_agent.cli --help。
+- [ ] 步骤 8：运行 python -m pytest tests/integration/test_cli.py -v 和 python -m packetmaster.cli --help。
 - [ ] 步骤 9：提交，建议提交信息为 feat: add diagnosis cli and reports。
 
 验收标准：用户无需说明方向即可分析下载；只有明确指定时才改变方向；两个平台的路径均可使用。
