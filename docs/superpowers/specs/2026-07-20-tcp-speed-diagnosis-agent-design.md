@@ -6,7 +6,7 @@
 
 ## 1. 背景
 
-项目已有 speed-analyze skill。它接收 pcapng 报文和分析方向，通过 speed_filter_strip.py 筛选测速流，再通过 tcp_extract.py 提取 TCP 字段并计算吞吐量、RTT、重传、窗口和 TCP 选项等指标。现有 SKILL.md 最后由大模型读取 JSON 并生成诊断结果。
+项目已有 speed-analyze skill。它接收 pcapng 报文和分析方向，通过 speed_filter_strip.py 分别筛选下载和上行测速流，再通过 tcp_extract.py 提取 TCP 字段并计算吞吐量、RTT、重传、窗口和 TCP 选项等指标。现有 SKILL.md 最后由大模型读取 JSON 并生成诊断结果。
 
 本项目的目标不是再包装一次 skill，而是在其确定性报文处理能力之上构建一个可控、可追溯、能主动补充证据的交互式 Agent。
 
@@ -17,7 +17,14 @@
 - pcap 或 pcapng 文件路径
 - 标准带宽，单位 Mbps
 - 实际带宽，单位 Mbps
-- 分析方向：download、upload 或 both
+- 分析方向，可选；未指定时默认为 download
+
+方向解析规则固定如下：
+
+- 用户未说明方向时，只分析下载速率不达标原因，内部归一化为 `download`。
+- 用户明确要求分析上行时，内部归一化为 `upload`。
+- 用户明确要求分析上行和下载、双向或同时分析时，内部归一化为 `both`。
+- Agent 不得仅因为报文中同时存在上行和下载流就自动切换为 `both`。
 
 Agent 应完成：
 
@@ -32,6 +39,7 @@ Agent 应完成：
 9. 支持几百 MB 到数 GB 的 pcapng，报文处理过程不得将完整文件载入内存。
 10. 对完整测速过程执行全量流式聚合，再根据异常区间进行局部取证。
 11. 候选原因集合保持开放，常见原因只作为基础排查清单，不作为原因白名单。
+12. 正式运行和发布验收以 Windows 为主，当前开发环境 macOS 必须保持可运行。
 
 ## 3. 非目标
 
@@ -52,6 +60,8 @@ Agent 应完成：
 ### 4.1 交互形式
 
 第一版使用 CLI。这样可以优先验证诊断流程和工具编排，避免引入前端范围。
+
+CLI 的 `--target` 参数可省略，默认值为 `download`。只有用户明确表达上行或双向分析意图时，CLI 或对话输入解析层才将其设置为 `upload` 或 `both`。归一化完成后，LangGraph、MCP Tool 和 speed-analyze 始终接收明确的方向值。
 
 ### 4.2 Agent 编排
 
@@ -132,6 +142,20 @@ Agent 不绑定单一模型厂商。
 
 Context Builder 不预先将异常映射为固定原因。它输出客观事实，例如“第 3 条流吞吐量周期性下降但没有同步重传”或“各 TCP 指标正常但所有流都稳定在固定平台”，由 reason 节点据此形成可验证的开放式假设。
 
+### 4.8 平台兼容性
+
+第一版以 Windows 为正式运行、测试和发布验收平台，macOS 作为当前开发与兼容验证平台。Linux 不作为第一版发布门禁。
+
+跨平台实现遵循以下约束：
+
+- 文件路径使用 `pathlib.Path` 和绝对路径，不手工拼接路径分隔符。
+- 子进程使用参数数组调用，禁止依赖 Shell 字符串、`.bat` 包装或仅适用于 Unix 的命令。
+- TShark 按 `TSHARK_PATH`、系统 `PATH`、当前操作系统常见安装目录的顺序发现。
+- Windows 兼容 `tshark.exe`、盘符路径、包含空格的路径和反斜杠；macOS 兼容 Wireshark App Bundle 和 Homebrew 安装路径。
+- 文本产物统一使用 UTF-8；读取子进程输出时对不可解码字符采用可追溯的替换策略。
+- 超时和取消必须分别实现 Windows 与 macOS 可用的子进程终止路径，不能只依赖 POSIX Signal。
+- 自动化测试至少覆盖 Windows 和 macOS；Windows 测试结果作为发布门禁，macOS 测试结果作为开发兼容门禁。
+
 ## 5. 总体架构
 
     CLI
@@ -162,8 +186,9 @@ CLI 负责收集参数、显示当前阶段、已处理报文数或字节数、�
 
     speed-agent diagnose <pcap_path> \
       --standard 1000 \
-      --actual 300 \
-      --target download
+      --actual 300
+
+该命令默认分析下载方向。显式分析上行或双向时分别增加 `--target upload` 或 `--target both`。
 
 ### 5.2 LangGraph Agent
 
@@ -210,7 +235,7 @@ AgentState 至少包含：
 - pcap_path：输入报文路径
 - standard_bandwidth_mbps：标准带宽
 - actual_bandwidth_mbps：实际带宽
-- target：分析方向
+- target：归一化后的分析方向，默认 download；只有用户明确要求时才为 upload 或 both
 - achievement_ratio_pct：达标率
 - analysis_id：分析任务标识
 - input_size_bytes：输入文件大小
@@ -235,7 +260,7 @@ AgentState 至少包含：
 
 ### 7.1 collect
 
-从 CLI 收集或补充报文路径、带宽和分析方向。如果信息缺失，停留在交互流程，不调用模型或 MCP。
+从 CLI 收集或补充报文路径和带宽。分析方向未提供时立即归一化为 download；只有报文路径或带宽缺失时才停留在交互流程，不调用模型或 MCP。
 
 ### 7.2 validate
 
@@ -329,7 +354,7 @@ reason 节点不直接输出最终报告。
 
     {
       "request_id": "20260720-a13f",
-      "pcap_path": "/data/test.pcapng",
+      "pcap_path": "C:\\captures\\test.pcapng",
       "target": "download",
       "aggregation_interval_seconds": 1,
       "build_evidence_index": true
@@ -533,13 +558,13 @@ evidence_quality 至少说明：
 
 ### 12.2 环境依赖错误
 
-真实 Adapter 检查 Python、Scapy、TShark 和输出目录。
+真实 Adapter 检查 Python、Scapy、TShark 和输出目录。Windows 是正式运行环境，macOS 是开发兼容环境，两者都必须通过依赖预检。
 
 TShark 查找顺序：
 
 1. TSHARK_PATH 环境变量
 2. 系统 PATH
-3. Windows 和 macOS 常见安装路径
+3. 当前操作系统的常见安装路径；Windows 优先检查 Wireshark 默认安装目录，macOS 检查 Wireshark App Bundle 和 Homebrew 路径
 
 当前 speed-analyze/scripts/tcp_extract.py 固定了 Windows 路径，第一版 Real Adapter 接入时必须通过配置或自动发现消除该限制。
 
@@ -592,16 +617,17 @@ TShark 查找顺序：
 Real Adapter 在第一版直接调用 speed-analyze/scripts/run_pipeline.py。接入前必须完成：
 
 1. pcapng 直接进入流水线；pcap 使用本地 TShark 或 editcap 转换为任务目录中的 pcapng，转换产物计入磁盘预算。
-2. 将 TShark 路径改为 TSHARK_PATH、系统 PATH 和常见安装路径的跨平台发现。
+2. 将 TShark 路径改为 TSHARK_PATH、系统 PATH 和当前操作系统常见安装路径的跨平台发现，Windows 支持 `tshark.exe` 和包含空格的安装路径，macOS 支持 App Bundle 与 Homebrew 路径。
 3. 处理同一方向的全部测速流，不再只采用第一个成功端口。
 4. 删除基础统计中的 max_packets=5000 和 tshark -c 5000 限制。
 5. 将可能随报文数增长的 TShark 输出改成 subprocess.Popen 流式读取和在线聚合，避免 capture_output 持有完整结果。
 6. 对全部测速报文生成每流指标、固定时间粒度指标、分布统计和异常事件索引。
 7. 不再把所有逐包字段写入一个大型 JSON；使用 analysis.sqlite 保存聚合结果和异常事件。
 8. 保留筛选后的 pcapng，用于按需执行局部定向证据提取。
-9. 增加文件大小、磁盘空间、处理进度、动态超时、取消和清理机制。
-10. 验证下载、上行、both、多流和 IPv6 场景。
+9. 增加文件大小、磁盘空间、处理进度、动态超时、取消和清理机制；子进程终止逻辑必须同时适用于 Windows 和 macOS。
+10. 验证默认下载、显式上行、显式 both、多流和 IPv6 场景，且不得因为检测到双向流而自动改为 both。
 11. 明确 Scapy、TShark 和可选 editcap 是外部运行依赖，并在启动时进行预检。
+12. 所有路径、日志和 SQLite 产物必须支持 Windows 盘符路径、空格和非 ASCII 字符，并在 macOS 上保持兼容。
 
 当前 speed_filter_strip.py 已逐包读取报文，并通过两遍扫描完成统计与筛选，因此不会一次性把几 GB 文件放入内存。但它的运行时间与文件大小线性增长，流字典占用与流数量相关，并且会产生筛选后的 pcapng。第一版保留两遍扫描结构，同时加入资源预检和进度反馈；减少扫描遍数属于后续性能优化。
 
@@ -611,7 +637,7 @@ Real Adapter 在第一版直接调用 speed-analyze/scripts/run_pipeline.py。�
 
 ### 15.1 单元测试
 
-覆盖输入校验、达标率、BDP、方向、置信度映射、覆盖率判断、资源预算和错误对象。
+覆盖输入校验、达标率、BDP、方向默认值与显式覆盖、置信度映射、覆盖率判断、资源预算和错误对象。
 
 ### 15.2 MCP 契约测试
 
@@ -659,6 +685,8 @@ Mock 模式用于稳定验证 Agent 和 MCP 契约。Real 模式使用小型真�
 - 轨迹文件生成
 - API Key 不进入日志
 - Real Adapter 能生成覆盖率、聚合摘要、证据索引和最终报告
+- 未传 `--target` 时只分析下载，显式传入 `upload` 或 `both` 时按要求切换
+- Windows 盘符路径、包含空格的路径和非 ASCII 路径可以完成端到端分析
 
 ### 15.5 大报文与性能测试
 
@@ -672,6 +700,8 @@ Mock 模式用于稳定验证 Agent 和 MCP 契约。Real 模式使用小型真�
 - 磁盘不足时在处理前失败
 - 取消任务后子进程停止，临时产物可清理
 - 超时与进度信息可追溯
+
+同一组核心集成测试在 Windows 和 macOS 上运行。Windows 的真实 TShark、子进程取消和大报文结果属于发布门禁；macOS 对应结果属于开发兼容门禁。
 
 ### 15.6 诊断质量评测
 
@@ -708,8 +738,10 @@ Mock 模式用于稳定验证 Agent 和 MCP 契约。Real 模式使用小型真�
 11. 模型只接收覆盖率、全局摘要和按需局部证据，不接收原始报文或完整逐包数据。
 12. Mock Adapter 能完成自动化测试，并与 Real Adapter 保持契约一致。
 13. RAG 不在第一版范围内，但图结构允许后续插入知识检索节点。
-14. 候选原因不受固定枚举限制，新假设可以通过 custom_packet_query 验证。
-15. 数据无法支持明确原因时，最终报告可以返回 unresolved。
+14. 用户不指定方向时，系统只分析下载；只有明确要求时才分析上行或双向。
+15. Windows 能完成真实报文端到端分析、取消和产物写入；macOS 能完成相同核心流程的兼容验证。
+16. 候选原因不受固定枚举限制，新假设可以通过 custom_packet_query 验证。
+17. 数据无法支持明确原因时，最终报告可以返回 unresolved。
 
 ## 17. 后续演进
 
