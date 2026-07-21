@@ -31,6 +31,7 @@ Agent 应完成：
 8. 第一版直接通过 Real Adapter 接入现有 speed-analyze。
 9. 支持几百 MB 到数 GB 的 pcapng，报文处理过程不得将完整文件载入内存。
 10. 对完整测速过程执行全量流式聚合，再根据异常区间进行局部取证。
+11. 候选原因集合保持开放，常见原因只作为基础排查清单，不作为原因白名单。
 
 ## 3. 非目标
 
@@ -64,6 +65,8 @@ reason、inspect_evidence、verify 构成“基于证据的有界 ReAct”循环
 - verify 判断证据是否充分，以及继续循环还是结束
 
 它不是允许模型无限自主调用工具的纯 ReAct。工具范围、最大三轮取证和结束条件均由 LangGraph 控制。
+
+候选原因采用开放式假设生成。Agent 先执行常见模式基线排查，再从全量统计的异常、变化和指标关联中生成数据驱动假设。模型可以提出清单之外的原因，但必须说明证据、反向证据、缺失证据和报文可观测性。
 
 ### 4.3 工具协议
 
@@ -126,6 +129,8 @@ Agent 不绑定单一模型厂商。
 如果流数量或时间区间过多，Context Builder 可以压缩正常区间，但必须保留所有异常区间、被省略数量、聚合方法和覆盖范围。模型可以通过 get_tcp_evidence 查询未展开的流或区间。
 
 模型不负责决定基础统计是否完整。verify 节点必须先检查 coverage_summary，再判断诊断置信度。
+
+Context Builder 不预先将异常映射为固定原因。它输出客观事实，例如“第 3 条流吞吐量周期性下降但没有同步重传”或“各 TCP 指标正常但所有流都稳定在固定平台”，由 reason 节点据此形成可验证的开放式假设。
 
 ## 5. 总体架构
 
@@ -215,6 +220,7 @@ AgentState 至少包含：
 - flow_summary：测速流摘要
 - tcp_summary：TCP 核心指标
 - syn_options：TCP 握手选项
+- anomaly_facts：由全量统计发现的异常、变化和指标关联
 - candidate_causes：候选原因
 - collected_evidence：已经获取的证据
 - missing_evidence：仍需查询的证据
@@ -250,11 +256,14 @@ AgentState 至少包含：
 
 调用模型，根据带宽信息、完整性信息和紧凑摘要输出：
 
-- 候选原因
+- 常见模式基线排查结果
+- 从实际异常中发现的开放式候选原因
 - 已支持该原因的指标
+- 与该原因矛盾的指标
 - 仍需查询的证据
 - 初始置信度等级
 - 对覆盖率是否足以支持当前判断的评价
+- 原因在报文中的可观测性：direct、indirect 或 outside_capture
 
 reason 节点不直接输出最终报告。
 
@@ -275,6 +284,8 @@ reason 节点不直接输出最终报告。
 - 是否还需要获取详细证据
 - coverage_summary 是否表明分析覆盖完整测速过程
 - 局部证据是否与全局聚合结果一致
+- 开放式新原因是否提出了可执行的验证方法
+- outside_capture 原因是否明确标注需要外部数据，而没有写成报文已证实
 
 覆盖不完整时不得产生高置信度结论。证据不足且查询次数未达到上限时，返回 inspect_evidence。达到上限后进入 report，并在限制中说明证据不足。
 
@@ -384,6 +395,36 @@ coverage_summary 至少包含：
 - throughput_distribution
 - syn_options
 - packet_fields
+- custom_packet_query
+
+custom_packet_query 用于验证预定义证据类型之外的新假设。它采用受控查询 DSL，例如：
+
+    {
+      "analysis_id": "20260721-a13f",
+      "evidence_type": "custom_packet_query",
+      "query": {
+        "flow_ids": ["flow-3"],
+        "time_start": 8,
+        "time_end": 12,
+        "predicates": [
+          {
+            "field": "tcp.window_size",
+            "operator": "lt",
+            "value": 65536
+          }
+        ],
+        "fields": [
+          "frame.number",
+          "frame.time_relative",
+          "tcp.seq",
+          "tcp.window_size"
+        ]
+      },
+      "offset": 0,
+      "limit": 100
+    }
+
+允许的 operator 为 eq、ne、gt、gte、lt、lte、in 和 exists。服务端将 DSL 编译为 analysis.sqlite 查询或安全的 TShark 参数数组。模型不得提交原始 shell、任意 TShark display filter 或命令字符串。
 
 输出包含：
 
@@ -412,6 +453,9 @@ coverage_summary 至少包含：
 - 全量聚合与局部证据查询必须分离
 - 每次证据响应必须附带数据来源、覆盖区间和是否截断
 - 模型上下文不得仅依赖文件开头的连续样本
+- cause 不使用封闭枚举；evidence_type 使用预定义类型加 custom_packet_query 扩展
+- custom_packet_query 只能使用字段白名单、操作符白名单和参数化值
+- 禁止将查询 DSL 拼接到 shell 字符串中执行
 
 ## 10. 完整数据流
 
@@ -422,8 +466,8 @@ coverage_summary 至少包含：
 5. speed-analyze 流式筛选测速流，并对完整测速过程执行全量聚合。
 6. 全局、每流、固定时间粒度和异常事件统计写入 JSON 与 analysis.sqlite。
 7. MCP Server 返回覆盖率和紧凑摘要。
-8. reason 形成候选原因和证据需求。
-9. inspect_evidence 从索引或筛选 pcapng 中按需查询局部证据。
+8. reason 先执行常见模式基线排查，再根据实际异常形成开放式候选原因和证据需求。
+9. inspect_evidence 从索引或筛选 pcapng 中按需查询预定义证据或执行 custom_packet_query。
 10. verify 检查局部证据、全局统计和覆盖率是否一致。
 11. report 生成最终报告。
 12. Artifact Store 保存报告和轨迹，并按保留策略清理大文件。
@@ -450,11 +494,19 @@ coverage_summary 至少包含：
 候选原因包含：
 
 - cause
+- hypothesis_type：known_pattern、data_discovered 或 external_factor
+- observability：direct、indirect 或 outside_capture
 - confidence
-- evidence
+- supporting_evidence
+- contradicting_evidence
+- missing_evidence
 - affected_flows
 - explanation
 - suggestion
+
+cause 为自由文本，不使用固定原因枚举。known_pattern 表示来自常见模式基线，data_discovered 表示由实际数据异常发现，external_factor 表示可能位于报文可观测范围之外。
+
+如果现有证据不能合理支持任何原因，报告必须允许 primary_cause 为 unresolved，并说明当前报文无法解释、仍需哪些外部数据，而不是强行从常见原因中选择一个。
 
 confidence 使用 high、medium、low 等级。它表示基于当前证据的诊断置信度，不宣称为经过统计校准的概率。
 
@@ -577,6 +629,8 @@ Real Adapter 在第一版直接调用 speed-analyze/scripts/run_pipeline.py。�
 - 全量聚合与证据响应条数限制相互独立
 - analysis.sqlite 查询结果与摘要一致
 - 证据响应附带覆盖区间和截断标记
+- custom_packet_query 正确编译字段、操作符、时间和流条件
+- 原始 shell、任意 TShark filter、未知字段和非法操作符被拒绝
 
 ### 15.3 LangGraph 路由测试
 
@@ -591,6 +645,8 @@ Real Adapter 在第一版直接调用 speed-analyze/scripts/run_pipeline.py。�
 - 证据不足时不会输出高置信度结论
 - coverage_summary 不完整时不会输出高置信度结论
 - 受约束 ReAct 循环不会超过三轮
+- 数据异常不匹配常见模式时仍可生成 data_discovered 假设
+- 无假设得到充分支持时输出 unresolved，而不是强行选择原因
 
 ### 15.4 CLI 端到端测试
 
@@ -630,8 +686,10 @@ Mock 模式用于稳定验证 Agent 和 MCP 契约。Real 模式使用小型真�
 - 数据不足
 - TCP 指标正常但速度不达标
 - 异常只出现在测速中段或末段
+- 不属于预定义清单的新型异常
+- 所有候选原因均被反向证据否定
 
-评测不要求自然语言完全一致，但要求原因有证据、置信度与证据匹配、报告符合 Schema，并能区分直接证据和推测。相同完整报文的诊断不得因只查看文件开头而遗漏后半段异常。
+评测不要求自然语言完全一致，也不要求原因来自固定清单，但要求原因有证据、置信度与证据匹配、报告符合 Schema，并能区分直接证据、间接推测和报文外因素。相同完整报文的诊断不得因只查看文件开头而遗漏后半段异常。
 
 ## 16. 第一版验收标准
 
@@ -650,6 +708,8 @@ Mock 模式用于稳定验证 Agent 和 MCP 契约。Real 模式使用小型真�
 11. 模型只接收覆盖率、全局摘要和按需局部证据，不接收原始报文或完整逐包数据。
 12. Mock Adapter 能完成自动化测试，并与 Real Adapter 保持契约一致。
 13. RAG 不在第一版范围内，但图结构允许后续插入知识检索节点。
+14. 候选原因不受固定枚举限制，新假设可以通过 custom_packet_query 验证。
+15. 数据无法支持明确原因时，最终报告可以返回 unresolved。
 
 ## 17. 后续演进
 
