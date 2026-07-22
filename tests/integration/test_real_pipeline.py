@@ -722,6 +722,40 @@ def test_cleanup_error_does_not_mask_original_analysis_error(
     assert store.closed is True
 
 
+def test_cleanup_error_propagates_inside_callers_exception_handler(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_script_module("tcp_extract.py", "task5_tcp_extract_outer_error")
+    capture = tmp_path / "download.pcapng"
+    capture.write_bytes(b"download")
+    rows = ClosingIterator(
+        [_timing_row(1, 100.0, "download")],
+        close_error=RuntimeError("iterator close failed"),
+    )
+    store = RecordingStore()
+
+    monkeypatch.setattr(
+        module, "stream_tshark_fields", lambda *args, **kwargs: rows
+    )
+    monkeypatch.setattr(module, "AnalysisStore", lambda path: store)
+
+    try:
+        1 / 0
+    except ZeroDivisionError:
+        with pytest.raises(RuntimeError, match="iterator close failed"):
+            module.analyze_captures(
+                {"download": capture},
+                "download",
+                1,
+                tmp_path / "analysis.sqlite",
+                Path("tshark"),
+                8,
+            )
+
+    assert rows.closed is True
+    assert store.closed is True
+
+
 @pytest.mark.parametrize(
     ("capture", "analysis_id", "target", "error_code"),
     [

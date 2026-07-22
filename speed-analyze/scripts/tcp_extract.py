@@ -130,6 +130,7 @@ def analyze_captures(
         event_sink=event_sink,
     )
 
+    analysis_failed = False
     try:
         if store is not None:
             store.initialize()
@@ -209,8 +210,10 @@ def analyze_captures(
         if store is not None:
             store.write_result(result)
         return result
+    except BaseException:
+        analysis_failed = True
+        raise
     finally:
-        active_error = sys.exc_info()[1]
         cleanup_error: BaseException | None = None
         for close in locals().get("close_streams", []):
             try:
@@ -224,5 +227,5 @@ def analyze_captures(
             except BaseException as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
-        if active_error is None and cleanup_error is not None:
+        if not analysis_failed and cleanup_error is not None:
             raise cleanup_error
