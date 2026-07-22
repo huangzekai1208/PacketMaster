@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import inspect
 import json
 import re
 import sqlite3
@@ -102,7 +103,7 @@ def _sanitize_artifacts(root: Path, value: object) -> object:
 
 
 async def _maybe_await(value: Any) -> None:
-    if asyncio.iscoroutine(value):
+    if inspect.isawaitable(value):
         await value
 
 
@@ -346,15 +347,17 @@ class RealAnalyzerAdapter:
             )
 
         task_root = self._analysis_root(request.request_id)
-        if task_root.exists() and any(task_root.iterdir()):
+        self._artifacts.preflight(input_path, request.target)
+        try:
+            task_root.mkdir(exist_ok=False)
+        except FileExistsError as exc:
             raise AppError(
                 code="ANALYSIS_ID_CONFLICT",
                 message="analysis_id already has local artifacts",
                 recoverable=True,
                 suggested_action="Use a new analysis_id for this capture.",
                 details={"path": str(task_root)},
-            )
-        self._artifacts.preflight(input_path, request.target)
+            ) from exc
         paths = self._artifacts.create(request.request_id)
         log_path = paths.logs_dir / "pipeline.log"
         command = self._command(request, paths.root)

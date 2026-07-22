@@ -139,6 +139,7 @@ def _write_real_outputs(
     target: str,
     *,
     input_path: Path,
+    analysis_id: str = "real-contract",
     status: str = "completed",
 ) -> None:
     coverage = {
@@ -168,7 +169,7 @@ def _write_real_outputs(
     (output / "progress.jsonl").write_text("", encoding="utf-8")
     (output / "logs" / "filter.log").write_text("", encoding="utf-8")
     manifest = {
-        "analysis_id": "real-contract",
+        "analysis_id": analysis_id,
         "status": status,
         "target": target,
         "input_path": str(input_path.resolve()),
@@ -336,7 +337,11 @@ def test_real_adapter_rejects_manifest_artifact_outside_task_root(
     async def create_process(*args: object, **kwargs: object) -> FakeProcess:
         output = Path(str(args[args.index("--output") + 1]))
         input_path = Path(str(args[args.index("--input") + 1]))
-        _write_real_outputs(output, "download", input_path=input_path)
+        _write_real_outputs(
+            output,
+            "download",
+            input_path=input_path,
+        )
         manifest_path = output / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["analysis_id"] = "outside"
@@ -561,6 +566,51 @@ def test_real_adapter_rejects_existing_analysis_id(tmp_path: Path) -> None:
     with pytest.raises(AppError) as error:
         asyncio.run(adapter.analyze(request))
     assert error.value.code == "ANALYSIS_ID_CONFLICT"
+
+
+def test_concurrent_same_analysis_id_starts_only_one_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "capture.pcapng"
+    capture.write_bytes(b"capture")
+    script = tmp_path / "pipeline.py"
+    script.write_text("# fixture", encoding="utf-8")
+    starts = 0
+
+    async def create_process(*args: object, **kwargs: object) -> FakeProcess:
+        nonlocal starts
+        starts += 1
+        output = Path(str(args[args.index("--output") + 1]))
+        input_path = Path(str(args[args.index("--input") + 1]))
+        _write_real_outputs(
+            output,
+            "download",
+            input_path=input_path,
+            analysis_id="concurrent",
+        )
+        await asyncio.sleep(0)
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    adapter = RealAnalyzerAdapter(
+        artifact_root=tmp_path / "artifacts",
+        pipeline_script=script,
+    )
+    request = _request(request_id="concurrent", pcap_path=str(capture))
+
+    async def exercise() -> list[object]:
+        return await asyncio.gather(
+            adapter.analyze(request),
+            adapter.analyze(request),
+            return_exceptions=True,
+        )
+
+    results = asyncio.run(exercise())
+    assert starts == 1
+    assert sum(isinstance(item, AnalyzeResponse) for item in results) == 1
+    errors = [item for item in results if isinstance(item, AppError)]
+    assert len(errors) == 1
+    assert errors[0].code == "ANALYSIS_ID_CONFLICT"
 
 
 def test_request_id_rejects_pure_dots() -> None:
