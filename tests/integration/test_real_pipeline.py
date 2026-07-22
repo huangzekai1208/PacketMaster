@@ -481,6 +481,140 @@ def test_both_captures_use_one_epoch_timebase_without_overlapping_intervals(
     assert result.coverage_summary.analyzed_duration_seconds == pytest.approx(10.2)
 
 
+def _timing_row(
+    number: int,
+    epoch: float | None,
+    direction: str,
+    *,
+    retransmission: bool = False,
+) -> dict[str, str]:
+    download = direction == "download"
+    return {
+        "frame.number": str(number),
+        "frame.time_relative": "",
+        "frame.time_epoch": "" if epoch is None else str(epoch),
+        "ip.src": "198.51.100.20" if download else "192.0.2.10",
+        "ip.dst": "192.0.2.10" if download else "198.51.100.20",
+        "ipv6.src": "",
+        "ipv6.dst": "",
+        "tcp.srcport": "5201" if download else "41000",
+        "tcp.dstport": "41000" if download else "5201",
+        "tcp.len": "100",
+        "tcp.analysis.retransmission": "1" if retransmission else "",
+    }
+
+
+def test_single_capture_recovers_timing_after_leading_untimed_packet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_script_module("tcp_extract.py", "task5_tcp_extract_late_epoch")
+    capture = tmp_path / "download.pcapng"
+    capture.write_bytes(b"download")
+    rows = iter(
+        [
+            _timing_row(1, None, "download", retransmission=True),
+            _timing_row(2, 100.0, "download"),
+            _timing_row(3, 101.0, "download"),
+        ]
+    )
+    monkeypatch.setattr(
+        module, "stream_tshark_fields", lambda *args, **kwargs: rows
+    )
+
+    class ProgressRecorder:
+        def __init__(self) -> None:
+            self.events: list[tuple[str, int, int | None, str]] = []
+
+        def emit(
+            self, stage: str, current: int, total: int | None, message: str
+        ) -> None:
+            self.events.append((stage, current, total, message))
+
+    progress = ProgressRecorder()
+    database = tmp_path / "analysis.sqlite"
+
+    result = module.analyze_captures(
+        {"download": capture},
+        "download",
+        1,
+        database,
+        Path("tshark"),
+        8,
+        progress,
+    )
+
+    assert result.tcp_summary["timing"] == {
+        "available": True,
+        "complete": False,
+        "timed_packets": 2,
+        "untimed_packets": 1,
+    }
+    assert [interval["interval_start"] for interval in result.intervals] == [0.0, 1.0]
+    assert progress.events[-1][1:3] == (3, 3)
+    with sqlite3.connect(database) as connection:
+        event = connection.execute(
+            "SELECT frame_number, time_relative FROM events"
+        ).fetchone()
+    assert event == (1, None)
+
+
+def test_both_uses_first_timed_epoch_after_leading_untimed_packets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_script_module("tcp_extract.py", "task5_tcp_extract_both_late_epoch")
+    download_capture = tmp_path / "download.pcapng"
+    upload_capture = tmp_path / "upload.pcapng"
+    download_capture.write_bytes(b"download")
+    upload_capture.write_bytes(b"upload")
+    capture_rows = {
+        download_capture: [
+            _timing_row(1, None, "download"),
+            _timing_row(2, 90.0, "download"),
+            _timing_row(3, 91.0, "download"),
+        ],
+        upload_capture: [
+            _timing_row(1, 100.0, "upload"),
+            _timing_row(2, 101.0, "upload"),
+        ],
+    }
+
+    def rows(
+        tshark_path: Path,
+        capture: Path,
+        fields: list[str],
+        display_filter: str,
+    ):
+        yield from capture_rows[capture]
+
+    monkeypatch.setattr(module, "stream_tshark_fields", rows)
+
+    result = module.analyze_captures(
+        {"download": download_capture, "upload": upload_capture},
+        "both",
+        1,
+        None,
+        Path("tshark"),
+        16,
+    )
+
+    intervals = [
+        (interval["direction"], interval["interval_start"])
+        for interval in result.intervals
+    ]
+    assert intervals == [
+        ("download", 0.0),
+        ("download", 1.0),
+        ("upload", 10.0),
+        ("upload", 11.0),
+    ]
+    assert result.tcp_summary["timing"] == {
+        "available": True,
+        "complete": False,
+        "timed_packets": 4,
+        "untimed_packets": 1,
+    }
+
+
 @pytest.mark.parametrize(
     ("capture", "analysis_id", "target", "error_code"),
     [

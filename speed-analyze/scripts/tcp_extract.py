@@ -133,7 +133,7 @@ def analyze_captures(
     try:
         if store is not None:
             store.initialize()
-        streams: dict[str, tuple[dict[str, str], object]] = {}
+        streams: dict[str, tuple[dict[str, str], object, int]] = {}
         close_streams = []
         first_epochs: list[Decimal] = []
         for direction, capture in validated.items():
@@ -150,15 +150,36 @@ def analyze_captures(
             if close is not None:
                 close_streams.append(close)
             first_row = next(iterator, None)
-            if first_row is not None:
-                streams[direction] = (first_row, iterator)
+            count = 0
+            while first_row is not None:
                 first_epoch = _packet_epoch(first_row)
                 if first_epoch is not None:
+                    streams[direction] = (first_row, iterator, count)
                     first_epochs.append(first_epoch)
+                    break
+                normalized_row = dict(first_row)
+                normalized_row["frame.time_relative"] = ""
+                accumulator.observe(normalized_row, direction)
+                count += 1
+                if progress_writer is not None and count % 100_000 == 0:
+                    progress_writer.emit(
+                        "tcp_extract",
+                        count,
+                        None,
+                        f"Extracted {count} {direction} TCP packets",
+                    )
+                first_row = next(iterator, None)
+            else:
+                if progress_writer is not None:
+                    progress_writer.emit(
+                        "tcp_extract",
+                        count,
+                        count,
+                        f"Completed {direction} TCP extraction",
+                    )
 
         baseline = min(first_epochs) if first_epochs else None
-        for direction, (first_row, iterator) in streams.items():
-            count = 0
+        for direction, (first_row, iterator, count) in streams.items():
             for row in chain((first_row,), iterator):
                 normalized_row = dict(row)
                 epoch = _packet_epoch(row)
