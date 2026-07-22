@@ -3,24 +3,22 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from importlib.resources import files
 from typing import Any
 
 from pydantic import BaseModel, ValidationError
 
 from packetmaster.config import Settings
-from packetmaster.context import DiagnosisContext, sanitize_for_model
-from packetmaster.domain import HypothesisBatch, VerificationResult
+from packetmaster.context import DiagnosisContext, bounded_evidence
+from packetmaster.domain import EvidenceResponse, HypothesisBatch, VerificationResult
 from packetmaster.errors import AppError
-
-_PROMPT_ROOT = Path(__file__).resolve().parent / "prompts"
 
 
 class DiagnosisModel:
     def __init__(
         self, client: Any | None = None, settings: Settings | None = None
     ) -> None:
-        self.settings = settings or Settings.load()
+        self.settings = settings
         self._client = client
 
     def _client_or_error(self) -> Any:
@@ -35,24 +33,27 @@ class DiagnosisModel:
                 recoverable=False,
                 suggested_action="Install PacketMaster model dependencies.",
             ) from exc
+        settings = self.settings or Settings.load()
         api_key = (
-            self.settings.model_api_key.get_secret_value()
-            if self.settings.model_api_key is not None
+            settings.model_api_key.get_secret_value()
+            if settings.model_api_key is not None
             else None
         )
         self._client = ChatOpenAI(
-            model=self.settings.model_name,
-            base_url=self.settings.model_base_url,
+            model=settings.model_name,
+            base_url=settings.model_base_url,
             api_key=api_key,
-            timeout=self.settings.model_timeout_seconds,
+            timeout=settings.model_timeout_seconds,
         )
         return self._client
 
     @staticmethod
     def _prompt(name: str) -> str:
         try:
-            return (_PROMPT_ROOT / name).read_text(encoding="utf-8")
-        except OSError as exc:
+            return files("packetmaster").joinpath("prompts", name).read_text(
+                encoding="utf-8"
+            )
+        except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
             raise AppError(
                 code="MODEL_PROMPT_UNAVAILABLE",
                 message="PacketMaster diagnosis prompt is unavailable",
@@ -65,15 +66,21 @@ class DiagnosisModel:
         self, schema: type[BaseModel], prompt_name: str, payload: dict[str, Any]
     ) -> BaseModel:
         client = self._client_or_error()
+        serialized_payload = json.dumps(
+            payload, ensure_ascii=False, separators=(",", ":")
+        )
+        if len(serialized_payload) > 100_000:
+            raise AppError(
+                code="MODEL_CONTEXT_TOO_LARGE",
+                message="Bounded diagnosis context exceeds the model input limit",
+                recoverable=True,
+                suggested_action="Reduce evidence pages or hypothesis count.",
+            )
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self._prompt(prompt_name)},
             {
                 "role": "user",
-                "content": json.dumps(
-                    sanitize_for_model(payload),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ),
+                "content": serialized_payload,
             },
         ]
         try:
@@ -124,7 +131,7 @@ class DiagnosisModel:
         self,
         context: DiagnosisContext,
         hypotheses: HypothesisBatch,
-        evidence: list[Any],
+        evidence: list[EvidenceResponse],
     ) -> VerificationResult:
         result = await self._invoke(
             VerificationResult,
@@ -132,7 +139,7 @@ class DiagnosisModel:
             {
                 "diagnosis_context": context.model_dump(mode="json"),
                 "hypotheses": hypotheses.model_dump(mode="json"),
-                "additional_evidence": sanitize_for_model(evidence),
+                "additional_evidence": bounded_evidence(evidence),
             },
         )
         return VerificationResult.model_validate(result)

@@ -35,11 +35,15 @@ def _analysis(intervals: list[dict[str, object]]) -> AnalyzeResponse:
         flow_summary={
             "f-1": {
                 "direction": "download",
-                "bytes": 8_000_000,
-                "retransmissions": 3,
+                "payload_bytes": 8_000_000,
+                "retransmission_count": 3,
             }
         },
-        tcp_summary={"retransmissions": 3, "duplicate_acks": 2},
+        tcp_summary={
+            "payload_bytes": 8_000_000,
+            "retransmission_count": 3,
+            "duplicate_ack_count": 2,
+        },
         interval_summary=intervals,
         syn_options={"mss": {"1460": 1}, "sack_permitted": 1},
         available_evidence=["summary", "flows", "intervals", "events"],
@@ -62,13 +66,13 @@ def test_context_preserves_late_anomalies_and_compresses_normal_intervals() -> N
         {
             "interval_start": float(index),
             "direction": "download",
-            "bytes": 1000,
-            "retransmissions": 0,
+            "payload_bytes": 1000,
+            "retransmission_count": 0,
         }
         for index in range(100)
     ]
-    intervals[5]["retransmissions"] = 1
-    intervals[99]["zero_window"] = 1
+    intervals[5]["retransmission_count"] = 1
+    intervals[99]["zero_window_count"] = 1
     context = ContextBuilder(max_intervals=8).build(
         _analysis(intervals),
         [_evidence([])],
@@ -96,7 +100,8 @@ def test_context_contains_direction_bandwidth_and_full_coverage() -> None:
     assert context.bandwidth["achievement_ratio_pct"] == 62.5
     assert context.coverage["speed_packets_analyzed"] == 800
     assert context.coverage["complete"] is True
-    assert context.global_metrics["retransmissions"] == 3
+    assert context.global_metrics["retransmission_count"] == 3
+    assert context.global_metrics["payload_bytes"] == 8_000_000
     assert context.flow_metrics["f-1"]["direction"] == "download"
 
 
@@ -124,12 +129,59 @@ def test_context_recursively_excludes_payload_logs_and_secrets() -> None:
     )
     serialized = json.dumps(context.model_dump(mode="json"), ensure_ascii=False)
     lowered = serialized.lower()
-    assert "payload" not in lowered
+    assert "tcp.payload" not in lowered
+    assert '"payload"' not in lowered
+    assert "payload_bytes" in lowered
     assert "raw_secret" not in lowered
     assert "flow_secret" not in lowered
     assert "evidence_secret" not in lowered
     assert "key_secret" not in lowered
     assert "full.log" not in lowered
+
+
+def test_context_applies_global_evidence_bounds_and_keeps_late_pages() -> None:
+    responses = []
+    for layer in range(12):
+        responses.append(
+            EvidenceResponse(
+                analysis_id="context-1",
+                evidence_type=f"layer-{layer}",
+                items=[
+                    {
+                        "evidence_id": f"ev-{layer}-{index}",
+                        "event_type": "retransmission",
+                        "packet_data": "DROP_ME",
+                        "authorization": "DROP_ME_TOO",
+                    }
+                    for index in range(20)
+                ],
+                total=200,
+                next_offset=(layer + 1) * 20,
+                truncated=True,
+                source="analysis.sqlite",
+                coverage_range={"complete": False},
+            )
+        )
+    context = ContextBuilder(
+        max_evidence_layers=4, max_evidence_items=25
+    ).build(
+        _analysis([]),
+        responses,
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+    )
+    items = [
+        item
+        for layer in context.evidence_layers.values()
+        for item in layer["items"]
+    ]
+    serialized = json.dumps(context.model_dump(mode="json"))
+    assert len(context.evidence_layers) <= 4
+    assert len(items) <= 25
+    assert any(item["evidence_id"] == "ev-11-19" for item in items)
+    assert "packet_data" not in serialized
+    assert "authorization" not in serialized
+    assert len(serialized) < 100_000
 
 
 class FakeStructuredModel:
@@ -182,7 +234,19 @@ def test_diagnosis_model_uses_open_structured_output_without_network() -> None:
     )
 
     hypotheses = asyncio.run(model.generate_hypotheses(context))
-    verification = asyncio.run(model.verify(context, hypotheses, []))
+    verification_evidence = _evidence(
+        [
+            {
+                "evidence_id": "ev-safe",
+                "event_type": "retransmission",
+                "log_lines": "MODEL_LOG_SECRET",
+                "token": "MODEL_TOKEN_SECRET",
+            }
+        ]
+    )
+    verification = asyncio.run(
+        model.verify(context, hypotheses, [verification_evidence])
+    )
 
     assert hypotheses.hypotheses[0].cause == "应用层自适应限速策略"
     assert isinstance(verification, VerificationResult)
@@ -190,6 +254,8 @@ def test_diagnosis_model_uses_open_structured_output_without_network() -> None:
     assert verification.confidence is Confidence.LOW
     serialized_messages = json.dumps(fake.messages, ensure_ascii=False, default=str)
     assert "RAW_SECRET" not in serialized_messages
+    assert "MODEL_LOG_SECRET" not in serialized_messages
+    assert "MODEL_TOKEN_SECRET" not in serialized_messages
 
 
 def test_prompts_require_open_hypotheses_and_outside_capture_limits() -> None:
