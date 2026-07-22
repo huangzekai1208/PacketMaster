@@ -1,249 +1,435 @@
-"""
-测速分析流水线 - 串联筛选 + TCP 提取
+# ruff: noqa: E402
+"""Run the complete, streaming speed-analyze capture pipeline."""
 
-将 speed_filter_strip.py 和 tcp_extract.py 串成一个流水线，
-AI 只需一次 Bash 调用即可完成 Steps 2-3，无需轮询等待。
-
-用法：
-  python run_pipeline.py --input <pcapng> --target <download|upload|both> --output output
-  python run_pipeline.py --input <pcapng> --target download --output output --max-packets 5000
-
-输出：
-  output/<stem>_download.pcapng              筛选后的下载报文
-  output/<stem>_upload.pcapng                筛选后的上行报文
-  output/<stem>_speed_stats.json             测速流统计
-  output/<stem>_download_tcp_analysis.json   TCP 分析数据
-  output/log/<timestamp>_pipeline.log        运行日志
-"""
+from __future__ import annotations
 
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
-import time
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
-# Windows 下强制 stdout/stderr 使用 UTF-8，避免中文路径/日志的 GBK 编码错误
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_SRC = SCRIPT_DIR.parents[1] / "src"
+for import_path in (PROJECT_SRC, SCRIPT_DIR):
+    if str(import_path) not in sys.path:
+        sys.path.insert(0, str(import_path))
 
+from lib.aggregate import AggregationResult
+from lib.progress import ProgressWriter
+from lib.store import AnalysisStore
+from lib.tshark import find_tshark, normalize_capture
+from tcp_extract import analyze_captures
 
-# ============================================================
-# 日志
-# ============================================================
+from packetmaster.domain import Target
 
-def setup_logger(output_dir):
-    log_dir = os.path.join(output_dir, "log")
-    os.makedirs(log_dir, exist_ok=True)
-    _log_tmp = os.path.join(log_dir, "_running_pipeline.tmp")
-
-    # 简易 logger：同时写 stdout 和文件
-    class Logger:
-        def __init__(self, fh):
-            self._fh = fh
-
-        def info(self, msg):
-            print(msg, flush=True)
-            self._fh.write(msg + "\n")
-            self._fh.flush()
-
-        def error(self, msg):
-            print(f"[ERROR] {msg}", flush=True)
-            self._fh.write(f"[ERROR] {msg}\n")
-            self._fh.flush()
-
-    fh = open(_log_tmp, "w", encoding="utf-8")
-    return Logger(fh), _log_tmp
+ANALYSIS_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
-def close_logger(log_tmp_path):
-    log_dir = os.path.dirname(log_tmp_path)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    final_path = os.path.join(log_dir, f"{ts}_pipeline.log")
-    # 先关闭文件句柄再重命名
-    import io
-    if hasattr(log_tmp_path, 'close'):
-        pass  # 调用者负责关闭
-    if os.path.exists(log_tmp_path):
-        try:
-            os.rename(log_tmp_path, final_path)
-        except OSError:
-            pass
+@dataclass
+class PipelineError(Exception):
+    code: str
+    message: str
+    recoverable: bool = False
+    suggested_action: str = "Review the capture and pipeline parameters."
+    details: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "recoverable": self.recoverable,
+            "suggested_action": self.suggested_action,
+            "details": self.details or {},
+        }
 
 
-# ============================================================
-# 子进程运行（实时输出）
-# ============================================================
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
 
-def run_script(cmd, logger):
-    """运行子脚本，实时输出 stdout 到 logger。返回 exit code。"""
-    logger.info(f"  命令: {' '.join(cmd)}")
+
+def atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
+        with temporary.open("w", encoding="utf-8") as output:
+            json.dump(value, output, ensure_ascii=False, indent=2)
+            output.write("\n")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        with path.open(encoding="utf-8", errors="replace") as source:
+            value = json.load(source)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise PipelineError(
+            "INVALID_ANALYSIS_OUTPUT",
+            f"Could not read valid JSON output: {path.name}",
+            details={"artifact": str(path)},
+        ) from exc
+    if not isinstance(value, dict):
+        raise PipelineError(
+            "INVALID_ANALYSIS_OUTPUT",
+            f"Expected a JSON object: {path.name}",
+            details={"artifact": str(path)},
         )
-        for line in proc.stdout:
-            line = line.rstrip()
-            if line:
-                logger.info(f"  {line}")
-        proc.wait()
-        return proc.returncode
-    except FileNotFoundError:
-        logger.error(f"  脚本未找到: {cmd[0]}")
-        return 1
-    except Exception as e:
-        logger.error(f"  运行异常: {e}")
-        return 1
+    return value
 
 
-# ============================================================
-# 主流程
-# ============================================================
+def _validate_args(args: argparse.Namespace) -> tuple[Path, Path, Target]:
+    input_path = Path(args.input)
+    output_path = Path(args.output)
+    if not input_path.is_absolute():
+        raise PipelineError("INVALID_CAPTURE", "--input must be an absolute path")
+    if not input_path.is_file():
+        raise PipelineError("INVALID_CAPTURE", "--input must name an existing file")
+    if not output_path.is_absolute():
+        raise PipelineError("ANALYSIS_FAILED", "--output must be an absolute path")
+    try:
+        target = Target(args.target)
+    except ValueError as exc:
+        raise PipelineError(
+            "ANALYSIS_FAILED", "--target must be download, upload, or both"
+        ) from exc
+    if not ANALYSIS_ID_PATTERN.fullmatch(args.analysis_id):
+        raise PipelineError(
+            "ANALYSIS_FAILED",
+            "--analysis-id may contain only letters, digits, dot, underscore, "
+            "and hyphen",
+        )
+    if not 1 <= args.interval <= 60:
+        raise PipelineError("ANALYSIS_FAILED", "--interval must be between 1 and 60")
+    if not 0 <= args.min_ratio <= 1:
+        raise PipelineError("ANALYSIS_FAILED", "--min-ratio must be between 0 and 1")
+    if args.min_bytes < 0:
+        raise PipelineError("ANALYSIS_FAILED", "--min-bytes must be non-negative")
+    return input_path.resolve(), output_path, target
 
-def main():
-    parser = argparse.ArgumentParser(description="测速分析流水线（筛选 + TCP 提取）")
-    parser.add_argument("--input", required=True, help="输入 pcapng 文件路径")
-    parser.add_argument("--target", default="download",
-                        choices=["upload", "download", "both"],
-                        help="分析方向（默认: download）")
-    parser.add_argument("--output", default="output", help="输出目录（默认: output）")
-    parser.add_argument("--max-packets", type=int, default=5000,
-                        help="TCP 提取最大报文数（默认: 5000）")
-    parser.add_argument("--min-ratio", type=float, default=0.70,
-                        help="单向流量占比阈值（默认: 0.70）")
-    parser.add_argument("--min-bytes", type=int, default=102400,
-                        help="最小流量字节数（默认: 102400）")
-    args = parser.parse_args()
 
-    os.makedirs(args.output, exist_ok=True)
-    logger, log_tmp = setup_logger(args.output)
+def _tail(path: Path, limit: int = 8192) -> str:
+    try:
+        with path.open("rb") as source:
+            source.seek(0, os.SEEK_END)
+            size = source.tell()
+            source.seek(max(0, size - limit))
+            return source.read(limit).decode("utf-8", errors="replace")
+    except OSError:
+        return ""
 
-    input_stem = os.path.splitext(os.path.basename(args.input))[0]
-    script_dir = os.path.dirname(os.path.abspath(__file__))
 
-    logger.info("=" * 60)
-    logger.info("测速分析流水线启动")
-    logger.info(f"  输入: {args.input}")
-    logger.info(f"  方向: {args.target}")
-    logger.info(f"  输出: {args.output}")
-    logger.info("=" * 60)
-
-    # ============================================================
-    # Step 1: 测速流筛选
-    # ============================================================
-    logger.info("\n[Step 1/2] 运行测速流筛选 (speed_filter_strip.py)...")
-
-    filter_script = os.path.join(script_dir, "speed_filter_strip.py")
-    filter_cmd = [
-        sys.executable, filter_script,
-        "--input", args.input,
-        "--target", args.target,
-        "--output", args.output,
-        "--min-ratio", str(args.min_ratio),
-        "--min-bytes", str(args.min_bytes),
+def _run_filter(
+    input_path: Path,
+    target: Target,
+    filtered_dir: Path,
+    stats_path: Path,
+    progress_path: Path,
+    log_path: Path,
+    min_ratio: float,
+    min_bytes: int,
+) -> None:
+    command = [
+        sys.executable,
+        str(SCRIPT_DIR / "speed_filter_strip.py"),
+        "--input",
+        str(input_path),
+        "--target",
+        target.value,
+        "--output",
+        str(filtered_dir),
+        "--stats-output",
+        str(stats_path),
+        "--progress-path",
+        str(progress_path),
+        "--min-ratio",
+        str(min_ratio),
+        "--min-bytes",
+        str(min_bytes),
     ]
+    with log_path.open("w", encoding="utf-8", errors="replace") as log_file:
+        try:
+            completed = subprocess.run(
+                command,
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except OSError as exc:
+            raise PipelineError(
+                "ANALYSIS_FAILED", "Speed-flow filter could not start"
+            ) from exc
+    if completed.returncode == 0:
+        return
+    log_tail = _tail(log_path)
+    for code in ("NO_TCP_PACKETS", "NO_SPEED_FLOW", "INVALID_CAPTURE"):
+        if code in log_tail:
+            raise PipelineError(code, log_tail.strip().splitlines()[-1])
+    raise PipelineError(
+        "ANALYSIS_FAILED",
+        f"Speed-flow filter exited with code {completed.returncode}",
+        details={"log": str(log_path)},
+    )
 
-    rc = run_script(filter_cmd, logger)
-    if rc != 0:
-        logger.error(f"测速流筛选失败 (exit code {rc})，流水线中止。")
-        close_logger(log_tmp)
-        sys.exit(1)
 
-    stats_json = os.path.join(args.output, f"{input_stem}_speed_stats.json")
-    if not os.path.exists(stats_json):
-        logger.error(f"未找到统计文件: {stats_json}，流水线中止。")
-        close_logger(log_tmp)
-        sys.exit(1)
+def _merge_coverage(
+    result: AggregationResult, stats: dict[str, Any], input_size_bytes: int
+) -> AggregationResult:
+    try:
+        total_packets = int(stats["total_packets"])
+        total_tcp_packets = int(stats["total_tcp_packets"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PipelineError(
+            "INVALID_ANALYSIS_OUTPUT", "speed_stats.json is missing packet coverage"
+        ) from exc
+    coverage = result.coverage_summary.model_copy(
+        update={
+            "input_size_bytes": input_size_bytes,
+            "total_packets_seen": total_packets,
+            "tcp_packets_seen": total_tcp_packets,
+            "complete": True,
+            "truncated": False,
+            "truncation_reason": None,
+        }
+    )
+    return AggregationResult(
+        coverage_summary=coverage,
+        tcp_summary=result.tcp_summary,
+        flows=result.flows,
+        intervals=result.intervals,
+        events=result.events,
+        syn_options=result.syn_options,
+    )
 
-    logger.info("[Step 1/2] 测速流筛选完成。")
 
-    # ============================================================
-    # 读取 speed_stats.json，确定端口和 pcapng 路径
-    # ============================================================
-    with open(stats_json, "r", encoding="utf-8") as f:
-        stats = json.load(f)
+def _artifact_paths(output: Path) -> dict[str, Any]:
+    return {
+        "manifest": str((output / "manifest.json").resolve()),
+        "coverage": str((output / "coverage.json").resolve()),
+        "speed_stats": str((output / "speed_stats.json").resolve()),
+        "tcp_analysis": str((output / "tcp_analysis.json").resolve()),
+        "progress": str((output / "progress.jsonl").resolve()),
+        "logs": {"filter": str((output / "logs" / "filter.log").resolve())},
+        "filtered_captures": {},
+    }
 
-    download_count = stats.get("download_flows_count", 0)
-    upload_count = stats.get("upload_flows_count", 0)
-    logger.info(f"  下载流: {download_count} 条，上行流: {upload_count} 条")
 
-    # 从测速流中提取端口号
-    speed_flows = stats.get("speed_flows", [])
-    ports = set()
-    for flow in speed_flows:
-        ports.add(flow.get("dport"))
-        ports.add(flow.get("sport"))
-    # 过滤掉 None 和非数值端口
-    ports = sorted([p for p in ports if isinstance(p, int)])
+def run(args: argparse.Namespace) -> int:
+    started_at = _now()
+    output = Path(args.output)
+    manifest_path = (
+        output / "manifest.json"
+        if output.is_absolute()
+        else output.resolve() / "manifest.json"
+    )
+    manifest: dict[str, Any] = {
+        "analysis_id": args.analysis_id,
+        "status": "failed",
+        "target": args.target,
+        "input_path": args.input,
+        "normalized_capture_path": None,
+        "coverage_summary": {},
+        "artifact_paths": _artifact_paths(manifest_path.parent),
+        "available_evidence": [],
+        "warnings": [],
+        "error": None,
+        "started_at": started_at,
+        "completed_at": None,
+    }
+    try:
+        input_path, output, target = _validate_args(args)
+        output.mkdir(parents=True, exist_ok=True)
+        filtered_dir = output / "filtered"
+        logs_dir = output / "logs"
+        normalized_dir = output / "normalized"
+        filtered_dir.mkdir(exist_ok=True)
+        logs_dir.mkdir(exist_ok=True)
+        manifest_path = output / "manifest.json"
+        manifest["artifact_paths"] = _artifact_paths(output)
+        manifest["input_path"] = str(input_path)
+        manifest["target"] = target.value
 
-    # 确定需要 TCP 分析的方向和对应 pcapng
-    targets = []
-    if args.target in ("download", "both") and download_count > 0:
-        pcap_path = os.path.join(args.output, f"{input_stem}_download.pcapng")
-        if os.path.exists(pcap_path):
-            targets.append(("download", pcap_path))
-    if args.target in ("upload", "both") and upload_count > 0:
-        pcap_path = os.path.join(args.output, f"{input_stem}_upload.pcapng")
-        if os.path.exists(pcap_path):
-            targets.append(("upload", pcap_path))
+        progress_path = output / "progress.jsonl"
+        progress = ProgressWriter(progress_path)
+        progress.emit("validate", 1, 1, "Inputs validated")
+        try:
+            tshark_path = find_tshark(args.tshark_path)
+        except RuntimeError as exc:
+            raise PipelineError(
+                "DEPENDENCY_UNAVAILABLE",
+                "TShark executable was not found",
+                recoverable=True,
+                suggested_action="Install Wireshark/TShark or pass --tshark-path.",
+            ) from exc
+        progress.emit("normalize", 0, 1, "Normalizing capture")
+        try:
+            normalized = normalize_capture(input_path, normalized_dir, tshark_path)
+        except RuntimeError as exc:
+            code = (
+                "INVALID_CAPTURE"
+                if str(exc).startswith("INVALID_CAPTURE")
+                else "ANALYSIS_FAILED"
+            )
+            raise PipelineError(code, str(exc).split(":", 1)[-1].strip()) from exc
+        manifest["normalized_capture_path"] = str(normalized)
+        progress.emit("normalize", 1, 1, "Capture normalized")
 
-    if not targets:
-        logger.error("未找到任何可分析的测速流 pcapng 文件，流水线中止。")
-        close_logger(log_tmp)
-        sys.exit(1)
+        stats_path = output / "speed_stats.json"
+        filter_log = logs_dir / "filter.log"
+        _run_filter(
+            normalized,
+            target,
+            filtered_dir,
+            stats_path,
+            progress_path,
+            filter_log,
+            args.min_ratio,
+            args.min_bytes,
+        )
+        stats = read_json_object(stats_path)
+        filtered_value = stats.get("filtered_files")
+        if not isinstance(filtered_value, dict):
+            raise PipelineError(
+                "INVALID_ANALYSIS_OUTPUT",
+                "speed_stats.json has no filtered_files object",
+            )
+        captures: dict[str, Path] = {}
+        for direction, value in filtered_value.items():
+            if direction not in {"download", "upload"} or not isinstance(value, str):
+                raise PipelineError(
+                    "INVALID_ANALYSIS_OUTPUT",
+                    "speed_stats.json has invalid filtered files",
+                )
+            capture = Path(value)
+            if not capture.is_file():
+                raise PipelineError(
+                    "INVALID_ANALYSIS_OUTPUT",
+                    f"Filtered capture is missing: {direction}",
+                )
+            captures[direction] = capture.resolve()
+        requested = (
+            {target.value} if target is not Target.BOTH else {"download", "upload"}
+        )
+        if not captures or not set(captures).issubset(requested):
+            raise PipelineError(
+                "NO_SPEED_FLOW", "No requested speed-flow capture exists"
+            )
+        if target is not Target.BOTH and set(captures) != requested:
+            raise PipelineError("NO_SPEED_FLOW", f"No {target.value} speed flow exists")
+        status = "completed"
+        if target is Target.BOTH and set(captures) != requested:
+            missing = sorted(requested - set(captures))
+            status = "partial"
+            manifest["warnings"].append(
+                f"No matching {'/'.join(missing)} speed flow was found."
+            )
 
-    # ============================================================
-    # Step 2: TCP 字段提取（每个方向各跑一次）
-    # ============================================================
-    extract_script = os.path.join(script_dir, "tcp_extract.py")
+        database_path = (
+            output / "analysis.sqlite" if args.build_evidence_index else None
+        )
+        result = analyze_captures(
+            captures,
+            target,
+            args.interval,
+            database_path,
+            tshark_path,
+            int(stats.get("input_size_bytes", input_path.stat().st_size)),
+            progress,
+        )
+        result = _merge_coverage(
+            result, stats, int(stats.get("input_size_bytes", input_path.stat().st_size))
+        )
+        if database_path is not None:
+            with AnalysisStore(database_path) as store:
+                store.initialize()
+                store.write_result(result)
 
-    for direction, pcap_path in targets:
-        logger.info(f"\n[Step 2/2] 运行 TCP 字段提取 ({direction}) (tcp_extract.py)...")
+        summary = result.to_summary_dict()
+        coverage = result.coverage_summary.model_dump(mode="json")
+        private_field_markers = (
+            "tcp." + "payload",
+            "per_packet" + "_fields",
+            "Pay" + "load",
+        )
+        if any(marker in json.dumps(summary) for marker in private_field_markers):
+            raise PipelineError(
+                "INVALID_ANALYSIS_OUTPUT", "TCP summary contains packet payload fields"
+            )
+        atomic_write_json(output / "tcp_analysis.json", summary)
+        atomic_write_json(output / "coverage.json", coverage)
 
-        for port in ports:
-            extract_cmd = [
-                sys.executable, extract_script,
-                "--input", pcap_path,
-                "--port", str(port),
-                "--output", args.output,
-                "--max-packets", str(args.max_packets),
-                "--stats", stats_json,
-            ]
+        artifacts = manifest["artifact_paths"]
+        artifacts["filtered_captures"] = {
+            direction: str(path) for direction, path in captures.items()
+        }
+        if database_path is not None:
+            artifacts["analysis_db"] = str(database_path.resolve())
+        manifest["status"] = status
+        manifest["coverage_summary"] = coverage
+        manifest["available_evidence"] = ["summary", "flows", "intervals"]
+        if database_path is not None:
+            manifest["available_evidence"].append("events")
+        manifest["error"] = None
+        progress.emit("complete", 1, 1, f"Analysis {status}")
+        return_code = 0
+    except PipelineError as exc:
+        manifest["error"] = exc.to_dict()
+        return_code = 1
+    except Exception as exc:
+        manifest["error"] = PipelineError(
+            "ANALYSIS_FAILED", str(exc) or exc.__class__.__name__
+        ).to_dict()
+        return_code = 1
+    finally:
+        manifest["completed_at"] = _now()
+        try:
+            atomic_write_json(manifest_path, manifest)
+        except OSError:
+            return_code = 1
+    return return_code
 
-            rc = run_script(extract_cmd, logger)
-            if rc != 0:
-                logger.error(f"TCP 提取失败 (方向={direction}, 端口={port}, exit code {rc})，跳过。")
-                continue
 
-            # tcp_extract.py 输出文件名: {stem}_tcp_analysis.json
-            # 只需第一个端口的结果即可（同一方向所有端口属于同一次测速）
-            logger.info(f"[Step 2/2] TCP 字段提取 ({direction}) 完成。")
-            break  # 同方向只需分析一个端口
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run full streaming speed analysis")
+    parser.add_argument(
+        "--input", required=True, help="Absolute pcap/pcapng input path"
+    )
+    parser.add_argument(
+        "--target", default="download", help="download, upload, or both"
+    )
+    parser.add_argument(
+        "--output", required=True, help="Absolute analysis output directory"
+    )
+    parser.add_argument(
+        "--analysis-id", required=True, help="Stable analysis identifier"
+    )
+    parser.add_argument(
+        "--interval", type=int, default=1, help="Interval seconds (1..60)"
+    )
+    parser.add_argument(
+        "--build-evidence-index",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Build analysis.sqlite evidence index (default: enabled)",
+    )
+    parser.add_argument("--tshark-path", help="Optional explicit TShark executable")
+    parser.add_argument("--min-ratio", type=float, default=0.70)
+    parser.add_argument("--min-bytes", type=int, default=100 * 1024)
+    return parser
 
-    # ============================================================
-    # 完成
-    # ============================================================
-    logger.info("\n" + "=" * 60)
-    logger.info("流水线处理完成！输出文件：")
 
-    for f in os.listdir(args.output):
-        fpath = os.path.join(args.output, f)
-        if os.path.isfile(fpath) and not f.startswith("_"):
-            size_mb = os.path.getsize(fpath) / (1024 * 1024)
-            logger.info(f"  {f} ({size_mb:.1f} MB)")
-
-    logger.info("=" * 60)
-
-    close_logger(log_tmp)
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return run(args)
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
