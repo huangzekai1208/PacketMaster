@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from packetmaster.artifacts import ArtifactManager, create_request_id
+from packetmaster.domain import Target
 from packetmaster.errors import AppError
 
 DiskUsage = namedtuple("DiskUsage", ["total", "used", "free"])
@@ -28,7 +29,8 @@ def test_create_makes_isolated_task_directories(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "request_id", ["../escape", "nested/path", r"nested\\path", "bad id"]
+    "request_id",
+    [".", "..", "../escape", "nested/path", r"nested\\path", "bad id"],
 )
 def test_create_rejects_path_traversal_and_invalid_request_ids(
     tmp_path: Path, request_id: str
@@ -37,6 +39,30 @@ def test_create_rejects_path_traversal_and_invalid_request_ids(
 
     with pytest.raises(ValueError):
         manager.create(request_id)
+
+
+@pytest.mark.parametrize("target", [Target.DOWNLOAD, "upload", Target.BOTH])
+def test_preflight_accepts_supported_targets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: Target | str
+) -> None:
+    input_path = tmp_path / "capture.pcap"
+    input_path.write_bytes(b"x")
+    manager = ArtifactManager(tmp_path / "output", ttl_hours=24)
+    monkeypatch.setattr(
+        "packetmaster.artifacts.shutil.disk_usage",
+        lambda path: DiskUsage(2 * 1024**3, 0, 2 * 1024**3),
+    )
+
+    assert manager.preflight(input_path, target).input_size_bytes == 1
+
+
+def test_preflight_rejects_unsupported_target(tmp_path: Path) -> None:
+    input_path = tmp_path / "capture.pcap"
+    input_path.write_bytes(b"x")
+    manager = ArtifactManager(tmp_path / "output", ttl_hours=24)
+
+    with pytest.raises(ValueError, match="target"):
+        manager.preflight(input_path, "sideways")
 
 
 def test_preflight_returns_exact_resource_budget(

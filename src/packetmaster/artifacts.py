@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from packetmaster.domain import Target
 from packetmaster.errors import AppError
 
 _REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -42,10 +43,12 @@ class ArtifactManager:
         self.ttl_hours = ttl_hours
 
     def create(self, request_id: str) -> ArtifactPaths:
-        if not _REQUEST_ID_PATTERN.fullmatch(request_id):
+        if not _REQUEST_ID_PATTERN.fullmatch(request_id) or not request_id.strip("."):
             raise ValueError("request_id contains unsupported characters")
 
-        task_root = self.root / request_id
+        task_root = (self.root / request_id).resolve()
+        if not task_root.is_relative_to(self.root):
+            raise ValueError("request_id must resolve inside the artifact root")
         filtered_dir = task_root / "filtered"
         logs_dir = task_root / "logs"
         filtered_dir.mkdir(parents=True, exist_ok=True)
@@ -62,7 +65,12 @@ class ArtifactManager:
             trace_jsonl=task_root / "trace.jsonl",
         )
 
-    def preflight(self, input_path: Path, target: str) -> ResourceBudget:
+    def preflight(self, input_path: Path, target: Target | str) -> ResourceBudget:
+        try:
+            validated_target = Target(target)
+        except ValueError as error:
+            raise ValueError(f"unsupported target: {target}") from error
+
         if not input_path.exists():
             raise FileNotFoundError(input_path)
         if not input_path.is_file():
@@ -84,7 +92,7 @@ class ArtifactManager:
                 details={
                     "required": required,
                     "available": available,
-                    "target": target,
+                    "target": validated_target.value,
                 },
             )
         return budget
