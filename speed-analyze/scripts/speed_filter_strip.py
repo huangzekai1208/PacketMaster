@@ -13,8 +13,7 @@ from collections import defaultdict
 from contextlib import ExitStack
 from pathlib import Path
 
-from scapy.all import IP, TCP, Ether, IPv6, RawPcapReader
-from scapy.error import Scapy_Exception
+from scapy.all import IP, TCP, Ether, IPv6
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -25,6 +24,8 @@ from lib.progress import ProgressWriter
 EPB_TYPE = 0x00000006
 SHB_TYPE = 0x0A0D0D0A
 IDB_TYPE = 0x00000001
+PACKET_BLOCK_TYPE = 0x00000002
+SPB_TYPE = 0x00000003
 
 
 def parse_packet(raw_bytes: bytes):
@@ -60,47 +61,58 @@ def _scan_capture(
     dict[tuple[object, ...], list[int]],
     dict[tuple[object, ...], list[tuple[object, ...] | None]],
     dict[tuple[object, ...], tuple[object, ...]],
+    int,
+    str,
 ]:
     total_packets = 0
     total_tcp_packets = 0
     flow_bytes: dict[tuple[object, ...], list[int]] = defaultdict(lambda: [0, 0])
     flow_directions: dict[tuple[object, ...], list[tuple[object, ...] | None]] = {}
     flow_clients: dict[tuple[object, ...], tuple[object, ...]] = {}
+    input_size = 0
+    digest = hashlib.sha256()
+    progress.emit("fingerprint", 0, capture.stat().st_size, "Fingerprinting capture")
     progress.emit("filter_scan", 0, None, "Scanning capture flows")
     try:
-        with RawPcapReader(str(capture)) as reader:
-            for raw_bytes, metadata in reader:
-                total_packets += 1
-                packet = parse_packet(raw_bytes)
-                key = flow_key(packet) if packet is not None else None
-                direction = packet_direction(packet) if packet is not None else None
-                if key is None or direction is None:
-                    continue
-                total_tcp_packets += 1
-                directions = flow_directions.setdefault(key, [direction, None])
-                if direction == directions[0]:
-                    index = 0
-                elif directions[1] is None:
-                    directions[1] = direction
-                    index = 1
-                elif direction == directions[1]:
-                    index = 1
-                else:
-                    index = 0
-                wire_length = int(getattr(metadata, "wirelen", len(raw_bytes)))
-                flow_bytes[key][index] += wire_length
-                tcp = packet.getlayer(TCP)
-                if tcp.flags & 0x02 and not tcp.flags & 0x10:
-                    flow_clients.setdefault(key, direction)
-                if total_packets % 100_000 == 0:
-                    progress.emit(
-                        "filter_scan",
-                        total_packets,
-                        None,
-                        f"Scanned {total_packets} packets",
-                    )
-    except (OSError, Scapy_Exception) as exc:
+        for endian, block_type, block in _read_blocks(capture):
+            digest.update(block)
+            input_size += len(block)
+            if block_type not in {EPB_TYPE, PACKET_BLOCK_TYPE, SPB_TYPE}:
+                continue
+            raw_bytes, _, wire_length = _packet_block_data(
+                block_type, block, endian
+            )
+            total_packets += 1
+            packet = parse_packet(raw_bytes)
+            key = flow_key(packet) if packet is not None else None
+            direction = packet_direction(packet) if packet is not None else None
+            if key is None or direction is None:
+                continue
+            total_tcp_packets += 1
+            directions = flow_directions.setdefault(key, [direction, None])
+            if direction == directions[0]:
+                index = 0
+            elif directions[1] is None:
+                directions[1] = direction
+                index = 1
+            elif direction == directions[1]:
+                index = 1
+            else:
+                index = 0
+            flow_bytes[key][index] += wire_length
+            tcp = packet.getlayer(TCP)
+            if tcp.flags & 0x02 and not tcp.flags & 0x10:
+                flow_clients.setdefault(key, direction)
+            if total_packets % 100_000 == 0:
+                progress.emit(
+                    "filter_scan",
+                    total_packets,
+                    None,
+                    f"Scanned {total_packets} packets",
+                )
+    except OSError as exc:
         raise RuntimeError(f"INVALID_CAPTURE: unable to read capture: {exc}") from exc
+    progress.emit("fingerprint", input_size, input_size, "Fingerprint completed")
     progress.emit("filter_scan", total_packets, total_packets, "Capture scan completed")
     return (
         total_packets,
@@ -108,6 +120,8 @@ def _scan_capture(
         flow_bytes,
         flow_directions,
         flow_clients,
+        input_size,
+        digest.hexdigest(),
     )
 
 
@@ -202,6 +216,25 @@ def _packet_from_epb(block: bytes, endian: str) -> tuple[bytes, int]:
     return block[28:end], captured_length
 
 
+def _packet_from_spb(block: bytes, endian: str) -> tuple[bytes, int, int]:
+    if len(block) < 16:
+        raise RuntimeError("INVALID_CAPTURE: invalid simple packet block")
+    original_length = struct.unpack(f"{endian}I", block[8:12])[0]
+    available_length = len(block) - 16
+    captured_length = min(original_length, available_length)
+    return block[12 : 12 + captured_length], captured_length, original_length
+
+
+def _packet_block_data(
+    block_type: int, block: bytes, endian: str
+) -> tuple[bytes, int, int]:
+    if block_type == SPB_TYPE:
+        return _packet_from_spb(block, endian)
+    packet_data, captured_length = _packet_from_epb(block, endian)
+    original_length = struct.unpack(f"{endian}I", block[24:28])[0]
+    return packet_data, captured_length, original_length
+
+
 def _strip_payload(
     block: bytes, packet_data: bytes, captured_length: int, endian: str
 ) -> bytes:
@@ -238,17 +271,43 @@ def _strip_payload(
     return bytes(rebuilt)
 
 
+def _strip_spb_payload(
+    block: bytes, packet_data: bytes, captured_length: int, endian: str
+) -> bytes:
+    stripped_epb = _strip_payload(
+        b"\x06\x00\x00\x00"
+        + struct.pack(f"{endian}I", 32 + captured_length)
+        + (b"\x00" * 12)
+        + struct.pack(f"{endian}II", captured_length, captured_length)
+        + packet_data
+        + (b"\x00" * ((4 - captured_length % 4) % 4))
+        + struct.pack(
+            f"{endian}I", 32 + captured_length + ((4 - captured_length % 4) % 4)
+        ),
+        packet_data,
+        captured_length,
+        endian,
+    )
+    new_captured_length = struct.unpack(f"{endian}I", stripped_epb[20:24])[0]
+    new_packet = stripped_epb[28 : 28 + new_captured_length]
+    padding = b"\x00" * ((4 - new_captured_length % 4) % 4)
+    new_block_length = 16 + new_captured_length + len(padding)
+    return (
+        struct.pack(f"{endian}III", SPB_TYPE, new_block_length, new_captured_length)
+        + new_packet
+        + padding
+        + struct.pack(f"{endian}I", new_block_length)
+    )
+
+
 def _write_filtered(
     capture: Path,
     output_files: dict[str, Path],
     classified: dict[str, set[tuple[object, ...]]],
     strip_payload: bool,
     progress: ProgressWriter,
-) -> tuple[dict[str, int], str, int]:
+) -> dict[str, int]:
     counts = {direction: 0 for direction in output_files}
-    digest = hashlib.sha256()
-    input_size = 0
-    progress.emit("fingerprint", 0, capture.stat().st_size, "Fingerprinting capture")
     progress.emit("filter_write", 0, None, "Writing filtered captures")
     with ExitStack() as stack:
         destinations = {
@@ -256,14 +315,14 @@ def _write_filtered(
             for direction, path in output_files.items()
         }
         for endian, block_type, block in _read_blocks(capture):
-            digest.update(block)
-            input_size += len(block)
             if block_type in {SHB_TYPE, IDB_TYPE}:
                 for destination in destinations.values():
                     destination.write(block)
                 continue
-            if block_type == EPB_TYPE:
-                packet_data, captured_length = _packet_from_epb(block, endian)
+            if block_type in {EPB_TYPE, PACKET_BLOCK_TYPE, SPB_TYPE}:
+                packet_data, captured_length, _ = _packet_block_data(
+                    block_type, block, endian
+                )
                 packet = parse_packet(packet_data)
                 key = flow_key(packet) if packet is not None else None
                 if key is None:
@@ -271,23 +330,29 @@ def _write_filtered(
                 for direction, destination in destinations.items():
                     if key not in classified[direction]:
                         continue
-                    destination.write(
-                        _strip_payload(block, packet_data, captured_length, endian)
-                        if strip_payload
-                        else block
-                    )
+                    filtered_block = block
+                    if strip_payload:
+                        filtered_block = (
+                            _strip_spb_payload(
+                                block, packet_data, captured_length, endian
+                            )
+                            if block_type == SPB_TYPE
+                            else _strip_payload(
+                                block, packet_data, captured_length, endian
+                            )
+                        )
+                    destination.write(filtered_block)
                     counts[direction] += 1
                 continue
             for destination in destinations.values():
                 destination.write(block)
-    progress.emit("fingerprint", input_size, input_size, "Fingerprint completed")
     progress.emit(
         "filter_write",
         sum(counts.values()),
         sum(counts.values()),
         "Filtering completed",
     )
-    return counts, digest.hexdigest(), input_size
+    return counts
 
 
 def _atomic_write_json(path: Path, value: dict[str, object]) -> None:
@@ -315,6 +380,8 @@ def filter_capture(args: argparse.Namespace) -> dict[str, object]:
         flow_bytes,
         flow_directions,
         flow_clients,
+        input_size,
+        sha256,
     ) = _scan_capture(capture, progress)
     if total_tcp_packets == 0:
         raise RuntimeError("NO_TCP_PACKETS: capture contains no TCP packets")
@@ -335,7 +402,7 @@ def filter_capture(args: argparse.Namespace) -> dict[str, object]:
         direction: (output_directory / f"{capture.stem}_{direction}.pcapng").resolve()
         for direction in available
     }
-    written_counts, sha256, input_size = _write_filtered(
+    written_counts = _write_filtered(
         capture, output_files, classified, args.strip, progress
     )
     summary: dict[str, object] = {

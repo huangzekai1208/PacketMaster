@@ -23,7 +23,7 @@ for import_path in (PROJECT_SRC, SCRIPT_DIR):
 from lib.aggregate import AggregationResult
 from lib.progress import ProgressWriter
 from lib.store import AnalysisStore
-from lib.tshark import find_tshark, normalize_capture
+from lib.tshark import _terminate_process, find_tshark, normalize_capture
 from tcp_extract import analyze_captures
 
 from packetmaster.domain import Target
@@ -47,6 +47,15 @@ class PipelineError(Exception):
             "suggested_action": self.suggested_action,
             "details": self.details or {},
         }
+
+
+@dataclass(frozen=True)
+class SpeedStats:
+    input_size_bytes: int
+    total_packets: int
+    total_tcp_packets: int
+    filtered_files: dict[str, Path]
+    written_counts: dict[str, int]
 
 
 def _now() -> str:
@@ -82,6 +91,110 @@ def read_json_object(path: Path) -> dict[str, Any]:
             details={"artifact": str(path)},
         )
     return value
+
+
+def _stats_error(message: str) -> PipelineError:
+    return PipelineError(
+        "INVALID_ANALYSIS_OUTPUT", f"Invalid speed_stats.json: {message}"
+    )
+
+
+def _stats_non_negative_int(stats: dict[str, Any], name: str) -> int:
+    value = stats.get(name)
+    if type(value) is not int or value < 0:
+        raise _stats_error(f"{name} must be a non-negative integer")
+    return value
+
+
+def _validate_speed_stats(
+    stats: dict[str, Any], normalized_capture: Path, target: Target
+) -> SpeedStats:
+    if stats.get("status") != "completed":
+        raise _stats_error("status must be completed")
+    input_file = stats.get("input_file")
+    if not isinstance(input_file, str) or not input_file:
+        raise _stats_error("input_file must be a path string")
+    try:
+        if Path(input_file).resolve() != normalized_capture.resolve():
+            raise _stats_error("input_file does not match the normalized capture")
+    except OSError as exc:
+        raise _stats_error("input_file is invalid") from exc
+
+    input_size_bytes = _stats_non_negative_int(stats, "input_size_bytes")
+    if input_size_bytes != normalized_capture.stat().st_size:
+        raise _stats_error("input_size_bytes does not match the normalized capture")
+    sha256 = stats.get("sha256")
+    if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-f]{64}", sha256) is None:
+        raise _stats_error("sha256 must be 64 lowercase hexadecimal characters")
+
+    total_packets = _stats_non_negative_int(stats, "total_packets")
+    total_tcp_packets = _stats_non_negative_int(stats, "total_tcp_packets")
+    total_flows = _stats_non_negative_int(stats, "total_flows")
+    speed_flows_count = _stats_non_negative_int(stats, "speed_flows_count")
+    download_flows_count = _stats_non_negative_int(stats, "download_flows_count")
+    upload_flows_count = _stats_non_negative_int(stats, "upload_flows_count")
+    _stats_non_negative_int(stats, "min_bytes")
+    if total_tcp_packets > total_packets:
+        raise _stats_error("total_tcp_packets must not exceed total_packets")
+    if speed_flows_count > total_flows:
+        raise _stats_error("speed_flows_count must not exceed total_flows")
+    if speed_flows_count != download_flows_count + upload_flows_count:
+        raise _stats_error("direction flow counts must equal speed_flows_count")
+
+    min_ratio = stats.get("min_direction_ratio")
+    if (
+        isinstance(min_ratio, bool)
+        or not isinstance(min_ratio, int | float)
+        or not 0 <= min_ratio <= 1
+    ):
+        raise _stats_error("min_direction_ratio must be between 0 and 1")
+    if type(stats.get("enable_strip")) is not bool:
+        raise _stats_error("enable_strip must be boolean")
+    if stats.get("target") != target.value:
+        raise _stats_error("target does not match the pipeline target")
+    speed_flows = stats.get("speed_flows")
+    if not isinstance(speed_flows, list) or not all(
+        isinstance(flow, dict) for flow in speed_flows
+    ):
+        raise _stats_error("speed_flows must be a list of objects")
+
+    filtered_value = stats.get("filtered_files")
+    written_value = stats.get("written_counts")
+    if not isinstance(filtered_value, dict) or not isinstance(written_value, dict):
+        raise _stats_error("filtered_files and written_counts must be objects")
+    allowed = {"download", "upload"}
+    if not filtered_value or set(filtered_value) - allowed:
+        raise _stats_error("filtered_files has invalid direction keys")
+    if set(written_value) != set(filtered_value):
+        raise _stats_error("written_counts must match filtered_files directions")
+    filtered_files: dict[str, Path] = {}
+    written_counts: dict[str, int] = {}
+    for direction, path_value in filtered_value.items():
+        if not isinstance(path_value, str) or not Path(path_value).is_absolute():
+            raise _stats_error(f"filtered_files.{direction} must be an absolute path")
+        filtered_files[direction] = Path(path_value).resolve()
+        count = written_value[direction]
+        if type(count) is not int or count < 0:
+            raise _stats_error(
+                f"written_counts.{direction} must be a non-negative integer"
+            )
+        written_counts[direction] = count
+    if sum(written_counts.values()) > total_tcp_packets:
+        raise _stats_error("written_counts must not exceed total_tcp_packets")
+
+    requested = {target.value} if target is not Target.BOTH else allowed
+    if not set(filtered_files).issubset(requested):
+        raise _stats_error("filtered_files contains an unrequested direction")
+    if target is not Target.BOTH and set(filtered_files) != requested:
+        raise _stats_error("filtered_files is missing the requested direction")
+
+    return SpeedStats(
+        input_size_bytes=input_size_bytes,
+        total_packets=total_packets,
+        total_tcp_packets=total_tcp_packets,
+        filtered_files=filtered_files,
+        written_counts=written_counts,
+    )
 
 
 def _validate_args(args: argparse.Namespace) -> tuple[Path, Path, Target]:
@@ -155,7 +268,7 @@ def _run_filter(
     ]
     with log_path.open("w", encoding="utf-8", errors="replace") as log_file:
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
@@ -167,7 +280,12 @@ def _run_filter(
             raise PipelineError(
                 "ANALYSIS_FAILED", "Speed-flow filter could not start"
             ) from exc
-    if completed.returncode == 0:
+        try:
+            returncode = process.wait()
+        except BaseException:
+            _terminate_process(process)
+            raise
+    if returncode == 0:
         return
     log_tail = _tail(log_path)
     for code in ("NO_TCP_PACKETS", "NO_SPEED_FLOW", "INVALID_CAPTURE"):
@@ -175,26 +293,19 @@ def _run_filter(
             raise PipelineError(code, log_tail.strip().splitlines()[-1])
     raise PipelineError(
         "ANALYSIS_FAILED",
-        f"Speed-flow filter exited with code {completed.returncode}",
+        f"Speed-flow filter exited with code {returncode}",
         details={"log": str(log_path)},
     )
 
 
 def _merge_coverage(
-    result: AggregationResult, stats: dict[str, Any], input_size_bytes: int
+    result: AggregationResult, stats: SpeedStats
 ) -> AggregationResult:
-    try:
-        total_packets = int(stats["total_packets"])
-        total_tcp_packets = int(stats["total_tcp_packets"])
-    except (KeyError, TypeError, ValueError) as exc:
-        raise PipelineError(
-            "INVALID_ANALYSIS_OUTPUT", "speed_stats.json is missing packet coverage"
-        ) from exc
     coverage = result.coverage_summary.model_copy(
         update={
-            "input_size_bytes": input_size_bytes,
-            "total_packets_seen": total_packets,
-            "tcp_packets_seen": total_tcp_packets,
+            "input_size_bytes": stats.input_size_bytes,
+            "total_packets_seen": stats.total_packets,
+            "tcp_packets_seen": stats.total_tcp_packets,
             "complete": True,
             "truncated": False,
             "truncation_reason": None,
@@ -294,21 +405,11 @@ def run(args: argparse.Namespace) -> int:
             args.min_ratio,
             args.min_bytes,
         )
-        stats = read_json_object(stats_path)
-        filtered_value = stats.get("filtered_files")
-        if not isinstance(filtered_value, dict):
-            raise PipelineError(
-                "INVALID_ANALYSIS_OUTPUT",
-                "speed_stats.json has no filtered_files object",
-            )
+        stats = _validate_speed_stats(
+            read_json_object(stats_path), normalized, target
+        )
         captures: dict[str, Path] = {}
-        for direction, value in filtered_value.items():
-            if direction not in {"download", "upload"} or not isinstance(value, str):
-                raise PipelineError(
-                    "INVALID_ANALYSIS_OUTPUT",
-                    "speed_stats.json has invalid filtered files",
-                )
-            capture = Path(value)
+        for direction, capture in stats.filtered_files.items():
             if not capture.is_file():
                 raise PipelineError(
                     "INVALID_ANALYSIS_OUTPUT",
@@ -341,12 +442,10 @@ def run(args: argparse.Namespace) -> int:
             args.interval,
             database_path,
             tshark_path,
-            int(stats.get("input_size_bytes", input_path.stat().st_size)),
+            stats.input_size_bytes,
             progress,
         )
-        result = _merge_coverage(
-            result, stats, int(stats.get("input_size_bytes", input_path.stat().st_size))
-        )
+        result = _merge_coverage(result, stats)
         if database_path is not None:
             with AnalysisStore(database_path) as store:
                 store.initialize()

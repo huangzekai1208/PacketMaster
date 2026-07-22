@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import sys
+from decimal import Decimal, InvalidOperation
+from itertools import chain
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -19,6 +21,7 @@ from lib.tshark import stream_tshark_fields
 from packetmaster.domain import Target
 
 EXTRACT_FIELDS = [
+    "frame.time_epoch",
     "frame.time_relative",
     "frame.number",
     "ip.src",
@@ -55,6 +58,17 @@ EXTRACT_FIELDS = [
     "tcp.analysis.zero_window",
     "tcp.analysis.window_full",
 ]
+
+
+def _packet_epoch(row: dict[str, str]) -> Decimal:
+    value = row.get("frame.time_epoch", "").strip()
+    try:
+        epoch = Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"invalid frame.time_epoch: {value}") from exc
+    if not epoch.is_finite():
+        raise ValueError(f"invalid frame.time_epoch: {value}")
+    return epoch
 
 
 def _validated_captures(captures: dict[str, Path], target: Target) -> dict[str, Path]:
@@ -117,16 +131,36 @@ def analyze_captures(
     try:
         if store is not None:
             store.initialize()
+        streams: dict[str, tuple[dict[str, str], object]] = {}
+        close_streams = []
+        first_epochs: list[Decimal] = []
         for direction, capture in validated.items():
             if progress_writer is not None:
                 progress_writer.emit(
                     "tcp_extract", 0, None, f"Extracting all {direction} TCP packets"
                 )
+            iterator = iter(
+                stream_tshark_fields(
+                    Path(tshark_path), capture, EXTRACT_FIELDS, display_filter="tcp"
+                )
+            )
+            close = getattr(iterator, "close", None)
+            if close is not None:
+                close_streams.append(close)
+            first_row = next(iterator, None)
+            if first_row is not None:
+                streams[direction] = (first_row, iterator)
+                first_epochs.append(_packet_epoch(first_row))
+
+        baseline = min(first_epochs) if first_epochs else Decimal(0)
+        for direction, (first_row, iterator) in streams.items():
             count = 0
-            for row in stream_tshark_fields(
-                Path(tshark_path), capture, EXTRACT_FIELDS, display_filter="tcp"
-            ):
-                accumulator.observe(row, direction)
+            for row in chain((first_row,), iterator):
+                normalized_row = dict(row)
+                normalized_row["frame.time_relative"] = str(
+                    _packet_epoch(row) - baseline
+                )
+                accumulator.observe(normalized_row, direction)
                 count += 1
                 if progress_writer is not None and count % 100_000 == 0:
                     progress_writer.emit(
@@ -148,5 +182,7 @@ def analyze_captures(
             store.write_result(result)
         return result
     finally:
+        for close in locals().get("close_streams", []):
+            close()
         if store is not None:
             store.close()

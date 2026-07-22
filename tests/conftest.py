@@ -1,27 +1,16 @@
 from __future__ import annotations
 
+import struct
 from pathlib import Path
 
 import pytest
 from scapy.all import IP, TCP, UDP, Ether
 from scapy.utils import PcapNgWriter
 
-
-def _write_packets(path: Path, packets: list[object]) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    writer = PcapNgWriter(str(path))
-    try:
-        for index, packet in enumerate(packets):
-            packet.time = 1.0 + index * 0.01
-            writer.write(packet)
-    finally:
-        writer.close()
-    return path.resolve()
+from tests.helpers import load_script_module
 
 
-@pytest.fixture
-def sample_capture(tmp_path: Path) -> Path:
-    capture = tmp_path / "capture source" / "sample.pcapng"
+def _speed_packets() -> list[object]:
     client = "192.0.2.10"
     server = "198.51.100.20"
     download = [
@@ -66,7 +55,62 @@ def sample_capture(tmp_path: Path) -> Path:
         / IP(src=server, dst=client)
         / TCP(sport=5202, dport=42000, flags="A", seq=11, ack=770),
     ]
-    return _write_packets(capture, download + upload)
+    return download + upload
+
+
+def _write_packets(path: Path, packets: list[object]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = PcapNgWriter(str(path))
+    try:
+        for index, packet in enumerate(packets):
+            packet.time = 1.0 + index * 0.01
+            writer.write(packet)
+    finally:
+        writer.close()
+    return path.resolve()
+
+
+@pytest.fixture(scope="session")
+def tshark_path() -> Path:
+    module = load_script_module("lib/tshark.py", "integration_tshark_discovery")
+    try:
+        return module.find_tshark()
+    except RuntimeError as exc:
+        if str(exc).startswith("DEPENDENCY_UNAVAILABLE"):
+            pytest.skip("tshark not installed")
+        raise
+
+
+@pytest.fixture
+def sample_capture(tmp_path: Path) -> Path:
+    capture = tmp_path / "capture source" / "sample.pcapng"
+    return _write_packets(capture, _speed_packets())
+
+
+def _simple_packet_block(packet: object) -> bytes:
+    packet_data = bytes(packet)
+    padding = b"\x00" * ((4 - len(packet_data) % 4) % 4)
+    block_length = 16 + len(packet_data) + len(padding)
+    return (
+        struct.pack("<III", 3, block_length, len(packet_data))
+        + packet_data
+        + padding
+        + struct.pack("<I", block_length)
+    )
+
+
+@pytest.fixture
+def spb_capture(tmp_path: Path) -> Path:
+    path = tmp_path / "simple packet blocks.pcapng"
+    section_header = (
+        struct.pack("<II", 0x0A0D0D0A, 28)
+        + struct.pack("<IHHq", 0x1A2B3C4D, 1, 0, -1)
+        + struct.pack("<I", 28)
+    )
+    interface_description = struct.pack("<IIHHII", 1, 20, 1, 0, 65535, 20)
+    blocks = b"".join(_simple_packet_block(packet) for packet in _speed_packets())
+    path.write_bytes(section_header + interface_description + blocks)
+    return path.resolve()
 
 
 @pytest.fixture

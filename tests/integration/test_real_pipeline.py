@@ -13,13 +13,14 @@ from tests.helpers import load_script_module
 
 ROOT = Path(__file__).resolve().parents[2]
 RUN_PIPELINE = ROOT / "speed-analyze" / "scripts" / "run_pipeline.py"
-TSHARK = Path("/opt/homebrew/bin/tshark")
+FILTER_SCRIPT = ROOT / "speed-analyze" / "scripts" / "speed_filter_strip.py"
 
 
 def run_pipeline(
     capture: Path | str,
     output: Path,
     *,
+    tshark_path: Path,
     analysis_id: str = "integration-test",
     target: str | None = "download",
 ) -> subprocess.CompletedProcess[str]:
@@ -33,7 +34,7 @@ def run_pipeline(
         "--analysis-id",
         analysis_id,
         "--tshark-path",
-        str(TSHARK),
+        str(tshark_path),
         "--min-bytes",
         "1",
         "--min-ratio",
@@ -56,6 +57,93 @@ def read_json(path: Path) -> dict[str, object]:
         value = json.load(json_file)
     assert isinstance(value, dict)
     return value
+
+
+def run_filter(capture: Path, output: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(FILTER_SCRIPT),
+            "--input",
+            str(capture),
+            "--output",
+            str(output / "filtered"),
+            "--target",
+            "download",
+            "--stats-output",
+            str(output / "speed_stats.json"),
+            "--progress-path",
+            str(output / "progress.jsonl"),
+            "--min-bytes",
+            "1",
+            "--min-ratio",
+            "0.65",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+
+
+def test_spb_filter_does_not_copy_non_target_packets(
+    tmp_path: Path, spb_capture: Path, tshark_path: Path
+) -> None:
+    output = tmp_path / "spb output"
+
+    result = run_filter(spb_capture, output)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    stats = read_json(output / "speed_stats.json")
+    filtered_capture = stats["filtered_files"]["download"]
+    tshark_result = subprocess.run(
+        [
+            str(tshark_path),
+            "-r",
+            filtered_capture,
+            "-T",
+            "fields",
+            "-e",
+            "tcp.srcport",
+            "-e",
+            "tcp.dstport",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert tshark_result.returncode == 0, tshark_result.stderr
+    assert "41000" in tshark_result.stdout
+    assert "42000" not in tshark_result.stdout
+    assert "5202" not in tshark_result.stdout
+
+
+def test_fingerprint_completes_during_first_scan_before_filter_write(
+    tmp_path: Path, spb_capture: Path
+) -> None:
+    output = tmp_path / "fingerprint output"
+
+    result = run_filter(spb_capture, output)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    events = [
+        json.loads(line)
+        for line in (output / "progress.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    fingerprint_complete = next(
+        index
+        for index, event in enumerate(events)
+        if event["stage"] == "fingerprint" and event["current"] == event["total"]
+    )
+    filter_write_start = next(
+        index
+        for index, event in enumerate(events)
+        if event["stage"] == "filter_write" and event["current"] == 0
+    )
+    assert fingerprint_complete < filter_write_start
 
 
 def test_run_pipeline_help_has_full_streaming_contract() -> None:
@@ -81,16 +169,14 @@ def test_run_pipeline_help_has_full_streaming_contract() -> None:
 
 
 def test_real_download_pipeline_writes_complete_private_artifacts(
-    tmp_path: Path, sample_capture: Path
+    tmp_path: Path, sample_capture: Path, tshark_path: Path
 ) -> None:
-    if not TSHARK.is_file():
-        pytest.skip("tshark not installed")
     unicode_capture = tmp_path / "输入 报文" / "测速 样本.pcapng"
     unicode_capture.parent.mkdir()
     unicode_capture.write_bytes(sample_capture.read_bytes())
     output = (tmp_path / "分析 output" / "任务 一").resolve()
 
-    result = run_pipeline(unicode_capture.resolve(), output)
+    result = run_pipeline(unicode_capture.resolve(), output, tshark_path=tshark_path)
 
     assert result.returncode == 0, result.stdout + result.stderr
     manifest = read_json(output / "manifest.json")
@@ -143,14 +229,15 @@ def test_real_download_pipeline_writes_complete_private_artifacts(
 def test_real_pipeline_keeps_requested_direction(
     tmp_path: Path,
     sample_capture: Path,
+    tshark_path: Path,
     target: str | None,
     expected: set[str],
 ) -> None:
-    if not TSHARK.is_file():
-        pytest.skip("tshark not installed")
     output = (tmp_path / f"route-{target or 'default'}").resolve()
 
-    result = run_pipeline(sample_capture, output, target=target)
+    result = run_pipeline(
+        sample_capture, output, tshark_path=tshark_path, target=target
+    )
 
     assert result.returncode == 0, result.stdout + result.stderr
     manifest = read_json(output / "manifest.json")
@@ -174,6 +261,7 @@ def test_analyze_captures_streams_past_5000_and_indexes_final_event(
             yield {
                 "frame.number": str(number),
                 "frame.time_relative": str((number - 1) / 1000),
+                "frame.time_epoch": str(100 + (number - 1) / 1000),
                 "ip.src": "198.51.100.20",
                 "ip.dst": "192.0.2.10",
                 "ipv6.src": "",
@@ -199,7 +287,7 @@ def test_analyze_captures_streams_past_5000_and_indexes_final_event(
         "download",
         1,
         database,
-        TSHARK,
+        Path("tshark"),
         capture.stat().st_size,
     )
 
@@ -222,6 +310,7 @@ def test_no_evidence_index_discards_events(
     row = {
         "frame.number": "1",
         "frame.time_relative": "0",
+        "frame.time_epoch": "100",
         "ip.src": "198.51.100.20",
         "ip.dst": "192.0.2.10",
         "ipv6.src": "",
@@ -236,10 +325,65 @@ def test_no_evidence_index_discards_events(
     )
 
     result = module.analyze_captures(
-        {"download": capture}, "download", 1, None, TSHARK, 1
+        {"download": capture}, "download", 1, None, Path("tshark"), 1
     )
 
     assert result.events == []
+
+
+def test_both_captures_use_one_epoch_timebase_without_overlapping_intervals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_script_module("tcp_extract.py", "task5_tcp_extract_epoch")
+    download_capture = tmp_path / "download.pcapng"
+    upload_capture = tmp_path / "upload.pcapng"
+    download_capture.write_bytes(b"download")
+    upload_capture.write_bytes(b"upload")
+
+    def row(number: int, epoch: float, direction: str) -> dict[str, str]:
+        download = direction == "download"
+        return {
+            "frame.number": str(number),
+            "frame.time_relative": str(epoch % 10),
+            "frame.time_epoch": str(epoch),
+            "ip.src": "198.51.100.20" if download else "192.0.2.10",
+            "ip.dst": "192.0.2.10" if download else "198.51.100.20",
+            "ipv6.src": "",
+            "ipv6.dst": "",
+            "tcp.srcport": "5201" if download else "41000",
+            "tcp.dstport": "41000" if download else "5201",
+            "tcp.len": "100",
+        }
+
+    def rows(
+        tshark_path: Path,
+        capture: Path,
+        fields: list[str],
+        display_filter: str,
+    ):
+        assert "frame.time_epoch" in fields
+        direction = "download" if capture == download_capture else "upload"
+        start = 100.0 if direction == "download" else 110.0
+        yield row(1, start, direction)
+        yield row(2, start + 0.2, direction)
+
+    monkeypatch.setattr(module, "stream_tshark_fields", rows)
+
+    result = module.analyze_captures(
+        {"download": download_capture, "upload": upload_capture},
+        "both",
+        1,
+        None,
+        Path("tshark"),
+        16,
+    )
+
+    interval_starts = {
+        interval["direction"]: interval["interval_start"]
+        for interval in result.intervals
+    }
+    assert interval_starts == {"download": 0.0, "upload": 10.0}
+    assert result.coverage_summary.analyzed_duration_seconds == pytest.approx(10.2)
 
 
 @pytest.mark.parametrize(
@@ -257,6 +401,7 @@ def test_invalid_requests_write_failed_manifest(
     analysis_id: str,
     target: str,
     error_code: str,
+    tshark_path: Path,
 ) -> None:
     output = (tmp_path / analysis_id.replace("/", "-")).resolve()
     selected_capture = capture if capture is not None else sample_capture
@@ -264,6 +409,7 @@ def test_invalid_requests_write_failed_manifest(
     result = run_pipeline(
         selected_capture,
         output,
+        tshark_path=tshark_path,
         analysis_id=analysis_id,
         target=target,
     )
@@ -276,13 +422,11 @@ def test_invalid_requests_write_failed_manifest(
 
 
 def test_no_tcp_capture_writes_specific_failed_manifest(
-    tmp_path: Path, no_tcp_capture: Path
+    tmp_path: Path, no_tcp_capture: Path, tshark_path: Path
 ) -> None:
-    if not TSHARK.is_file():
-        pytest.skip("tshark not installed")
     output = (tmp_path / "no-tcp").resolve()
 
-    result = run_pipeline(no_tcp_capture, output)
+    result = run_pipeline(no_tcp_capture, output, tshark_path=tshark_path)
 
     assert result.returncode != 0
     manifest = read_json(output / "manifest.json")
@@ -291,13 +435,11 @@ def test_no_tcp_capture_writes_specific_failed_manifest(
 
 
 def test_tcp_without_directional_speed_flow_writes_specific_failed_manifest(
-    tmp_path: Path, no_speed_flow_capture: Path
+    tmp_path: Path, no_speed_flow_capture: Path, tshark_path: Path
 ) -> None:
-    if not TSHARK.is_file():
-        pytest.skip("tshark not installed")
     output = (tmp_path / "no-speed-flow").resolve()
 
-    result = run_pipeline(no_speed_flow_capture, output)
+    result = run_pipeline(no_speed_flow_capture, output, tshark_path=tshark_path)
 
     assert result.returncode != 0
     manifest = read_json(output / "manifest.json")
@@ -314,3 +456,152 @@ def test_invalid_json_output_maps_to_invalid_analysis_output(tmp_path: Path) -> 
         module.read_json_object(invalid)
 
     assert exc_info.value.code == "INVALID_ANALYSIS_OUTPUT"
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "missing_input_size",
+        "string_input_size",
+        "negative_input_size",
+        "negative_total_packets",
+        "tcp_exceeds_total",
+        "invalid_sha256",
+        "negative_written_count",
+        "filtered_files_not_object",
+    ],
+)
+def test_invalid_speed_stats_contract_writes_invalid_output_manifest(
+    tmp_path: Path,
+    sample_capture: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    corruption: str,
+) -> None:
+    module = load_script_module(
+        "run_pipeline.py", f"task5_run_pipeline_bad_stats_{corruption}"
+    )
+    output = (tmp_path / corruption).resolve()
+    filtered_capture = (output / "filtered" / "download.pcapng").resolve()
+    stats: dict[str, object] = {
+        "status": "completed",
+        "input_file": str(sample_capture),
+        "input_size_bytes": sample_capture.stat().st_size,
+        "sha256": "a" * 64,
+        "total_packets": 10,
+        "total_tcp_packets": 8,
+        "total_flows": 1,
+        "speed_flows_count": 1,
+        "download_flows_count": 1,
+        "upload_flows_count": 0,
+        "min_bytes": 1,
+        "min_direction_ratio": 0.65,
+        "enable_strip": False,
+        "target": "download",
+        "speed_flows": [],
+        "written_counts": {"download": 8},
+        "filtered_files": {"download": str(filtered_capture)},
+    }
+    if corruption == "missing_input_size":
+        stats.pop("input_size_bytes")
+    elif corruption == "string_input_size":
+        stats["input_size_bytes"] = "100"
+    elif corruption == "negative_input_size":
+        stats["input_size_bytes"] = -1
+    elif corruption == "negative_total_packets":
+        stats["total_packets"] = -1
+    elif corruption == "tcp_exceeds_total":
+        stats["total_tcp_packets"] = 11
+    elif corruption == "invalid_sha256":
+        stats["sha256"] = "not-a-sha256"
+    elif corruption == "negative_written_count":
+        stats["written_counts"] = {"download": -1}
+    elif corruption == "filtered_files_not_object":
+        stats["filtered_files"] = []
+
+    def fake_filter(*args: object, **kwargs: object) -> None:
+        filtered_capture.parent.mkdir(parents=True, exist_ok=True)
+        filtered_capture.write_bytes(b"filtered")
+        stats_path = Path(args[3])
+        stats_path.write_text(json.dumps(stats), encoding="utf-8")
+
+    monkeypatch.setattr(module, "find_tshark", lambda configured: Path("tshark"))
+    monkeypatch.setattr(
+        module,
+        "normalize_capture",
+        lambda input_path, output_dir, tshark_path: sample_capture,
+    )
+    monkeypatch.setattr(module, "_run_filter", fake_filter)
+    monkeypatch.setattr(
+        module,
+        "analyze_captures",
+        lambda *args, **kwargs: pytest.fail("invalid stats reached analysis"),
+    )
+    args = module.build_parser().parse_args(
+        [
+            "--input",
+            str(sample_capture),
+            "--output",
+            str(output),
+            "--analysis-id",
+            f"bad-stats-{corruption}",
+        ]
+    )
+
+    assert module.run(args) == 1
+    manifest = read_json(output / "manifest.json")
+    assert manifest["error"]["code"] == "INVALID_ANALYSIS_OUTPUT"
+
+
+def test_filter_subprocess_is_terminated_when_pipeline_is_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_script_module("run_pipeline.py", "task5_run_pipeline_cancel")
+
+    class InterruptingProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.wait_calls = 0
+            self.terminate_calls = 0
+            self.kill_calls = 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise KeyboardInterrupt
+            self.returncode = -15
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+
+        def kill(self) -> None:
+            self.kill_calls += 1
+
+    process = InterruptingProcess()
+    monkeypatch.setattr(module.subprocess, "Popen", lambda *args, **kwargs: process)
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt),
+    )
+    log_path = tmp_path / "logs" / "filter.log"
+    log_path.parent.mkdir()
+
+    with pytest.raises(KeyboardInterrupt):
+        module._run_filter(
+            tmp_path / "capture.pcapng",
+            module.Target.DOWNLOAD,
+            tmp_path / "filtered",
+            tmp_path / "speed_stats.json",
+            tmp_path / "progress.jsonl",
+            log_path,
+            0.7,
+            1,
+        )
+
+    assert process.terminate_calls == 1
+    assert process.wait_calls == 2
+    assert process.kill_calls == 0
