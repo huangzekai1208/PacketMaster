@@ -256,6 +256,20 @@ def test_all_event_types_and_per_flow_counters_are_recorded() -> None:
     assert flow["window_max"] == 65535
 
 
+@pytest.mark.parametrize("frame_number", [None, "", "not-a-number", "0", "-1"])
+def test_event_record_rejects_missing_or_invalid_exception_frame_number(
+    frame_number: str | None,
+) -> None:
+    row = packet_row(1, **{"tcp.analysis.retransmission": "1"})
+    if frame_number is None:
+        row.pop("frame.number")
+    else:
+        row["frame.number"] = frame_number
+
+    with pytest.raises(ValueError, match="frame.number"):
+        aggregate.event_record(row, "retransmission", "flow-id", "download")
+
+
 @pytest.mark.parametrize("target", ["", "DOWNLOAD", "invalid", None])
 def test_invalid_target_is_rejected(target: object) -> None:
     with pytest.raises((TypeError, ValueError)):

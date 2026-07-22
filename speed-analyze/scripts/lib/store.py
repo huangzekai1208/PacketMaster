@@ -30,7 +30,7 @@ OPERATOR_SQL = {
     "lte": "<=",
 }
 EVENT_INSERT_SQL = """
-    INSERT OR REPLACE INTO events (
+    INSERT INTO events (
         evidence_id, event_type, frame_number, time_relative, flow_id, direction,
         tcp_seq, tcp_ack, tcp_window_size, tcp_len, ack_rtt
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -188,9 +188,14 @@ class AnalysisStore:
         self._ensure_open()
         if not self._event_buffer:
             return
-        self._connection.executemany(EVENT_INSERT_SQL, self._event_buffer)
-        self._connection.commit()
-        self._event_buffer.clear()
+        try:
+            self._connection.executemany(EVENT_INSERT_SQL, self._event_buffer)
+            self._connection.commit()
+        except sqlite3.Error:
+            self._connection.rollback()
+            raise
+        else:
+            self._event_buffer.clear()
 
     def write_result(self, result: object) -> None:
         self._ensure_open()

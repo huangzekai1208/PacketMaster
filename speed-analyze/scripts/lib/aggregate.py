@@ -178,7 +178,9 @@ def event_record(
     row: dict[str, str], event_type: str, flow_id: str, direction: Target | str
 ) -> dict[str, Any]:
     direction_value = Target(direction).value
-    frame_number = _optional_int(row.get("frame.number"))
+    frame_number = _parse_int(row.get("frame.number"), "frame.number")
+    if frame_number <= 0:
+        raise ValueError("frame.number must be a positive integer")
     time_relative = _optional_float(row.get("frame.time_relative"))
     return {
         "evidence_id": (

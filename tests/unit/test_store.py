@@ -117,6 +117,29 @@ def test_append_event_flushes_at_batch_size_and_close_flushes_tail(
         assert connection.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 3
 
 
+def test_duplicate_evidence_id_raises_and_preserves_committed_event(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "duplicate-events.sqlite"
+    store = store_module.AnalysisStore(path)
+    store.initialize()
+    store.append_event(event("duplicate", event_type="retransmission"))
+    store.flush_events()
+    store.append_event(event("duplicate", event_type="zero_window"))
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.flush_events()
+
+    assert store._event_buffer
+    with sqlite3.connect(path) as connection:
+        stored_event_type = connection.execute(
+            "SELECT event_type FROM events WHERE evidence_id = ?", ("duplicate",)
+        ).fetchone()[0]
+    assert stored_event_type == "retransmission"
+    store._event_buffer.clear()
+    store.close()
+
+
 def test_context_manager_closes_store_and_rejects_further_operations(
     tmp_path: Path,
 ) -> None:
