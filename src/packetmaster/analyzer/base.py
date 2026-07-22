@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
 from packetmaster.domain import (
@@ -25,6 +26,35 @@ EVIDENCE_FIELDS = {
     "tcp.len",
     "tcp.analysis.ack_rtt",
 }
+
+
+@dataclass(frozen=True)
+class EvidenceFilters:
+    flow_ids: list[str] | None
+    time_start: float | None
+    time_end: float | None
+    predicates: list[object]
+
+
+def normalized_evidence_filters(request: EvidenceRequest) -> EvidenceFilters:
+    query = request.query
+    flow_ids = query.flow_ids if query and query.flow_ids else None
+    if flow_ids is None and request.flow_id is not None:
+        flow_ids = [request.flow_id]
+    time_start = (
+        query.time_start
+        if query and query.time_start is not None
+        else request.time_start
+    )
+    time_end = (
+        query.time_end if query and query.time_end is not None else request.time_end
+    )
+    predicates: list[object] = list(query.predicates) if query else []
+    if request.evidence_type != "events":
+        predicates.append(
+            {"field": "event_type", "operator": "eq", "value": request.evidence_type}
+        )
+    return EvidenceFilters(flow_ids, time_start, time_end, predicates)
 
 
 def validate_evidence_request(request: EvidenceRequest) -> None:

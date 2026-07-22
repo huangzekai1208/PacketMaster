@@ -64,6 +64,13 @@ class AnalyzeRequest(ContractModel):
     aggregation_interval_seconds: int = Field(default=1, ge=1, le=60)
     build_evidence_index: bool = True
 
+    @field_validator("request_id")
+    @classmethod
+    def validate_request_id(cls, value: str) -> str:
+        if not value.strip("."):
+            raise ValueError("request_id must contain a non-dot character")
+        return value
+
     @field_validator("pcap_path")
     @classmethod
     def validate_absolute_pcap_path(cls, value: str) -> str:

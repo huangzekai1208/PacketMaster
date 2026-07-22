@@ -16,7 +16,10 @@ from typing import Any
 import psutil
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from packetmaster.analyzer.base import validate_evidence_request
+from packetmaster.analyzer.base import (
+    normalized_evidence_filters,
+    validate_evidence_request,
+)
 from packetmaster.artifacts import ArtifactManager
 from packetmaster.domain import (
     AnalysisStatus,
@@ -210,30 +213,50 @@ class RealAnalyzerAdapter:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         progress_position = 0
+
+        async def stop_process() -> None:
+            if process.returncode is None:
+                await terminate_process(process)
+            if not wait_task.done():
+                wait_task.cancel()
+            try:
+                await wait_task
+            except BaseException:
+                pass
+
         try:
             while True:
+                progress_events: list[tuple[float, float | None, str]] = []
                 if progress_path is not None and progress_path.is_file():
-                    with progress_path.open(encoding="utf-8") as progress_file:
-                        progress_file.seek(progress_position)
-                        while line := progress_file.readline():
-                            progress_position = progress_file.tell()
-                            try:
-                                event = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-                            if (
-                                progress_callback is not None
-                                and isinstance(event, dict)
-                            ):
-                                await _maybe_await(
-                                    progress_callback(
-                                        float(event.get("current", 0)),
+                    try:
+                        with progress_path.open(encoding="utf-8") as progress_file:
+                            progress_file.seek(progress_position)
+                            while line := progress_file.readline():
+                                progress_position = progress_file.tell()
+                                try:
+                                    event = json.loads(line)
+                                    current = float(event.get("current", 0))
+                                    total = (
                                         float(event["total"])
                                         if event.get("total") is not None
-                                        else None,
-                                        str(event.get("message", "")),
+                                        else None
                                     )
-                                )
+                                    message = str(event.get("message", ""))
+                                except (
+                                    AttributeError,
+                                    TypeError,
+                                    ValueError,
+                                    json.JSONDecodeError,
+                                ):
+                                    continue
+                                progress_events.append((current, total, message))
+                    except OSError:
+                        pass
+                if progress_callback is not None:
+                    for current, total, message in progress_events:
+                        await _maybe_await(
+                            progress_callback(current, total, message)
+                        )
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     raise TimeoutError
@@ -246,8 +269,7 @@ class RealAnalyzerAdapter:
                 except TimeoutError:
                     peak = max(peak, _rss_bytes(process.pid))
         except asyncio.CancelledError as exc:
-            await terminate_process(process)
-            wait_task.cancel()
+            await stop_process()
             raise AppError(
                 code="ANALYSIS_CANCELLED",
                 message="Speed analysis was cancelled",
@@ -255,14 +277,24 @@ class RealAnalyzerAdapter:
                 suggested_action="Rerun the analysis when ready.",
             ) from exc
         except TimeoutError as exc:
-            await terminate_process(process)
-            wait_task.cancel()
+            await stop_process()
             raise AppError(
                 code="ANALYSIS_TIMEOUT",
                 message="Speed analysis exceeded its dynamic timeout",
                 recoverable=True,
                 suggested_action="Check TShark performance and available resources.",
                 details={"timeout_seconds": timeout, "rss_peak_bytes": peak},
+            ) from exc
+        except Exception as exc:
+            await stop_process()
+            if isinstance(exc, AppError):
+                raise
+            raise AppError(
+                code="ANALYSIS_PROGRESS_FAILED",
+                message="Speed analysis progress forwarding failed",
+                recoverable=True,
+                suggested_action="Inspect the MCP connection and retry.",
+                details={"exception_type": exc.__class__.__name__},
             ) from exc
 
     def _command(self, request: AnalyzeRequest, output: Path) -> list[str]:
@@ -313,6 +345,15 @@ class RealAnalyzerAdapter:
                 details={"path": str(self.pipeline_script)},
             )
 
+        task_root = self._analysis_root(request.request_id)
+        if task_root.exists() and any(task_root.iterdir()):
+            raise AppError(
+                code="ANALYSIS_ID_CONFLICT",
+                message="analysis_id already has local artifacts",
+                recoverable=True,
+                suggested_action="Use a new analysis_id for this capture.",
+                details={"path": str(task_root)},
+            )
         self._artifacts.preflight(input_path, request.target)
         paths = self._artifacts.create(request.request_id)
         log_path = paths.logs_dir / "pipeline.log"
@@ -413,6 +454,13 @@ class RealAnalyzerAdapter:
                 message="Manifest target does not match the requested direction",
                 recoverable=False,
                 suggested_action="Rerun with an isolated analysis_id.",
+            )
+        if Path(manifest.input_path).resolve() != input_path.resolve():
+            raise AppError(
+                code="INVALID_ANALYSIS_OUTPUT",
+                message="Manifest input_path does not match the requested capture",
+                recoverable=False,
+                suggested_action="Discard stale artifacts and use a new analysis_id.",
             )
         summary_path = _artifact_path(
             paths.root, artifacts.get("tcp_analysis"), paths.tcp_analysis_json
@@ -528,22 +576,23 @@ class RealAnalyzerAdapter:
                     warnings: list[str] = []
                 else:
                     query = request.query
+                    filters = normalized_evidence_filters(request)
                     fields = query.fields or request.fields or _DEFAULT_EVIDENCE_FIELDS
                     items = store.query_custom(
                         fields=fields,
-                        predicates=query.predicates,
-                        flow_ids=query.flow_ids,
-                        time_start=query.time_start,
-                        time_end=query.time_end,
+                        predicates=filters.predicates,
+                        flow_ids=filters.flow_ids,
+                        time_start=filters.time_start,
+                        time_end=filters.time_end,
                         offset=request.offset,
                         limit=request.limit,
                     )
                     probe = store.query_custom(
                         fields=fields,
-                        predicates=query.predicates,
-                        flow_ids=query.flow_ids,
-                        time_start=query.time_start,
-                        time_end=query.time_end,
+                        predicates=filters.predicates,
+                        flow_ids=filters.flow_ids,
+                        time_start=filters.time_start,
+                        time_end=filters.time_end,
                         offset=request.offset + len(items),
                         limit=1,
                     )

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import psutil
 import pytest
+from fastmcp import Client as FastMCPClient
+from pydantic import ValidationError
 
 from packetmaster.analyzer.mock import MockAnalyzerAdapter
 from packetmaster.analyzer.real import RealAnalyzerAdapter
@@ -133,7 +135,11 @@ class FakeProcess:
 
 
 def _write_real_outputs(
-    output: Path, target: str, *, status: str = "completed"
+    output: Path,
+    target: str,
+    *,
+    input_path: Path,
+    status: str = "completed",
 ) -> None:
     coverage = {
         "input_size_bytes": 7,
@@ -165,7 +171,7 @@ def _write_real_outputs(
         "analysis_id": "real-contract",
         "status": status,
         "target": target,
-        "input_path": str((output / "input.pcapng").resolve()),
+        "input_path": str(input_path.resolve()),
         "normalized_capture_path": None,
         "coverage_summary": coverage,
         "available_evidence": ["summary", "flows"],
@@ -199,7 +205,8 @@ def test_real_adapter_uses_argument_array_and_disk_logs(
         calls.append((args, kwargs))
         output = Path(str(args[args.index("--output") + 1]))
         target = str(args[args.index("--target") + 1])
-        _write_real_outputs(output, target)
+        input_path = Path(str(args[args.index("--input") + 1]))
+        _write_real_outputs(output, target, input_path=input_path)
         return FakeProcess()
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
@@ -328,7 +335,8 @@ def test_real_adapter_rejects_manifest_artifact_outside_task_root(
 
     async def create_process(*args: object, **kwargs: object) -> FakeProcess:
         output = Path(str(args[args.index("--output") + 1]))
-        _write_real_outputs(output, "download")
+        input_path = Path(str(args[args.index("--input") + 1]))
+        _write_real_outputs(output, "download", input_path=input_path)
         manifest_path = output / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["analysis_id"] = "outside"
@@ -449,9 +457,12 @@ def test_real_custom_query_detects_page_after_limit_500(tmp_path: Path) -> None:
         adapter.get_evidence(
             EvidenceRequest(
                 analysis_id="page-500",
-                evidence_type="events",
+                evidence_type="retransmission",
+                flow_id="ignored-by-query",
                 limit=500,
-                query=CustomEvidenceQuery(fields=["evidence_id"]),
+                query=CustomEvidenceQuery(
+                    flow_ids=["f-1"], fields=["evidence_id"]
+                ),
             )
         )
     )
@@ -502,3 +513,82 @@ def test_terminate_process_cleans_real_descendant(tmp_path: Path) -> None:
     assert not psutil.pid_exists(child_pid) or (
         psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE
     )
+
+
+def test_progress_failure_terminates_running_process(tmp_path: Path) -> None:
+    process = FakeProcess(never_finishes=True)
+    progress_path = tmp_path / "progress.jsonl"
+    progress_path.write_text(
+        json.dumps({"current": 1, "total": 2, "message": "half"}) + "\n",
+        encoding="utf-8",
+    )
+    adapter = RealAnalyzerAdapter(
+        artifact_root=tmp_path / "artifacts",
+        pipeline_script=tmp_path / "pipeline.py",
+    )
+
+    async def broken_progress(
+        current: float, total: float | None, message: str | None
+    ) -> None:
+        raise ConnectionError("client disconnected")
+
+    with pytest.raises(AppError) as error:
+        asyncio.run(
+            adapter._wait(
+                process,
+                timeout=10,
+                progress_path=progress_path,
+                progress_callback=broken_progress,
+            )
+        )
+    assert error.value.code == "ANALYSIS_PROGRESS_FAILED"
+    assert process.terminated is True
+
+
+def test_real_adapter_rejects_existing_analysis_id(tmp_path: Path) -> None:
+    capture = tmp_path / "capture.pcapng"
+    capture.write_bytes(b"capture")
+    script = tmp_path / "pipeline.py"
+    script.write_text("# fixture", encoding="utf-8")
+    existing = tmp_path / "artifacts" / "duplicate"
+    existing.mkdir(parents=True)
+    (existing / "manifest.json").write_text("{}", encoding="utf-8")
+    adapter = RealAnalyzerAdapter(
+        artifact_root=tmp_path / "artifacts",
+        pipeline_script=script,
+    )
+    request = _request(request_id="duplicate", pcap_path=str(capture))
+    with pytest.raises(AppError) as error:
+        asyncio.run(adapter.analyze(request))
+    assert error.value.code == "ANALYSIS_ID_CONFLICT"
+
+
+def test_request_id_rejects_pure_dots() -> None:
+    with pytest.raises(ValidationError):
+        _request(request_id="..")
+
+
+def test_invalid_mcp_request_does_not_echo_sensitive_input() -> None:
+    secret = "SENSITIVE_PAYLOAD_" * 1000
+
+    async def exercise() -> dict[str, object]:
+        server = create_server(MockAnalyzerAdapter(FIXTURE))
+        async with FastMCPClient(server) as client:
+            result = await client.call_tool(
+                "analyze_speed_capture",
+                {
+                    "request": {
+                        "request_id": "invalid",
+                        "pcap_path": _request().pcap_path,
+                        "payload": secret,
+                    }
+                },
+            )
+            assert isinstance(result.data, dict)
+            return result.data
+
+    envelope = asyncio.run(exercise())
+    serialized = json.dumps(envelope)
+    assert envelope["ok"] is False
+    assert secret not in serialized
+    assert len(serialized) < 4096

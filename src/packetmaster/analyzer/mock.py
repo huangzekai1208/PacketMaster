@@ -6,7 +6,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from packetmaster.analyzer.base import validate_evidence_request
+from packetmaster.analyzer.base import (
+    normalized_evidence_filters,
+    validate_evidence_request,
+)
 from packetmaster.domain import (
     AnalyzeRequest,
     AnalyzeResponse,
@@ -77,33 +80,31 @@ class MockAnalyzerAdapter:
                 suggested_action="Repair the mock fixture.",
             )
         filtered: list[dict[str, Any]] = []
-        query = request.query
-        flow_ids = set(query.flow_ids) if query else set()
-        time_start = query.time_start if query else request.time_start
-        time_end = query.time_end if query else request.time_end
-        predicates = query.predicates if query else []
+        filters = normalized_evidence_filters(request)
+        flow_ids = set(filters.flow_ids or [])
         for item in items:
-            if request.flow_id is not None and item.get("flow_id") != request.flow_id:
-                continue
             if flow_ids and item.get("flow_id") not in flow_ids:
                 continue
             item_time = item.get("frame.time_relative", item.get("time_relative"))
-            if time_start is not None and (item_time is None or item_time < time_start):
-                continue
-            if time_end is not None and (item_time is None or item_time > time_end):
-                continue
-            if (
-                request.evidence_type != "events"
-                and item.get("event_type") != request.evidence_type
+            if filters.time_start is not None and (
+                item_time is None or item_time < filters.time_start
             ):
                 continue
-            if not all(_matches(item, predicate) for predicate in predicates):
+            if filters.time_end is not None and (
+                item_time is None or item_time > filters.time_end
+            ):
+                continue
+            if not all(_matches(item, predicate) for predicate in filters.predicates):
                 continue
             filtered.append(item)
         total = len(filtered)
         page = filtered[request.offset : request.offset + request.limit]
         page_end = request.offset + len(page)
-        selected_fields = query.fields if query and query.fields else request.fields
+        selected_fields = (
+            request.query.fields
+            if request.query and request.query.fields
+            else request.fields
+        )
         if selected_fields:
             page = [
                 {
@@ -134,11 +135,17 @@ class MockAnalyzerAdapter:
 
 
 def _matches(item: dict[str, Any], predicate: Any) -> bool:
-    value = item.get(predicate.field)
-    if predicate.field == "frame.time_relative":
-        value = item.get(predicate.field, item.get("time_relative"))
-    expected = predicate.value
-    operator = predicate.operator.value
+    if isinstance(predicate, dict):
+        field = predicate["field"]
+        expected = predicate.get("value")
+        operator = predicate["operator"]
+    else:
+        field = predicate.field
+        expected = predicate.value
+        operator = predicate.operator.value
+    value = item.get(field)
+    if field == "frame.time_relative":
+        value = item.get(field, item.get("time_relative"))
     if operator == "exists":
         return (value is not None) is (expected is not False)
     if operator == "in":

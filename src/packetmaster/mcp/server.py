@@ -19,13 +19,14 @@ def _error_envelope(error: AppError) -> dict[str, Any]:
 
 
 def _invalid_request(error: ValidationError) -> dict[str, Any]:
+    validation = error.errors(include_url=False, include_input=False)[:10]
     return _error_envelope(
         AppError(
             code="INVALID_REQUEST",
             message="MCP request does not match the PacketMaster schema",
             recoverable=False,
             suggested_action="Correct the structured request and retry.",
-            details={"validation": error.errors(include_url=False)},
+            details={"validation": validation},
         )
     )
 
