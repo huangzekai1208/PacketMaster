@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "packetmaster"
+version = "0.1.0"
+description = "TCP speed diagnosis agent"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "fastmcp>=2,<3",
+    "langchain-openai>=1,<2",
+    "langgraph>=1,<2",
+    "psutil>=5",
+    "pydantic>=2,<3",
+    "pydantic-settings>=2,<3",
+    "scapy>=2",
+    "typer>=0.12",
+]
+
+[project.scripts]
+packetmaster = "packetmaster.cli:app"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
