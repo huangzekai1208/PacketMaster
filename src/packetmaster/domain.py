@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from packetmaster.platform import is_absolute_path
 
 
 class Target(StrEnum):
@@ -66,7 +67,7 @@ class AnalyzeRequest(ContractModel):
     @field_validator("pcap_path")
     @classmethod
     def validate_absolute_pcap_path(cls, value: str) -> str:
-        if not Path(value).is_absolute() and not PureWindowsPath(value).is_absolute():
+        if not is_absolute_path(value):
             raise ValueError("pcap_path must be an absolute path")
         return value
 
