@@ -3,8 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
+import sys
 from pathlib import Path
 
+import psutil
 import pytest
 
 from packetmaster.analyzer.mock import MockAnalyzerAdapter
@@ -12,6 +15,7 @@ from packetmaster.analyzer.real import RealAnalyzerAdapter
 from packetmaster.domain import (
     AnalyzeRequest,
     AnalyzeResponse,
+    CustomEvidenceQuery,
     EvidenceRequest,
     EvidenceResponse,
     Target,
@@ -19,6 +23,7 @@ from packetmaster.domain import (
 from packetmaster.errors import AppError
 from packetmaster.mcp.client import SpeedMCPClient
 from packetmaster.mcp.server import create_server
+from packetmaster.platform import subprocess_group_options, terminate_process
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "mock_analysis.json"
 
@@ -26,7 +31,7 @@ FIXTURE = Path(__file__).parents[1] / "fixtures" / "mock_analysis.json"
 def _request(**overrides: object) -> AnalyzeRequest:
     values: dict[str, object] = {
         "request_id": "contract-1",
-        "pcap_path": "/tmp/captures/test capture.pcapng",
+        "pcap_path": str((Path.cwd() / "test capture.pcapng").resolve()),
     }
     values.update(overrides)
     return AnalyzeRequest.model_validate(values)
@@ -39,7 +44,7 @@ def test_mock_adapter_returns_deterministic_structured_result() -> None:
 
     assert isinstance(response, AnalyzeResponse)
     assert response.target is Target.DOWNLOAD
-    assert response.analysis_id == "mock-contract"
+    assert response.analysis_id == "contract-1"
     assert response.coverage_summary.complete is True
     assert "events" in response.available_evidence
 
@@ -79,7 +84,7 @@ def test_evidence_is_structured_and_paginated() -> None:
     assert len(response.items) == 1
     assert response.next_offset == 1
     assert response.source == "mock"
-    assert response.coverage_range["complete"] is True
+    assert response.coverage_range["complete"] is False
 
 
 def test_unsafe_evidence_query_is_rejected() -> None:
@@ -144,26 +149,39 @@ def _write_real_outputs(
     summary = {
         "coverage_summary": coverage,
         "tcp_summary": {"retransmissions": 0},
-        "flows": {"f-1": {"direction": target}},
-        "intervals": [],
+        "flow_summary": {"f-1": {"direction": target}},
+        "interval_summary": [],
         "syn_options": {},
     }
     output.mkdir(parents=True, exist_ok=True)
+    (output / "logs").mkdir(exist_ok=True)
+    (output / "filtered").mkdir(exist_ok=True)
     (output / "coverage.json").write_text(json.dumps(coverage), encoding="utf-8")
     (output / "tcp_analysis.json").write_text(json.dumps(summary), encoding="utf-8")
+    (output / "speed_stats.json").write_text("{}", encoding="utf-8")
+    (output / "progress.jsonl").write_text("", encoding="utf-8")
+    (output / "logs" / "filter.log").write_text("", encoding="utf-8")
     manifest = {
         "analysis_id": "real-contract",
         "status": status,
         "target": target,
+        "input_path": str((output / "input.pcapng").resolve()),
+        "normalized_capture_path": None,
         "coverage_summary": coverage,
         "available_evidence": ["summary", "flows"],
         "warnings": [],
         "artifact_paths": {
             "manifest": str((output / "manifest.json").resolve()),
             "coverage": str((output / "coverage.json").resolve()),
+            "speed_stats": str((output / "speed_stats.json").resolve()),
             "tcp_analysis": str((output / "tcp_analysis.json").resolve()),
+            "progress": str((output / "progress.jsonl").resolve()),
+            "logs": {"filter": str((output / "logs" / "filter.log").resolve())},
+            "filtered_captures": {},
         },
         "error": None,
+        "started_at": "2026-07-22T00:00:00+00:00",
+        "completed_at": "2026-07-22T00:00:01+00:00",
     }
     (output / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -255,15 +273,37 @@ def test_real_adapter_rejects_unsafe_analysis_id(tmp_path: Path) -> None:
 def test_speed_mcp_client_builds_stdio_transport_from_argument_array(
     tmp_path: Path,
 ) -> None:
-    client = SpeedMCPClient.from_stdio(
-        "python",
-        ["-m", "packetmaster.mcp.server"],
-        cwd=str(tmp_path),
-        log_file=str(tmp_path / "mcp.log"),
+    server_script = tmp_path / "mock stdio server.py"
+    server_script.write_text(
+        "\n".join(
+            [
+                "import sys",
+                f"sys.path.insert(0, {str((Path.cwd() / 'src').resolve())!r})",
+                "from pathlib import Path",
+                "from packetmaster.analyzer.mock import MockAnalyzerAdapter",
+                "from packetmaster.mcp.server import create_server",
+                f"fixture = Path({str(FIXTURE.resolve())!r})",
+                "create_server(MockAnalyzerAdapter(fixture)).run(",
+                "    transport='stdio', show_banner=False",
+                ")",
+            ]
+        ),
+        encoding="utf-8",
     )
-    transport = client._client.transport
-    assert transport.command == "python"
-    assert transport.args == ["-m", "packetmaster.mcp.server"]
+
+    async def exercise() -> AnalyzeResponse:
+        client = SpeedMCPClient.from_stdio(
+            sys.executable,
+            [str(server_script)],
+            cwd=str(tmp_path),
+            log_file=str(tmp_path / "mcp.log"),
+        )
+        async with client:
+            return await client.analyze_speed_capture(_request())
+
+    response = asyncio.run(exercise())
+    assert response.analysis_id == "contract-1"
+    assert response.target is Target.DOWNLOAD
 
 
 def test_real_adapter_rejects_manifest_artifact_outside_task_root(
@@ -292,7 +332,7 @@ def test_real_adapter_rejects_manifest_artifact_outside_task_root(
         manifest_path = output / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         manifest["analysis_id"] = "outside"
-        manifest["artifact_paths"]["tcp_analysis"] = str(outside)
+        manifest["artifact_paths"]["logs"]["filter"] = str(outside)
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         return FakeProcess()
 
@@ -305,3 +345,160 @@ def test_real_adapter_rejects_manifest_artifact_outside_task_root(
     with pytest.raises(AppError) as error:
         asyncio.run(adapter.analyze(request))
     assert error.value.code == "INVALID_ANALYSIS_OUTPUT"
+
+
+def test_mcp_preserves_structured_app_error() -> None:
+    class FailingAdapter(MockAnalyzerAdapter):
+        async def analyze(
+            self, request: AnalyzeRequest, progress_callback: object | None = None
+        ) -> AnalyzeResponse:
+            raise AppError(
+                code="ANALYSIS_TIMEOUT",
+                message="timed out",
+                recoverable=True,
+                suggested_action="retry later",
+                details={"timeout_seconds": 300},
+            )
+
+    async def exercise() -> None:
+        async with SpeedMCPClient(create_server(FailingAdapter(FIXTURE))) as client:
+            with pytest.raises(AppError) as error:
+                await client.analyze_speed_capture(_request())
+            assert error.value.code == "ANALYSIS_TIMEOUT"
+            assert error.value.recoverable is True
+            assert error.value.details == {"timeout_seconds": 300}
+
+    asyncio.run(exercise())
+
+
+def test_mcp_forwards_progress_notifications() -> None:
+    class ProgressAdapter(MockAnalyzerAdapter):
+        async def analyze(
+            self, request: AnalyzeRequest, progress_callback: object | None = None
+        ) -> AnalyzeResponse:
+            assert callable(progress_callback)
+            await progress_callback(1.0, 2.0, "half")
+            await progress_callback(2.0, 2.0, "done")
+            return await super().analyze(request)
+
+    async def exercise() -> list[tuple[float | None, str | None]]:
+        events: list[tuple[float | None, str | None]] = []
+
+        def progress(value: float | None, message: str | None) -> None:
+            events.append((value, message))
+
+        async with SpeedMCPClient(
+            create_server(ProgressAdapter(FIXTURE)), progress_callback=progress
+        ) as client:
+            await client.analyze_speed_capture(_request())
+        return events
+
+    assert asyncio.run(exercise()) == [(0.5, "half"), (1.0, "done")]
+
+
+def test_real_custom_query_detects_page_after_limit_500(tmp_path: Path) -> None:
+    analysis_root = tmp_path / "artifacts" / "page-500"
+    analysis_root.mkdir(parents=True)
+    database = analysis_root / "analysis.sqlite"
+    connection = sqlite3.connect(database)
+    connection.executescript(
+        """
+        CREATE TABLE events (
+            evidence_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            frame_number INTEGER,
+            time_relative REAL,
+            flow_id TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            tcp_seq INTEGER,
+            tcp_ack INTEGER,
+            tcp_window_size INTEGER,
+            tcp_len INTEGER,
+            ack_rtt REAL
+        );
+        CREATE TABLE summary (name TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+        CREATE TABLE flows (flow_id TEXT PRIMARY KEY, data_json TEXT NOT NULL);
+        CREATE TABLE intervals (
+            interval_start REAL NOT NULL,
+            direction TEXT NOT NULL,
+            data_json TEXT NOT NULL,
+            PRIMARY KEY (interval_start, direction)
+        );
+        CREATE TABLE syn_options (name TEXT PRIMARY KEY, value_json TEXT NOT NULL);
+        """
+    )
+    connection.executemany(
+        """
+        INSERT INTO events (
+            evidence_id, event_type, frame_number, time_relative,
+            flow_id, direction
+        ) VALUES (?, 'retransmission', ?, ?, 'f-1', 'download')
+        """,
+        ((f"ev-{index}", index, float(index)) for index in range(501)),
+    )
+    connection.commit()
+    connection.close()
+    adapter = RealAnalyzerAdapter(
+        artifact_root=tmp_path / "artifacts",
+        pipeline_script=Path.cwd()
+        / "speed-analyze"
+        / "scripts"
+        / "run_pipeline.py",
+    )
+    response = asyncio.run(
+        adapter.get_evidence(
+            EvidenceRequest(
+                analysis_id="page-500",
+                evidence_type="events",
+                limit=500,
+                query=CustomEvidenceQuery(fields=["evidence_id"]),
+            )
+        )
+    )
+    assert len(response.items) == 500
+    assert response.next_offset == 500
+    assert response.truncated is True
+    with pytest.raises(AppError) as error:
+        asyncio.run(
+            adapter.get_evidence(
+                EvidenceRequest(
+                    analysis_id="page-500",
+                    evidence_type="events",
+                    query=CustomEvidenceQuery(fields=["events; DROP TABLE events"]),
+                )
+            )
+        )
+    assert error.value.code == "UNSAFE_EVIDENCE_QUERY"
+
+
+def test_terminate_process_cleans_real_descendant(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+    parent_code = "\n".join(
+        [
+            "import pathlib, subprocess, sys, time",
+            "child = subprocess.Popen([sys.executable, '-c', "
+            "'import time; time.sleep(60)'])",
+            f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))",
+            "time.sleep(60)",
+        ]
+    )
+
+    async def exercise() -> int:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            parent_code,
+            **subprocess_group_options(),
+        )
+        for _ in range(100):
+            if pid_file.is_file():
+                break
+            await asyncio.sleep(0.01)
+        child_pid = int(pid_file.read_text(encoding="utf-8"))
+        await terminate_process(process, grace_seconds=0.2)
+        return child_pid
+
+    child_pid = asyncio.run(exercise())
+    assert not psutil.pid_exists(child_pid) or (
+        psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE
+    )

@@ -26,7 +26,7 @@ class SpeedMCPClient:
         transport: Any,
         *,
         progress_callback: ProgressCallback | None = None,
-        timeout: float = 120.0,
+        timeout: float | None = None,
     ) -> None:
         self._client = Client(
             transport,
@@ -44,7 +44,7 @@ class SpeedMCPClient:
         cwd: str | None = None,
         log_file: str | None = None,
         progress_callback: ProgressCallback | None = None,
-        timeout: float = 120.0,
+        timeout: float | None = None,
     ) -> SpeedMCPClient:
         """Build a stdio client from an executable and argument array."""
         if not command or any(not isinstance(arg, str) for arg in args):
@@ -98,6 +98,34 @@ class SpeedMCPClient:
                 recoverable=False,
                 suggested_action="Check the PacketMaster MCP server version.",
             )
+        if data.get("ok") is False:
+            error = data.get("error")
+            if not isinstance(error, dict):
+                raise AppError(
+                    code="INVALID_MCP_OUTPUT",
+                    message="FastMCP returned an invalid error envelope",
+                    recoverable=False,
+                    suggested_action="Check the PacketMaster MCP server version.",
+                )
+            raise AppError(
+                code=str(error.get("code", "MCP_TOOL_ERROR")),
+                message=str(error.get("message", "FastMCP tool failed")),
+                recoverable=bool(error.get("recoverable", False)),
+                suggested_action=str(
+                    error.get("suggested_action", "Inspect the MCP server log.")
+                ),
+                details=dict(error.get("details") or {}),
+            )
+        if data.get("ok") is True:
+            payload = data.get("data")
+            if not isinstance(payload, dict):
+                raise AppError(
+                    code="INVALID_MCP_OUTPUT",
+                    message="FastMCP returned an invalid success envelope",
+                    recoverable=False,
+                    suggested_action="Check the PacketMaster MCP server version.",
+                )
+            return payload
         return data
 
     async def analyze_speed_capture(self, request: AnalyzeRequest) -> AnalyzeResponse:

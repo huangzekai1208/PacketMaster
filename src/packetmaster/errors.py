@@ -23,3 +23,12 @@ class AppError(Exception):
         self.recoverable = recoverable
         self.suggested_action = suggested_action
         self.details = details or {}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "recoverable": self.recoverable,
+            "suggested_action": self.suggested_action,
+            "details": self.details,
+        }

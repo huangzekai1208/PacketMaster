@@ -6,6 +6,7 @@ import asyncio
 import importlib.util
 import json
 import re
+import sqlite3
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -13,7 +14,9 @@ from types import ModuleType
 from typing import Any
 
 import psutil
+from pydantic import BaseModel, ConfigDict, ValidationError
 
+from packetmaster.analyzer.base import validate_evidence_request
 from packetmaster.artifacts import ArtifactManager
 from packetmaster.domain import (
     AnalysisStatus,
@@ -25,7 +28,7 @@ from packetmaster.domain import (
     Target,
 )
 from packetmaster.errors import AppError
-from packetmaster.platform import terminate_process
+from packetmaster.platform import subprocess_group_options, terminate_process
 
 _ANALYSIS_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 _MAX_JSON_BYTES = 16 * 1024 * 1024
@@ -42,6 +45,62 @@ _DEFAULT_EVIDENCE_FIELDS = [
     "tcp.len",
     "tcp.analysis.ack_rtt",
 ]
+
+
+class _ManifestModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    analysis_id: str
+    status: AnalysisStatus
+    target: Target
+    input_path: str
+    normalized_capture_path: str | None = None
+    coverage_summary: CoverageSummary
+    artifact_paths: dict[str, Any]
+    available_evidence: list[str]
+    warnings: list[str]
+    error: dict[str, Any] | None = None
+    started_at: str
+    completed_at: str | None = None
+
+
+class _AnalysisSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    coverage_summary: CoverageSummary
+    tcp_summary: dict[str, Any]
+    flow_summary: dict[str, Any]
+    interval_summary: list[dict[str, Any]]
+    syn_options: dict[str, Any]
+
+
+def _sanitize_artifacts(root: Path, value: object) -> object:
+    if isinstance(value, str):
+        path = _artifact_path(root, value, root)
+        if not path.exists():
+            raise AppError(
+                code="INVALID_ANALYSIS_OUTPUT",
+                message="Manifest references a missing artifact",
+                recoverable=False,
+                suggested_action="Discard the task artifacts and rerun the analysis.",
+                details={"path": str(path)},
+            )
+        return str(path)
+    if isinstance(value, dict):
+        return {
+            str(key): _sanitize_artifacts(root, item) for key, item in value.items()
+        }
+    raise AppError(
+        code="INVALID_ANALYSIS_OUTPUT",
+        message="Manifest artifact_paths contains a non-path value",
+        recoverable=False,
+        suggested_action="Check the speed-analyze manifest schema.",
+    )
+
+
+async def _maybe_await(value: Any) -> None:
+    if asyncio.iscoroutine(value):
+        await value
 
 
 def dynamic_timeout_seconds(input_size_bytes: int) -> float:
@@ -138,13 +197,43 @@ class RealAnalyzerAdapter:
             )
         return root
 
-    async def _wait(self, process: Any, timeout: float) -> tuple[int, int]:
+    async def _wait(
+        self,
+        process: Any,
+        timeout: float,
+        progress_path: Path | None = None,
+        progress_callback: Callable[[float, float | None, str | None], Any]
+        | None = None,
+    ) -> tuple[int, int]:
         peak = _rss_bytes(process.pid)
         wait_task = asyncio.create_task(process.wait())
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+        progress_position = 0
         try:
             while True:
+                if progress_path is not None and progress_path.is_file():
+                    with progress_path.open(encoding="utf-8") as progress_file:
+                        progress_file.seek(progress_position)
+                        while line := progress_file.readline():
+                            progress_position = progress_file.tell()
+                            try:
+                                event = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if (
+                                progress_callback is not None
+                                and isinstance(event, dict)
+                            ):
+                                await _maybe_await(
+                                    progress_callback(
+                                        float(event.get("current", 0)),
+                                        float(event["total"])
+                                        if event.get("total") is not None
+                                        else None,
+                                        str(event.get("message", "")),
+                                    )
+                                )
                 remaining = deadline - loop.time()
                 if remaining <= 0:
                     raise TimeoutError
@@ -200,7 +289,12 @@ class RealAnalyzerAdapter:
             command.extend(["--tshark-path", self.tshark_path])
         return command
 
-    async def analyze(self, request: AnalyzeRequest) -> AnalyzeResponse:
+    async def analyze(
+        self,
+        request: AnalyzeRequest,
+        progress_callback: Callable[[float, float | None, str | None], Any]
+        | None = None,
+    ) -> AnalyzeResponse:
         input_path = Path(request.pcap_path)
         if not input_path.is_file():
             raise AppError(
@@ -224,12 +318,15 @@ class RealAnalyzerAdapter:
         log_path = paths.logs_dir / "pipeline.log"
         command = self._command(request, paths.root)
         timeout = self.timeout_calculator(input_path.stat().st_size)
+        if progress_callback is not None:
+            await _maybe_await(progress_callback(0.0, None, "Starting speed analysis"))
         with log_path.open("ab", buffering=0) as log_file:
             try:
                 process = await asyncio.create_subprocess_exec(
                     *command,
                     stdout=log_file,
                     stderr=log_file,
+                    **subprocess_group_options(),
                 )
             except OSError as exc:
                 raise AppError(
@@ -239,7 +336,16 @@ class RealAnalyzerAdapter:
                     suggested_action="Check Python and speed-analyze installation.",
                     details={"log_path": str(log_path)},
                 ) from exc
-            returncode, rss_peak = await self._wait(process, timeout)
+            returncode, rss_peak = await self._wait(
+                process,
+                timeout,
+                paths.root / "progress.jsonl",
+                progress_callback,
+            )
+        if progress_callback is not None:
+            await _maybe_await(
+                progress_callback(1.0, 1.0, "Speed analysis process completed")
+            )
 
         manifest_path = paths.root / "manifest.json"
         if not manifest_path.is_file():
@@ -253,17 +359,25 @@ class RealAnalyzerAdapter:
                 suggested_action="Inspect the local pipeline log.",
                 details={"returncode": returncode, "log_path": str(log_path)},
             )
-        manifest = _read_json_object(manifest_path)
-        if manifest.get("analysis_id") != request.request_id:
+        raw_manifest = _read_json_object(manifest_path)
+        if raw_manifest.get("analysis_id") != request.request_id:
             raise AppError(
                 code="INVALID_ANALYSIS_OUTPUT",
                 message="Manifest analysis_id does not match the request",
                 recoverable=False,
                 suggested_action="Use an isolated artifact directory and rerun.",
             )
-        error = manifest.get("error")
-        if returncode != 0 or manifest.get("status") == "failed":
+        error = raw_manifest.get("error")
+        if returncode != 0 or raw_manifest.get("status") == "failed":
             if isinstance(error, dict):
+                details = error.get("details") or {}
+                if not isinstance(details, dict):
+                    raise AppError(
+                        code="INVALID_ANALYSIS_OUTPUT",
+                        message="Manifest error details must be an object",
+                        recoverable=False,
+                        suggested_action="Check the speed-analyze manifest schema.",
+                    )
                 raise AppError(
                     code=str(error.get("code", "ANALYSIS_FAILED")),
                     message=str(error.get("message", "Speed analysis failed")),
@@ -271,7 +385,7 @@ class RealAnalyzerAdapter:
                     suggested_action=str(
                         error.get("suggested_action", "Inspect the pipeline log.")
                     ),
-                    details=dict(error.get("details") or {}),
+                    details=details,
                 )
             raise AppError(
                 code="ANALYSIS_FAILED",
@@ -282,17 +396,18 @@ class RealAnalyzerAdapter:
             )
 
         try:
-            status = AnalysisStatus(str(manifest["status"]))
-            target = Target(str(manifest["target"]))
-            artifacts = dict(manifest["artifact_paths"])
-        except (KeyError, TypeError, ValueError) as exc:
+            manifest = _ManifestModel.model_validate(raw_manifest)
+            artifacts = _sanitize_artifacts(paths.root, manifest.artifact_paths)
+            if not isinstance(artifacts, dict):
+                raise TypeError("artifact_paths must be an object")
+        except (TypeError, ValidationError) as exc:
             raise AppError(
                 code="INVALID_ANALYSIS_OUTPUT",
-                message="Manifest is missing required structured fields",
+                message="Manifest does not match the required schema",
                 recoverable=False,
                 suggested_action="Check the speed-analyze version.",
             ) from exc
-        if target is not request.target:
+        if manifest.target is not request.target:
             raise AppError(
                 code="INVALID_ANALYSIS_OUTPUT",
                 message="Manifest target does not match the requested direction",
@@ -305,9 +420,21 @@ class RealAnalyzerAdapter:
         coverage_path = _artifact_path(
             paths.root, artifacts.get("coverage"), paths.coverage_json
         )
-        summary = _read_json_object(summary_path)
-        coverage = CoverageSummary.model_validate(_read_json_object(coverage_path))
-        serialized = json.dumps(summary, ensure_ascii=False).lower()
+        try:
+            summary = _AnalysisSummary.model_validate(
+                _read_json_object(summary_path)
+            )
+            coverage = CoverageSummary.model_validate(
+                _read_json_object(coverage_path)
+            )
+        except ValidationError as exc:
+            raise AppError(
+                code="INVALID_ANALYSIS_OUTPUT",
+                message="Analysis summary does not match the required schema",
+                recoverable=False,
+                suggested_action="Check the speed-analyze version and rerun.",
+            ) from exc
+        serialized = summary.model_dump_json().lower()
         if "tcp.payload" in serialized or '"payload"' in serialized:
             raise AppError(
                 code="INVALID_ANALYSIS_OUTPUT",
@@ -317,21 +444,21 @@ class RealAnalyzerAdapter:
             )
         return AnalyzeResponse(
             analysis_id=request.request_id,
-            status=status,
-            target=target,
+            status=manifest.status,
+            target=manifest.target,
             coverage_summary=coverage,
-            flow_summary=dict(summary.get("flows") or {}),
-            tcp_summary=dict(summary.get("tcp_summary") or {}),
-            interval_summary=list(summary.get("intervals") or []),
-            syn_options=dict(summary.get("syn_options") or {}),
-            available_evidence=list(manifest.get("available_evidence") or []),
+            flow_summary=summary.flow_summary,
+            tcp_summary=summary.tcp_summary,
+            interval_summary=summary.interval_summary,
+            syn_options=summary.syn_options,
+            available_evidence=manifest.available_evidence,
             resource_usage={
                 "rss_peak_bytes": rss_peak,
                 "timeout_seconds": timeout,
                 "returncode": returncode,
             },
-            warnings=list(manifest.get("warnings") or []),
-            artifact_paths={key: str(value) for key, value in artifacts.items()},
+            warnings=manifest.warnings,
+            artifact_paths=artifacts,
         )
 
     def _load_store_module(self) -> ModuleType:
@@ -347,11 +474,28 @@ class RealAnalyzerAdapter:
                 suggested_action="Check the speed-analyze installation.",
             )
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as exc:
+            raise AppError(
+                code="DEPENDENCY_UNAVAILABLE",
+                message="speed-analyze evidence store could not be loaded",
+                recoverable=False,
+                suggested_action="Check the speed-analyze installation.",
+                details={"path": str(store_path)},
+            ) from exc
+        if not hasattr(module, "AnalysisStore"):
+            raise AppError(
+                code="DEPENDENCY_UNAVAILABLE",
+                message="speed-analyze evidence store has no AnalysisStore",
+                recoverable=False,
+                suggested_action="Check the speed-analyze installation.",
+            )
         return module
 
     async def get_evidence(self, request: EvidenceRequest) -> EvidenceResponse:
         root = self._analysis_root(request.analysis_id)
+        validate_evidence_request(request)
         database = root / "analysis.sqlite"
         if not database.is_file():
             raise AppError(
@@ -385,17 +529,25 @@ class RealAnalyzerAdapter:
                 else:
                     query = request.query
                     fields = query.fields or request.fields or _DEFAULT_EVIDENCE_FIELDS
-                    fetched = store.query_custom(
+                    items = store.query_custom(
                         fields=fields,
                         predicates=query.predicates,
                         flow_ids=query.flow_ids,
                         time_start=query.time_start,
                         time_end=query.time_end,
                         offset=request.offset,
-                        limit=min(request.limit + 1, 500),
+                        limit=request.limit,
                     )
-                    has_more = len(fetched) > request.limit
-                    items = fetched[: request.limit]
+                    probe = store.query_custom(
+                        fields=fields,
+                        predicates=query.predicates,
+                        flow_ids=query.flow_ids,
+                        time_start=query.time_start,
+                        time_end=query.time_end,
+                        offset=request.offset + len(items),
+                        limit=1,
+                    )
+                    has_more = bool(probe)
                     next_offset = request.offset + len(items) if has_more else None
                     total = request.offset + len(items) + (1 if has_more else 0)
                     warnings = (
@@ -409,6 +561,14 @@ class RealAnalyzerAdapter:
                 message=str(exc),
                 recoverable=False,
                 suggested_action="Use only supported fields, operators, and values.",
+            ) from exc
+        except (sqlite3.Error, OSError) as exc:
+            raise AppError(
+                code="EVIDENCE_UNAVAILABLE",
+                message="The local evidence index could not be read",
+                recoverable=True,
+                suggested_action="Rebuild the evidence index and retry.",
+                details={"path": str(database)},
             ) from exc
         return EvidenceResponse(
             analysis_id=request.analysis_id,
