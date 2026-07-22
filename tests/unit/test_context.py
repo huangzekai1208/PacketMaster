@@ -45,7 +45,12 @@ def _analysis(intervals: list[dict[str, object]]) -> AnalyzeResponse:
             "duplicate_ack_count": 2,
         },
         interval_summary=intervals,
-        syn_options={"mss": {"1460": 1}, "sack_permitted": 1},
+        syn_options={
+            "syn_packet_count": 2,
+            "mss_values": {"1460": 2},
+            "window_scale_shifts": {"7": 2},
+            "sack_permitted_count": 2,
+        },
         available_evidence=["summary", "flows", "intervals", "events"],
     )
 
@@ -111,6 +116,8 @@ def test_context_recursively_excludes_payload_logs_and_secrets() -> None:
     analysis.flow_summary["f-1"]["payload"] = "FLOW_SECRET"
     analysis.resource_usage["api_key"] = "KEY_SECRET"
     analysis.artifact_paths["logs"] = {"filter": "/tmp/full.log"}
+    analysis.warnings.append("sk-warning-secret RAW LOG BODY /tmp/private.log")
+    analysis.coverage_summary.truncation_reason = "sk-coverage-secret"
     evidence = _evidence(
         [
             {
@@ -120,6 +127,8 @@ def test_context_recursively_excludes_payload_logs_and_secrets() -> None:
             }
         ]
     )
+    evidence.source = "/Users/private/analysis.sqlite"
+    evidence.warnings.append("sk-evidence-secret PAYLOAD LOG BODY")
 
     context = ContextBuilder().build(
         analysis,
@@ -137,6 +146,12 @@ def test_context_recursively_excludes_payload_logs_and_secrets() -> None:
     assert "evidence_secret" not in lowered
     assert "key_secret" not in lowered
     assert "full.log" not in lowered
+    assert "sk-warning-secret" not in lowered
+    assert "sk-coverage-secret" not in lowered
+    assert "sk-evidence-secret" not in lowered
+    assert "analysis.sqlite" not in lowered
+    assert context.syn_options["mss_values"] == {"1460": 2}
+    assert context.syn_options["window_scale_shifts"] == {"7": 2}
 
 
 def test_context_applies_global_evidence_bounds_and_keeps_late_pages() -> None:
@@ -179,6 +194,11 @@ def test_context_applies_global_evidence_bounds_and_keeps_late_pages() -> None:
     assert len(context.evidence_layers) <= 4
     assert len(items) <= 25
     assert any(item["evidence_id"] == "ev-11-19" for item in items)
+    last_layer = context.evidence_layers["layer-11"]
+    assert last_layer["total"] == 200
+    assert last_layer["next_offset"] == 240
+    assert last_layer["truncated"] is True
+    assert last_layer["coverage_range"] == {"complete": False}
     assert "packet_data" not in serialized
     assert "authorization" not in serialized
     assert len(serialized) < 100_000
@@ -270,3 +290,4 @@ def test_prompts_require_open_hypotheses_and_outside_capture_limits() -> None:
     assert "outside_capture" in verification
     assert "不能描述为已由报文证实" in verification
     assert "unresolved" in verification
+    assert DiagnosisModel._prompt("hypothesis.md") == hypothesis

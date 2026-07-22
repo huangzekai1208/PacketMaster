@@ -59,18 +59,18 @@ def _scalar(value: Any) -> Any:
     return None
 
 
-def _small_value(value: Any) -> Any:
+def _small_value(value: Any, *, depth: int = 0) -> Any:
     scalar = _scalar(value)
     if scalar is not None or value is None:
         return scalar
-    if isinstance(value, dict):
+    if isinstance(value, dict) and depth < 2:
         return {
-            str(key)[:64]: _scalar(item)
+            str(key)[:64]: _small_value(item, depth=depth + 1)
             for key, item in list(value.items())[:32]
-            if _scalar(item) is not None
+            if _small_value(item, depth=depth + 1) is not None
         }
     if isinstance(value, list):
-        return [_small_value(item) for item in value[:32]]
+        return [_small_value(item, depth=depth + 1) for item in value[:32]]
     return None
 
 
@@ -104,8 +104,7 @@ def bounded_evidence(
             "next_offset": response.next_offset,
             "truncated": response.truncated,
             "coverage_range": _small_value(response.coverage_range),
-            "warnings": [warning[:256] for warning in response.warnings[:10]],
-            "source": response.source[:256],
+            "warning_count": len(response.warnings),
         }
     kept = entries[-max_items:]
     layers = {
@@ -217,7 +216,17 @@ class ContextBuilder:
         if standard_bandwidth_mbps <= 0 or actual_bandwidth_mbps <= 0:
             raise ValueError("bandwidth values must be positive")
         anomalies, normal_summary = self._intervals(analysis.interval_summary)
-        coverage = analysis.coverage_summary.model_dump(mode="json")
+        raw_coverage = analysis.coverage_summary
+        coverage = {
+            "input_size_bytes": raw_coverage.input_size_bytes,
+            "total_packets_seen": raw_coverage.total_packets_seen,
+            "tcp_packets_seen": raw_coverage.tcp_packets_seen,
+            "speed_packets_analyzed": raw_coverage.speed_packets_analyzed,
+            "analyzed_bytes": raw_coverage.analyzed_bytes,
+            "analyzed_duration_seconds": raw_coverage.analyzed_duration_seconds,
+            "complete": raw_coverage.complete,
+            "truncated": raw_coverage.truncated,
+        }
         limitations: list[str] = []
         if not coverage["complete"] or coverage["truncated"]:
             limitations.append("Capture coverage is incomplete or truncated.")
@@ -245,7 +254,7 @@ class ContextBuilder:
                 max_items=self.max_evidence_items,
             ),
             limitations=limitations,
-            warnings=[warning[:256] for warning in analysis.warnings[:20]],
+            warnings=[],
         )
         serialized_size = len(
             json.dumps(context.model_dump(mode="json"), ensure_ascii=False)
