@@ -87,6 +87,7 @@ class CoverageSummary(ContractModel):
 class AnalyzeResponse(ContractModel):
     analysis_id: str
     status: AnalysisStatus
+    target: Target = Target.DOWNLOAD
     coverage_summary: CoverageSummary
     flow_summary: dict[str, Any] = Field(default_factory=dict)
     tcp_summary: dict[str, Any] = Field(default_factory=dict)

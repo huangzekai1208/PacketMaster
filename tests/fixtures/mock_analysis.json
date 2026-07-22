@@ -1,0 +1,29 @@
+{
+  "analysis_id": "mock-contract",
+  "status": "completed",
+  "coverage_summary": {
+    "input_size_bytes": 4096,
+    "total_packets_seen": 20,
+    "tcp_packets_seen": 18,
+    "speed_packets_analyzed": 18,
+    "analyzed_bytes": 18000,
+    "analyzed_duration_seconds": 2.0,
+    "complete": true,
+    "truncated": false,
+    "truncation_reason": null
+  },
+  "flow_summary": {"download": {"flow_count": 1}},
+  "tcp_summary": {"retransmissions": 2, "duplicate_acks": 1},
+  "interval_summary": [],
+  "syn_options": {},
+  "available_evidence": ["summary", "flows", "events"],
+  "resource_usage": {"rss_peak_bytes": 1024},
+  "warnings": [],
+  "artifact_paths": {"manifest": "/tmp/mock-contract/manifest.json"},
+  "evidence": {
+    "events": [
+      {"evidence_id": "ev-1", "event_type": "retransmission", "flow_id": "f-1", "direction": "download", "time_relative": 0.5},
+      {"evidence_id": "ev-2", "event_type": "duplicate_ack", "flow_id": "f-1", "direction": "download", "time_relative": 1.0}
+    ]
+  }
+}
