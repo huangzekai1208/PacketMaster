@@ -26,6 +26,14 @@ SHB_TYPE = 0x0A0D0D0A
 IDB_TYPE = 0x00000001
 PACKET_BLOCK_TYPE = 0x00000002
 SPB_TYPE = 0x00000003
+MAX_PCAPNG_BLOCK_SIZE = 64 * 1024 * 1024
+MIN_BLOCK_LENGTHS = {
+    SHB_TYPE: 28,
+    IDB_TYPE: 20,
+    EPB_TYPE: 32,
+    PACKET_BLOCK_TYPE: 32,
+    SPB_TYPE: 16,
+}
 
 
 def parse_packet(raw_bytes: bytes):
@@ -174,8 +182,10 @@ def _classify_flows(
 
 def _read_blocks(capture: Path):
     endian = "<"
+    capture_size = capture.stat().st_size
     with capture.open("rb") as source:
         while True:
+            block_start = source.tell()
             header = source.read(8)
             if not header:
                 return
@@ -193,16 +203,39 @@ def _read_blocks(capture: Path):
                 else:
                     raise RuntimeError("INVALID_CAPTURE: bad pcapng byte-order magic")
                 block_length = struct.unpack(f"{endian}I", header[4:8])[0]
-                remainder = source.read(block_length - 12)
-                block = header + byte_order_magic + remainder
                 block_type = SHB_TYPE
+                prefix = header + byte_order_magic
             else:
                 block_length = struct.unpack(f"{endian}I", header[4:8])[0]
-                remainder = source.read(block_length - 8)
-                block = header + remainder
                 block_type = struct.unpack(f"{endian}I", raw_type)[0]
-            if block_length < 12 or len(block) != block_length:
+                prefix = header
+
+            minimum_length = MIN_BLOCK_LENGTHS.get(block_type, 12)
+            if block_length < minimum_length:
+                raise RuntimeError("INVALID_CAPTURE: pcapng block is too short")
+            if block_length % 4 != 0:
+                raise RuntimeError(
+                    "INVALID_CAPTURE: pcapng block length is not aligned"
+                )
+            if block_length > MAX_PCAPNG_BLOCK_SIZE:
+                raise RuntimeError(
+                    "INVALID_CAPTURE: pcapng block exceeds the 64 MiB safety limit"
+                )
+            file_remaining = capture_size - block_start
+            if block_length > file_remaining:
+                raise RuntimeError(
+                    "INVALID_CAPTURE: pcapng block length exceeds remaining file size"
+                )
+
+            remainder = source.read(block_length - len(prefix))
+            block = prefix + remainder
+            if len(block) != block_length:
                 raise RuntimeError("INVALID_CAPTURE: truncated or invalid pcapng block")
+            trailing_length = struct.unpack(f"{endian}I", block[-4:])[0]
+            if trailing_length != block_length:
+                raise RuntimeError(
+                    "INVALID_CAPTURE: pcapng block length trailer does not match"
+                )
             yield endian, block_type, block
 
 

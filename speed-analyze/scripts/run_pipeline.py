@@ -446,6 +446,16 @@ def run(args: argparse.Namespace) -> int:
             progress,
         )
         result = _merge_coverage(result, stats)
+        timing = result.tcp_summary.get("timing", {})
+        timing_available = timing.get("available") is True
+        timing_complete = timing.get("complete") is True
+        if not timing_complete:
+            status = "partial"
+            manifest["warnings"].append(
+                "Packet timestamps are unavailable for some or all analyzed packets; "
+                "temporal duration, intervals, and time-based throughput are "
+                "incomplete."
+            )
         if database_path is not None:
             with AnalysisStore(database_path) as store:
                 store.initialize()
@@ -473,7 +483,9 @@ def run(args: argparse.Namespace) -> int:
             artifacts["analysis_db"] = str(database_path.resolve())
         manifest["status"] = status
         manifest["coverage_summary"] = coverage
-        manifest["available_evidence"] = ["summary", "flows", "intervals"]
+        manifest["available_evidence"] = ["summary", "flows"]
+        if timing_available:
+            manifest["available_evidence"].append("intervals")
         if database_path is not None:
             manifest["available_evidence"].append("events")
         manifest["error"] = None

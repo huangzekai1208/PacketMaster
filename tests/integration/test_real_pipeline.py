@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import sqlite3
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -144,6 +146,99 @@ def test_fingerprint_completes_during_first_scan_before_filter_write(
         if event["stage"] == "filter_write" and event["current"] == 0
     )
     assert fingerprint_complete < filter_write_start
+
+
+def test_real_spb_pipeline_keeps_non_temporal_metrics_and_warns_about_time(
+    tmp_path: Path, spb_capture: Path, tshark_path: Path
+) -> None:
+    output = (tmp_path / "spb full pipeline").resolve()
+
+    result = run_pipeline(spb_capture, output, tshark_path=tshark_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    manifest = read_json(output / "manifest.json")
+    stats = read_json(output / "speed_stats.json")
+    coverage = read_json(output / "coverage.json")
+    analysis = read_json(output / "tcp_analysis.json")
+    assert manifest["status"] == "partial"
+    assert any("timestamp" in warning.lower() for warning in manifest["warnings"])
+    assert coverage["complete"] is True
+    assert coverage["truncated"] is False
+    assert coverage["speed_packets_analyzed"] == stats["written_counts"]["download"]
+    assert analysis["tcp_summary"]["packet_count"] > 0
+    assert analysis["tcp_summary"]["payload_bytes"] > 0
+    assert analysis["tcp_summary"]["timing"] == {
+        "available": False,
+        "complete": False,
+        "timed_packets": 0,
+        "untimed_packets": coverage["speed_packets_analyzed"],
+    }
+    assert analysis["interval_summary"] == []
+    assert "intervals" not in manifest["available_evidence"]
+
+
+class GuardedBlockReader(io.BytesIO):
+    def __init__(self, value: bytes, max_read: int = 64) -> None:
+        super().__init__(value)
+        self.max_read = max_read
+        self.read_sizes: list[int] = []
+
+    def read(self, size: int = -1) -> bytes:
+        self.read_sizes.append(size)
+        assert 0 <= size <= self.max_read, f"unsafe declared-length read: {size}"
+        return super().read(size)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
+@pytest.mark.parametrize("declared_length", [4, 0xFFFFFFFC])
+def test_read_blocks_rejects_unsafe_lengths_before_declared_size_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    declared_length: int,
+) -> None:
+    module = load_script_module(
+        "speed_filter_strip.py", f"task5_filter_length_{declared_length}"
+    )
+    capture = tmp_path / "malformed.pcapng"
+    capture.write_bytes(struct.pack("<II", 1, declared_length))
+    reader = GuardedBlockReader(capture.read_bytes())
+    original_open = module.Path.open
+
+    def guarded_open(path: Path, *args: object, **kwargs: object):
+        if path == capture:
+            return reader
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(module.Path, "open", guarded_open)
+
+    with pytest.raises(RuntimeError, match=r"^INVALID_CAPTURE"):
+        next(module._read_blocks(capture))
+
+    assert max(reader.read_sizes) <= 64
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        struct.pack("<III", 1, 14, 14) + b"xx",
+        struct.pack("<IIHHII", 1, 20, 1, 0, 65535, 16),
+    ],
+    ids=["misaligned", "trailer-mismatch"],
+)
+def test_read_blocks_rejects_misaligned_and_mismatched_trailer(
+    tmp_path: Path, block: bytes
+) -> None:
+    module = load_script_module("speed_filter_strip.py", "task5_filter_structure")
+    capture = tmp_path / "malformed.pcapng"
+    capture.write_bytes(block)
+
+    with pytest.raises(RuntimeError, match=r"^INVALID_CAPTURE"):
+        next(module._read_blocks(capture))
 
 
 def test_run_pipeline_help_has_full_streaming_contract() -> None:

@@ -229,6 +229,8 @@ class TcpAccumulator:
         self.analyzed_bytes = 0
         self._min_time: float | None = None
         self._max_time: float | None = None
+        self._timed_packets = 0
+        self._untimed_packets = 0
         self._metrics = _new_metrics()
         self._payload_bytes_by_direction = {"download": 0, "upload": 0}
         self._flows: dict[str, dict[str, Any]] = {}
@@ -258,10 +260,11 @@ class TcpAccumulator:
             return
 
         flow_id = normalized_flow_id(row)
-        time_relative = _parse_float(
-            row.get("frame.time_relative"), "frame.time_relative"
+        raw_time = row.get("frame.time_relative", "").strip()
+        time_relative = (
+            _parse_float(raw_time, "frame.time_relative") if raw_time else None
         )
-        if time_relative < 0:
+        if time_relative is not None and time_relative < 0:
             raise ValueError("frame.time_relative must be non-negative")
         payload_bytes = _parse_int(row.get("tcp.len"), "tcp.len", default=0)
         if payload_bytes < 0:
@@ -270,16 +273,20 @@ class TcpAccumulator:
         self.speed_packets_analyzed += 1
         self.analyzed_bytes += payload_bytes
         self._payload_bytes_by_direction[packet_direction.value] += payload_bytes
-        self._min_time = (
-            time_relative
-            if self._min_time is None
-            else min(self._min_time, time_relative)
-        )
-        self._max_time = (
-            time_relative
-            if self._max_time is None
-            else max(self._max_time, time_relative)
-        )
+        if time_relative is None:
+            self._untimed_packets += 1
+        else:
+            self._timed_packets += 1
+            self._min_time = (
+                time_relative
+                if self._min_time is None
+                else min(self._min_time, time_relative)
+            )
+            self._max_time = (
+                time_relative
+                if self._max_time is None
+                else max(self._max_time, time_relative)
+            )
 
         event_types = detect_events(row)
         metric_events = set(event_types)
@@ -290,12 +297,17 @@ class TcpAccumulator:
         )
 
         flow_metrics = self._flows.setdefault(flow_id, _new_metrics())
-        interval_start = (
-            math.floor(time_relative / self.interval_seconds) * self.interval_seconds
-        )
-        interval_key = (float(interval_start), packet_direction.value)
-        interval_metrics = self._intervals.setdefault(interval_key, _new_metrics())
-        for metrics in (self._metrics, flow_metrics, interval_metrics):
+        metric_groups = [self._metrics, flow_metrics]
+        if time_relative is not None:
+            interval_start = (
+                math.floor(time_relative / self.interval_seconds)
+                * self.interval_seconds
+            )
+            interval_key = (float(interval_start), packet_direction.value)
+            metric_groups.append(
+                self._intervals.setdefault(interval_key, _new_metrics())
+            )
+        for metrics in metric_groups:
             metrics["packet_count"] += 1
             metrics["payload_bytes"] += payload_bytes
             for event_type in METRIC_EVENT_TYPES:
@@ -369,6 +381,12 @@ class TcpAccumulator:
                     self._payload_bytes_by_direction
                 ),
                 "rtt_histogram": histogram,
+                "timing": {
+                    "available": self._timed_packets > 0,
+                    "complete": self._untimed_packets == 0,
+                    "timed_packets": self._timed_packets,
+                    "untimed_packets": self._untimed_packets,
+                },
             }
         )
 

@@ -60,8 +60,10 @@ EXTRACT_FIELDS = [
 ]
 
 
-def _packet_epoch(row: dict[str, str]) -> Decimal:
+def _packet_epoch(row: dict[str, str]) -> Decimal | None:
     value = row.get("frame.time_epoch", "").strip()
+    if not value:
+        return None
     try:
         epoch = Decimal(value)
     except InvalidOperation as exc:
@@ -150,15 +152,20 @@ def analyze_captures(
             first_row = next(iterator, None)
             if first_row is not None:
                 streams[direction] = (first_row, iterator)
-                first_epochs.append(_packet_epoch(first_row))
+                first_epoch = _packet_epoch(first_row)
+                if first_epoch is not None:
+                    first_epochs.append(first_epoch)
 
-        baseline = min(first_epochs) if first_epochs else Decimal(0)
+        baseline = min(first_epochs) if first_epochs else None
         for direction, (first_row, iterator) in streams.items():
             count = 0
             for row in chain((first_row,), iterator):
                 normalized_row = dict(row)
-                normalized_row["frame.time_relative"] = str(
-                    _packet_epoch(row) - baseline
+                epoch = _packet_epoch(row)
+                normalized_row["frame.time_relative"] = (
+                    str(epoch - baseline)
+                    if epoch is not None and baseline is not None
+                    else ""
                 )
                 accumulator.observe(normalized_row, direction)
                 count += 1
