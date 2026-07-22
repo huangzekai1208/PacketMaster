@@ -615,6 +615,113 @@ def test_both_uses_first_timed_epoch_after_leading_untimed_packets(
     }
 
 
+class ClosingIterator:
+    def __init__(
+        self, rows: list[dict[str, str]], *, close_error: BaseException | None = None
+    ) -> None:
+        self._rows = iter(rows)
+        self.close_error = close_error
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> dict[str, str]:
+        return next(self._rows)
+
+    def close(self) -> None:
+        self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class RecordingStore:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def initialize(self) -> None:
+        return None
+
+    def append_event(self, event: dict[str, object]) -> None:
+        return None
+
+    def write_result(self, result: object) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_cleanup_closes_all_iterators_and_store_after_close_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_script_module("tcp_extract.py", "task5_tcp_extract_cleanup")
+    download_capture = tmp_path / "download.pcapng"
+    upload_capture = tmp_path / "upload.pcapng"
+    download_capture.write_bytes(b"download")
+    upload_capture.write_bytes(b"upload")
+    download_rows = ClosingIterator(
+        [_timing_row(1, 100.0, "download")],
+        close_error=RuntimeError("download close failed"),
+    )
+    upload_rows = ClosingIterator([_timing_row(1, 101.0, "upload")])
+    iterators = {download_capture: download_rows, upload_capture: upload_rows}
+    store = RecordingStore()
+
+    monkeypatch.setattr(
+        module,
+        "stream_tshark_fields",
+        lambda tshark_path, capture, fields, display_filter: iterators[capture],
+    )
+    monkeypatch.setattr(module, "AnalysisStore", lambda path: store)
+
+    with pytest.raises(RuntimeError, match="download close failed"):
+        module.analyze_captures(
+            {"download": download_capture, "upload": upload_capture},
+            "both",
+            1,
+            tmp_path / "analysis.sqlite",
+            Path("tshark"),
+            16,
+        )
+
+    assert download_rows.closed is True
+    assert upload_rows.closed is True
+    assert store.closed is True
+
+
+def test_cleanup_error_does_not_mask_original_analysis_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = load_script_module("tcp_extract.py", "task5_tcp_extract_cleanup_error")
+    capture = tmp_path / "download.pcapng"
+    capture.write_bytes(b"download")
+    invalid_row = _timing_row(1, 100.0, "download")
+    invalid_row["tcp.srcport"] = "invalid"
+    rows = ClosingIterator(
+        [invalid_row], close_error=RuntimeError("iterator close failed")
+    )
+    store = RecordingStore()
+
+    monkeypatch.setattr(
+        module, "stream_tshark_fields", lambda *args, **kwargs: rows
+    )
+    monkeypatch.setattr(module, "AnalysisStore", lambda path: store)
+
+    with pytest.raises(ValueError, match="invalid TCP src port"):
+        module.analyze_captures(
+            {"download": capture},
+            "download",
+            1,
+            tmp_path / "analysis.sqlite",
+            Path("tshark"),
+            8,
+        )
+
+    assert rows.closed is True
+    assert store.closed is True
+
+
 @pytest.mark.parametrize(
     ("capture", "analysis_id", "target", "error_code"),
     [

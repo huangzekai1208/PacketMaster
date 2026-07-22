@@ -210,7 +210,19 @@ def analyze_captures(
             store.write_result(result)
         return result
     finally:
+        active_error = sys.exc_info()[1]
+        cleanup_error: BaseException | None = None
         for close in locals().get("close_streams", []):
-            close()
+            try:
+                close()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
         if store is not None:
-            store.close()
+            try:
+                store.close()
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if active_error is None and cleanup_error is not None:
+            raise cleanup_error
