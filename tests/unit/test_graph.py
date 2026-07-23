@@ -273,6 +273,37 @@ def test_outside_capture_only_forces_unresolved_low_confidence(tmp_path: Path) -
     )
 
 
+def test_low_confidence_report_keeps_only_accepted_candidates_and_steps(
+    tmp_path: Path,
+) -> None:
+    class SelectiveLowModel(FakeDiagnosisModel):
+        async def generate_hypotheses(self, context):
+            batch = await super().generate_hypotheses(context)
+            rejected = batch.hypotheses[0].model_copy(
+                update={"cause": "rejected-cause", "suggestion": "REJECTED_STEP"}
+            )
+            batch.hypotheses[0].suggestion = "ACCEPTED_STEP"
+            batch.hypotheses.append(rejected)
+            return batch
+
+        async def verify(self, context, hypotheses, evidence):
+            result = await super().verify(context, hypotheses, evidence)
+            result.accepted_hypotheses = [hypotheses.hypotheses[0]]
+            result.confidence = Confidence.LOW
+            return result
+
+    graph = build_graph(
+        mcp_client=FakeMCPClient(), diagnosis_model=SelectiveLowModel()
+    )
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert [item.cause for item in result["report"].candidate_causes] == [
+        "开放式候选原因"
+    ]
+    assert result["report"].candidate_causes[0].confidence is Confidence.LOW
+    assert result["report"].troubleshooting_steps == ["ACCEPTED_STEP"]
+
+
 def test_report_key_evidence_contains_bounded_traceable_references(
     tmp_path: Path,
 ) -> None:

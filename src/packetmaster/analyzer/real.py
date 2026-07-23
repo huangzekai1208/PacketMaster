@@ -50,7 +50,6 @@ _DEFAULT_EVIDENCE_FIELDS = [
     "event_type",
     "frame.number",
     "frame.time_relative",
-    "frame.time_epoch",
     "flow_id",
     "direction",
     "tcp.seq",
@@ -245,6 +244,8 @@ def _flow_filter(flow_ids: list[str] | None) -> str | None:
 def _predicate_filter(predicate: object) -> str | None:
     field, operator, expected = _predicate_values(predicate)
     if field in {"evidence_id", "flow_id", "direction"}:
+        return None
+    if field == "frame.time_relative":
         return None
     if field == "event_type":
         if operator not in {"eq", "in"}:
@@ -693,7 +694,17 @@ class RealAnalyzerAdapter:
             stats = _read_json_object(task_root / "speed_stats.json")
         except AppError:
             return False
-        expected = stats.get("sha256")
+        expected = stats.get("original_input_sha256")
+        if expected is None:
+            stats_input = stats.get("input_file")
+            try:
+                same_input = (
+                    isinstance(stats_input, str)
+                    and Path(stats_input).resolve() == input_path.resolve()
+                )
+            except OSError:
+                same_input = False
+            expected = stats.get("sha256") if same_input else None
         if not isinstance(expected, str) or not re.fullmatch(
             r"[0-9a-fA-F]{64}", expected
         ):
@@ -875,7 +886,9 @@ class RealAnalyzerAdapter:
                 if existing_manifest.get("status") in {
                     "completed",
                     "partial",
-                } and self._matches_existing_content(task_root, input_path):
+                } and await asyncio.to_thread(
+                    self._matches_existing_content, task_root, input_path
+                ):
                     existing_paths = self._artifacts.create(request.request_id)
                     return self._response_from_artifacts(
                         request,
@@ -1159,6 +1172,7 @@ class RealAnalyzerAdapter:
                         matched += 1
                         continue
                     if len(items) >= request.limit:
+                        matched += 1
                         has_more = True
                         break
                     items.append({field: item.get(field) for field in output_fields})
@@ -1170,7 +1184,7 @@ class RealAnalyzerAdapter:
             if has_more:
                 break
         next_offset = request.offset + len(items) if has_more else None
-        total = request.offset + len(items) + (1 if has_more else 0)
+        total = matched
         warnings = ["PACKET_QUERY_TOTAL_LOWER_BOUND"] if has_more else []
         source = (
             "filtered:" + ",".join(sorted(source_directions))

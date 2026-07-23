@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastmcp import Context, FastMCP
@@ -13,6 +14,7 @@ from packetmaster.analyzer.base import (
 )
 from packetmaster.analyzer.real import RealAnalyzerAdapter
 from packetmaster.config import Settings
+from packetmaster.context import bounded_flow_metrics, bounded_interval_series
 from packetmaster.domain import AnalyzeRequest, AnalyzeResponse, EvidenceRequest
 from packetmaster.errors import AppError
 
@@ -91,16 +93,43 @@ def _safe_metrics(value: object, *, interval: bool = False) -> dict[str, Any]:
         }
     histogram = value.get("rtt_histogram")
     if isinstance(histogram, list):
-        output["rtt_histogram"] = [
-            {
-                key: bucket[key]
-                for key in ("upper_bound_ms", "count")
-                if isinstance(bucket.get(key), str | int | float)
-            }
-            for bucket in histogram[:64]
-            if isinstance(bucket, dict)
-        ]
+        safe_histogram = []
+        for bucket in histogram[:64]:
+            if not isinstance(bucket, dict):
+                continue
+            bound = bucket.get("upper_bound_ms")
+            count = bucket.get("count")
+            bound_is_safe = (
+                bound == "inf"
+                or isinstance(bound, int | float)
+                and not isinstance(bound, bool)
+            )
+            if (
+                bound_is_safe
+                and isinstance(count, int)
+                and not isinstance(count, bool)
+                and count >= 0
+            ):
+                safe_histogram.append({"upper_bound_ms": bound, "count": count})
+        output["rtt_histogram"] = safe_histogram
     return output
+
+
+def _safe_coverage(response: AnalyzeResponse) -> dict[str, Any]:
+    coverage = response.coverage_summary
+    return {
+        "input_size_bytes": coverage.input_size_bytes,
+        "total_packets_seen": coverage.total_packets_seen,
+        "tcp_packets_seen": coverage.tcp_packets_seen,
+        "speed_packets_analyzed": coverage.speed_packets_analyzed,
+        "analyzed_bytes": coverage.analyzed_bytes,
+        "analyzed_duration_seconds": coverage.analyzed_duration_seconds,
+        "complete": coverage.complete,
+        "truncated": coverage.truncated,
+        "truncation_reason": (
+            "ANALYSIS_TRUNCATED" if coverage.truncation_reason else None
+        ),
+    }
 
 
 def _safe_syn_options(value: object) -> dict[str, Any]:
@@ -131,15 +160,24 @@ def _safe_warning(value: str) -> str:
 
 def _safe_analysis_data(response: AnalyzeResponse) -> dict[str, Any]:
     data = response.model_dump(mode="json")
+    data["coverage_summary"] = _safe_coverage(response)
     data["tcp_summary"] = _safe_metrics(response.tcp_summary)
-    data["flow_summary"] = {
+    safe_flows = {
         str(flow_id)[:256]: _safe_metrics(metrics)
-        for flow_id, metrics in list(response.flow_summary.items())[:256]
+        for flow_id, metrics in response.flow_summary.items()
     }
-    data["interval_summary"] = [
+    safe_intervals = [
         _safe_metrics(interval, interval=True)
-        for interval in response.interval_summary[:10_000]
+        for interval in response.interval_summary
     ]
+    data["flow_summary"], flow_summary = bounded_flow_metrics(safe_flows, 256)
+    data["interval_summary"], interval_summary = bounded_interval_series(
+        safe_intervals, 1000
+    )
+    data["transport_summary"] = {
+        "flows": flow_summary,
+        "intervals": interval_summary,
+    }
     data["syn_options"] = _safe_syn_options(response.syn_options)
     data["available_evidence"] = [
         item
@@ -153,6 +191,13 @@ def _safe_analysis_data(response: AnalyzeResponse) -> dict[str, Any]:
     }
     data["warnings"] = [_safe_warning(item) for item in response.warnings[:20]]
     data["artifact_paths"] = {}
+    if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > 1_000_000:
+        raise AppError(
+            code="INVALID_ANALYSIS_OUTPUT",
+            message="Sanitized MCP analysis response exceeds 1 MiB",
+            recoverable=False,
+            suggested_action="Reduce aggregate cardinality and rerun.",
+        )
     return data
 
 

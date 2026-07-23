@@ -251,6 +251,7 @@ class TcpAccumulator:
         self._flow_max_times: dict[str, float] = {}
         self._flow_rtt_counts: dict[str, list[int]] = {}
         self._intervals: dict[tuple[float, str], dict[str, Any]] = {}
+        self._interval_rtt_counts: dict[tuple[float, str], list[int]] = {}
         self._rtt_counts = [0] * len(RTT_BUCKETS_MS)
         self._events: list[dict[str, Any]] = []
         self._syn_packet_count = 0
@@ -326,6 +327,7 @@ class TcpAccumulator:
                 self._flow_max_times.get(flow_id, time_relative), time_relative
             )
         metric_groups = [self._metrics, flow_metrics]
+        interval_key: tuple[float, str] | None = None
         if time_relative is not None:
             interval_start = (
                 math.floor(time_relative / self.interval_seconds)
@@ -361,6 +363,11 @@ class TcpAccumulator:
                         flow_id, [0] * len(RTT_BUCKETS_MS)
                     )
                     flow_rtt_counts[index] += 1
+                    if interval_key is not None:
+                        interval_rtt_counts = self._interval_rtt_counts.setdefault(
+                            interval_key, [0] * len(RTT_BUCKETS_MS)
+                        )
+                        interval_rtt_counts[index] += 1
                     break
 
         self._observe_syn_options(row)
@@ -425,6 +432,11 @@ class TcpAccumulator:
                 "throughput_mbps": (
                     metrics["payload_bytes"] * 8
                     / (self.interval_seconds * 1_000_000)
+                ),
+                "rtt_histogram": _histogram(
+                    self._interval_rtt_counts.get(
+                        (interval_start, direction), [0] * len(RTT_BUCKETS_MS)
+                    )
                 ),
             }
             intervals.append(item)

@@ -180,6 +180,96 @@ def _relative_anomaly(
     )
 
 
+def _head_tail_indices(indices: list[int], limit: int) -> list[int]:
+    if limit <= 0:
+        return []
+    if len(indices) <= limit:
+        return indices
+    head = (limit + 1) // 2
+    tail = limit - head
+    return [*indices[:head], *(indices[-tail:] if tail else [])]
+
+
+def bounded_interval_series(
+    intervals: list[dict[str, Any]], max_items: int
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    if max_items < 1:
+        raise ValueError("max_items must be positive")
+    baselines = _baselines(intervals)
+    previous_by_direction: dict[str, dict[str, Any]] = {}
+    anomaly_indices: list[int] = []
+    normal_indices: list[int] = []
+    for index, item in enumerate(intervals):
+        direction = str(item.get("direction", "unknown"))
+        has_event = any(
+            isinstance(item.get(key), int | float) and item[key] > 0
+            for key in _EVENT_COUNT_KEYS
+        )
+        is_anomalous = has_event or _relative_anomaly(
+            item, baselines, previous_by_direction.get(direction)
+        )
+        (anomaly_indices if is_anomalous else normal_indices).append(index)
+        previous_by_direction[direction] = item
+    normal_reserve = (
+        min(len(normal_indices), max(1, max_items // 10))
+        if anomaly_indices and normal_indices and len(anomaly_indices) >= max_items
+        else 0
+    )
+    anomaly_budget = min(len(anomaly_indices), max_items - normal_reserve)
+    normal_budget = min(len(normal_indices), max_items - anomaly_budget)
+    selected_indices = sorted(
+        [
+            *_head_tail_indices(anomaly_indices, anomaly_budget),
+            *_head_tail_indices(normal_indices, normal_budget),
+        ]
+    )
+    anomaly_index_set = set(anomaly_indices)
+    selected_anomalies = sum(
+        index in anomaly_index_set for index in selected_indices
+    )
+    return [intervals[index] for index in selected_indices], {
+        "total": len(intervals),
+        "returned": len(selected_indices),
+        "omitted": len(intervals) - len(selected_indices),
+        "anomaly_total": len(anomaly_indices),
+        "anomaly_returned": selected_anomalies,
+    }
+
+
+def bounded_flow_metrics(
+    flows: dict[str, dict[str, Any]], max_flows: int
+) -> tuple[dict[str, dict[str, Any]], dict[str, int]]:
+    if max_flows < 1:
+        raise ValueError("max_flows must be positive")
+    baselines = _baselines(list(flows.values()))
+    anomalous = [
+        item
+        for item in flows.items()
+        if any(
+            isinstance(item[1].get(key), int | float) and item[1][key] > 0
+            for key in _EVENT_COUNT_KEYS
+        )
+        or _relative_anomaly(item[1], baselines)
+    ]
+    anomalous_ids = {flow_id for flow_id, _ in anomalous}
+    normal = [item for item in flows.items() if item[0] not in anomalous_ids]
+
+    def payload_rank(item: tuple[str, dict[str, Any]]) -> float:
+        return float(item[1].get("payload_bytes", 0))
+
+    anomalous.sort(key=payload_rank, reverse=True)
+    normal.sort(key=payload_rank, reverse=True)
+    returned = [*anomalous, *normal][:max_flows]
+    anomaly_returned = sum(flow_id in anomalous_ids for flow_id, _ in returned)
+    return dict(returned), {
+        "total": len(flows),
+        "returned": len(returned),
+        "omitted": len(flows) - len(returned),
+        "anomaly_total": len(anomalous),
+        "anomaly_returned": anomaly_returned,
+    }
+
+
 def bounded_evidence(
     responses: list[EvidenceResponse], *, max_layers: int = 8, max_items: int = 80
 ) -> dict[str, dict[str, Any]]:
@@ -332,32 +422,7 @@ class ContextBuilder:
             for flow_id, data in flows.items()
             if isinstance(data, dict)
         }
-        baselines = _baselines(list(projected.values()))
-        anomalous = [
-            item
-            for item in projected.items()
-            if self._has_event_anomaly(item[1])
-            or _relative_anomaly(item[1], baselines)
-        ]
-        anomalous_ids = {flow_id for flow_id, _ in anomalous}
-        normal = [
-            item for item in projected.items() if item[0] not in anomalous_ids
-        ]
-        def payload_rank(item: tuple[str, dict[str, Any]]) -> float:
-            return float(item[1].get("payload_bytes", 0))
-
-        anomalous.sort(key=payload_rank, reverse=True)
-        normal.sort(key=payload_rank, reverse=True)
-        ranked = [*anomalous, *normal]
-        returned = ranked[: self.max_flows]
-        anomaly_returned = sum(flow_id in anomalous_ids for flow_id, _ in returned)
-        return dict(returned), {
-            "total": len(projected),
-            "returned": len(returned),
-            "omitted": len(projected) - len(returned),
-            "anomaly_total": len(anomalous),
-            "anomaly_returned": anomaly_returned,
-        }
+        return bounded_flow_metrics(projected, self.max_flows)
 
     def build(
         self,
@@ -371,6 +436,40 @@ class ContextBuilder:
             raise ValueError("bandwidth values must be positive")
         anomalies, normal_summary = self._intervals(analysis.interval_summary)
         flows, flow_compression = self._flows(analysis.flow_summary)
+        transport_flows = analysis.transport_summary.get("flows")
+        if isinstance(transport_flows, dict) and isinstance(
+            transport_flows.get("total"), int
+        ):
+            original_total = max(transport_flows["total"], len(flows))
+            flow_compression.update(
+                total=original_total,
+                returned=len(flows),
+                omitted=original_total - len(flows),
+                anomaly_total=max(
+                    flow_compression["anomaly_total"],
+                    int(transport_flows.get("anomaly_total", 0)),
+                ),
+            )
+        transport_intervals = analysis.transport_summary.get("intervals")
+        if isinstance(transport_intervals, dict) and isinstance(
+            transport_intervals.get("total"), int
+        ):
+            normal_summary.update(
+                transport_total=transport_intervals["total"],
+                transport_returned=int(transport_intervals.get("returned", 0)),
+                transport_omitted=int(transport_intervals.get("omitted", 0)),
+            )
+            original_anomaly_total = int(
+                transport_intervals.get(
+                    "anomaly_total", normal_summary["anomaly_total"]
+                )
+            )
+            normal_summary.update(
+                anomaly_total=max(
+                    original_anomaly_total, normal_summary["anomaly_total"]
+                ),
+                anomaly_omitted=max(0, original_anomaly_total - len(anomalies)),
+            )
         raw_coverage = analysis.coverage_summary
         coverage = {
             "input_size_bytes": raw_coverage.input_size_bytes,

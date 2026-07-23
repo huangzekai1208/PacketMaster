@@ -105,6 +105,7 @@ class AnalyzeResponse(ContractModel):
     syn_options: dict[str, Any] = Field(default_factory=dict)
     available_evidence: list[str] = Field(default_factory=list)
     resource_usage: dict[str, Any] = Field(default_factory=dict)
+    transport_summary: dict[str, Any] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     artifact_paths: dict[str, Any] = Field(default_factory=dict)
 

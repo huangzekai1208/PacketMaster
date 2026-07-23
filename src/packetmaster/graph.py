@@ -434,15 +434,19 @@ def build_graph(
             )
             else Confidence.LOW
         )
-        if observable_accepted and report_confidence is not Confidence.LOW:
+        if observable_accepted:
             report_candidates = [
                 item.model_copy(
                     update={
                         "confidence": (
-                            Confidence.MEDIUM
-                            if item.confidence is Confidence.HIGH
-                            and report_confidence is Confidence.MEDIUM
-                            else item.confidence
+                            Confidence.LOW
+                            if report_confidence is Confidence.LOW
+                            else (
+                                Confidence.MEDIUM
+                                if item.confidence is Confidence.HIGH
+                                and report_confidence is Confidence.MEDIUM
+                                else item.confidence
+                            )
                         )
                     }
                 )

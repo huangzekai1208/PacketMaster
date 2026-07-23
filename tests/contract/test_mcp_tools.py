@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from packetmaster.analyzer.mock import MockAnalyzerAdapter
 from packetmaster.analyzer.real import RealAnalyzerAdapter
+from packetmaster.context import ContextBuilder
 from packetmaster.domain import (
     AnalyzeRequest,
     AnalyzeResponse,
@@ -192,7 +193,14 @@ def _write_real_outputs(
     (output / "coverage.json").write_text(json.dumps(coverage), encoding="utf-8")
     (output / "tcp_analysis.json").write_text(json.dumps(summary), encoding="utf-8")
     (output / "speed_stats.json").write_text(
-        json.dumps({"sha256": hashlib.sha256(input_path.read_bytes()).hexdigest()}),
+        json.dumps(
+            {
+                "sha256": hashlib.sha256(input_path.read_bytes()).hexdigest(),
+                "original_input_sha256": hashlib.sha256(
+                    input_path.read_bytes()
+                ).hexdigest(),
+            }
+        ),
         encoding="utf-8",
     )
     (output / "progress.jsonl").write_text("", encoding="utf-8")
@@ -728,6 +736,10 @@ def test_packet_query_uses_global_epoch_directed_filter_timeout_and_source(
                     fields=["frame.number", "frame.time_relative", "tcp.len"],
                     predicates=[
                         EvidencePredicate(field="tcp.len", operator="gt", value=0)
+                        ,
+                        EvidencePredicate(
+                            field="frame.time_relative", operator="gte", value=9
+                        ),
                     ],
                 ),
                 limit=1,
@@ -745,8 +757,30 @@ def test_packet_query_uses_global_epoch_directed_filter_timeout_and_source(
     assert all(call[3] == 7 for call in calls)
     assert all("frame.time_epoch >= 109" in call[2] for call in calls)
     assert all("tcp.len > 0" in call[2] for call in calls)
+    assert all("frame.time_relative >=" not in call[2] for call in calls)
     assert all("192.0.2.10" in call[2] and "50000" in call[2] for call in calls)
     assert all("frame.time_epoch" in call[1] for call in calls)
+
+    beyond = asyncio.run(
+        adapter.get_evidence(
+            EvidenceRequest(
+                analysis_id="packet-query",
+                evidence_type="custom_packet_query",
+                query=CustomEvidenceQuery(
+                    flow_ids=[flow_id],
+                    fields=["frame.number"],
+                    predicates=[
+                        EvidencePredicate(field="tcp.len", operator="gt", value=0)
+                    ],
+                ),
+                offset=10,
+                limit=1,
+            )
+        )
+    )
+    assert beyond.items == []
+    assert beyond.total == 3
+    assert beyond.total_exact is True
 
 
 def test_custom_event_packet_query_prefers_sqlite_without_starting_tshark(
@@ -813,6 +847,17 @@ def test_custom_event_packet_query_prefers_sqlite_without_starting_tshark(
     assert response.total_exact is True
     assert response.source.endswith("analysis.sqlite")
 
+    default_events = asyncio.run(
+        adapter.get_evidence(
+            EvidenceRequest(
+                analysis_id="indexed-packet-query",
+                evidence_type="events",
+            )
+        )
+    )
+    assert default_events.total == 1
+    assert default_events.items[0]["evidence_id"] == "ev-indexed"
+
 
 def test_real_adapter_reuses_completed_identical_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -844,6 +889,48 @@ def test_real_adapter_reuses_completed_identical_request(
     assert starts == 1
     assert first.analysis_id == second.analysis_id == "real-contract"
     assert second.resource_usage["reused"] is True
+
+
+def test_real_adapter_reuses_pcap_using_original_input_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "capture.pcap"
+    capture.write_bytes(b"original-pcap")
+    script = tmp_path / "pipeline.py"
+    script.write_text("# fixture", encoding="utf-8")
+    starts = 0
+
+    async def create_process(*args: object, **kwargs: object) -> FakeProcess:
+        nonlocal starts
+        starts += 1
+        output = Path(str(args[args.index("--output") + 1]))
+        input_path = Path(str(args[args.index("--input") + 1]))
+        _write_real_outputs(output, "download", input_path=input_path)
+        (output / "speed_stats.json").write_text(
+            json.dumps(
+                {
+                    "sha256": hashlib.sha256(b"normalized-pcapng").hexdigest(),
+                    "original_input_sha256": hashlib.sha256(
+                        input_path.read_bytes()
+                    ).hexdigest(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    adapter = RealAnalyzerAdapter(
+        artifact_root=tmp_path / "artifacts",
+        pipeline_script=script,
+    )
+    request = _request(request_id="real-contract", pcap_path=str(capture))
+
+    asyncio.run(adapter.analyze(request))
+    reused = asyncio.run(adapter.analyze(request))
+
+    assert starts == 1
+    assert reused.resource_usage["reused"] is True
 
 
 def test_real_adapter_does_not_reuse_same_size_mtime_with_different_content(
@@ -968,6 +1055,12 @@ def test_mcp_analysis_response_recursively_filters_untrusted_summary_fields() ->
                 raw_payload="RAW_SECRET",
                 log_lines=["FULL_LOG_SECRET"],
                 authorization="AUTH_SECRET",
+                rtt_histogram=[
+                    {
+                        "upper_bound_ms": "PAYLOAD_IN_ALLOWED_KEY",
+                        "count": "LOG_IN_ALLOWED_KEY",
+                    }
+                ],
             )
             response.flow_summary["f-secret"] = {
                 "direction": "download",
@@ -984,6 +1077,7 @@ def test_mcp_analysis_response_recursively_filters_untrusted_summary_fields() ->
             )
             response.syn_options["log_body"] = "SYN_LOG_SECRET"
             response.warnings = ["raw secret warning /private/full.log"]
+            response.coverage_summary.truncation_reason = "API_KEY_IN_COVERAGE"
             return response
 
     async def exercise() -> dict[str, object]:
@@ -1017,5 +1111,80 @@ def test_mcp_analysis_response_recursively_filters_untrusted_summary_fields() ->
         "PACKET_SECRET",
         "SYN_LOG_SECRET",
         "private/full.log",
+        "PAYLOAD_IN_ALLOWED_KEY",
+        "LOG_IN_ALLOWED_KEY",
+        "API_KEY_IN_COVERAGE",
     ):
         assert secret not in serialized
+
+
+def test_mcp_transport_compression_preserves_late_interval_and_slow_flow() -> None:
+    class LargeSummaryAdapter(MockAnalyzerAdapter):
+        async def analyze(self, request, progress_callback=None):
+            response = await super().analyze(request, progress_callback)
+            response.interval_summary = [
+                {
+                    "interval_start": float(index),
+                    "interval_end": float(index + 1),
+                    "direction": "download",
+                    "throughput_mbps": 900.0 if index < 1000 else 1.0,
+                    "payload_bytes": 1000,
+                }
+                for index in range(1001)
+            ]
+            response.flow_summary = {
+                f"normal-{index}": {
+                    "direction": "download",
+                    "throughput_mbps": 900.0,
+                    "payload_bytes": 1_000_000 + index,
+                }
+                for index in range(256)
+            }
+            response.flow_summary["slow-flow"] = {
+                "direction": "download",
+                "throughput_mbps": 1.0,
+                "payload_bytes": 1,
+            }
+            return response
+
+    async def exercise() -> dict[str, object]:
+        server = create_server(LargeSummaryAdapter(FIXTURE))
+        async with FastMCPClient(server) as client:
+            result = await client.call_tool(
+                "analyze_speed_capture", {"request": _request().model_dump(mode="json")}
+            )
+            assert isinstance(result.data, dict)
+            return result.data
+
+    envelope = asyncio.run(exercise())
+    data = envelope["data"]
+
+    assert envelope["ok"] is True
+    assert len(data["interval_summary"]) <= 1000
+    assert any(
+        interval["interval_start"] == 1000.0
+        for interval in data["interval_summary"]
+    )
+    assert len(data["flow_summary"]) <= 256
+    assert "slow-flow" in data["flow_summary"]
+    assert data["transport_summary"]["intervals"]["total"] == 1001
+    assert data["transport_summary"]["intervals"]["omitted"] == 1
+    assert data["transport_summary"]["flows"]["total"] == 257
+    assert data["transport_summary"]["flows"]["omitted"] == 1
+    assert len(json.dumps(envelope).encode("utf-8")) <= 1_000_000
+
+    context = ContextBuilder(max_intervals=24, max_flows=32).build(
+        AnalyzeResponse.model_validate(data),
+        [],
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+    )
+    assert "slow-flow" in context.flow_metrics
+    assert any(
+        interval["interval_start"] == 1000.0
+        for interval in context.anomaly_intervals
+    )
+    assert context.flow_compression["total"] == 257
+    assert context.flow_compression["omitted"] == 225
+    assert context.normal_interval_summary["transport_total"] == 1001
+    assert context.normal_interval_summary["transport_omitted"] == 1

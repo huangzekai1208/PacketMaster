@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -91,6 +92,14 @@ def read_json_object(path: Path) -> dict[str, Any]:
             details={"artifact": str(path)},
         )
     return value
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _stats_error(message: str) -> PipelineError:
@@ -406,9 +415,14 @@ def run(args: argparse.Namespace) -> int:
             args.min_ratio,
             args.min_bytes,
         )
-        stats = _validate_speed_stats(
-            read_json_object(stats_path), normalized, target
+        raw_stats = read_json_object(stats_path)
+        stats = _validate_speed_stats(raw_stats, normalized, target)
+        raw_stats["original_input_sha256"] = (
+            raw_stats["sha256"]
+            if normalized.resolve() == input_path.resolve()
+            else _sha256_file(input_path)
         )
+        atomic_write_json(stats_path, raw_stats)
         captures: dict[str, Path] = {}
         for direction, capture in stats.filtered_files.items():
             if not capture.is_file():
