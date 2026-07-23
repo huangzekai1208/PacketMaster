@@ -27,6 +27,7 @@ from packetmaster.errors import AppError
 
 MAX_EVIDENCE_ROUNDS = 3
 MAX_REQUESTS_PER_ROUND = 10
+MAX_EVIDENCE_RESPONSE_BYTES = 1_000_000
 
 
 class AgentState(TypedDict, total=False):
@@ -248,19 +249,23 @@ def build_graph(
                         recoverable=False,
                         suggested_action="Fix the MCP evidence adapter.",
                     )
-                if len(response.model_dump_json()) > 1_000_000:
-                    raise AppError(
-                        code="INVALID_EVIDENCE_OUTPUT",
-                        message="Evidence response exceeds the state size limit",
-                        recoverable=False,
-                        suggested_action="Reduce the evidence page payload.",
-                    )
                 response.coverage_range.setdefault("offset", request.offset)
                 identity = request.model_dump(mode="json")
                 identity.update(offset=0, limit=0)
                 response.coverage_range["query_key"] = json.dumps(
                     identity, sort_keys=True, separators=(",", ":")
                 )
+                response_bytes = len(
+                    response.model_dump_json().encode("utf-8")
+                )
+                if response_bytes > MAX_EVIDENCE_RESPONSE_BYTES:
+                    raise AppError(
+                        code="INVALID_EVIDENCE_OUTPUT",
+                        message="Evidence response exceeds the state size limit",
+                        recoverable=False,
+                        suggested_action="Reduce the evidence page payload.",
+                        details={"size_bytes": response_bytes},
+                    )
                 responses.append(response)
             evidence = [*state.get("evidence", []), *responses]
             round_count = int(state.get("round_count", 0)) + 1
@@ -417,11 +422,21 @@ def build_graph(
             return await _report_impl(state)
         except Exception as exc:
             error = _error_dict(exc, "REPORT_FAILED")
+            try:
+                fallback_target = Target(state.get("target", Target.DOWNLOAD))
+            except (TypeError, ValueError):
+                fallback_target = Target.DOWNLOAD
+            fallback_standard = _positive_float(
+                state.get("standard_bandwidth_mbps")
+            )
+            fallback_actual = _positive_float(state.get("actual_bandwidth_mbps"))
             fallback = DiagnosticReport(
-                standard_bandwidth_mbps=1.0,
-                actual_bandwidth_mbps=1.0,
-                achievement_ratio_pct=100.0,
-                target=Target.DOWNLOAD,
+                standard_bandwidth_mbps=fallback_standard,
+                actual_bandwidth_mbps=fallback_actual,
+                achievement_ratio_pct=(
+                    fallback_actual / fallback_standard * 100
+                ),
+                target=fallback_target,
                 primary_cause="unresolved",
                 confidence=Confidence.LOW,
                 coverage_summary=CoverageSummary(),

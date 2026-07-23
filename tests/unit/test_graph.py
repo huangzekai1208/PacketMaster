@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from packetmaster.domain import EvidenceRequest
+import packetmaster.graph as graph_module
+from packetmaster.domain import DiagnosticReport, EvidenceRequest, EvidenceResponse
 from packetmaster.graph import build_graph
 from tests.fakes import FakeDiagnosisModel, FakeMCPClient
 
@@ -60,6 +61,8 @@ def test_graph_caps_evidence_loop_at_three_rounds(tmp_path: Path) -> None:
     assert len(mcp.evidence_calls) == 3
     assert all(1 <= request.limit <= 500 for request in mcp.evidence_calls)
     assert result["report"].primary_cause == "unresolved"
+    assert result["report"].confidence.value == "low"
+    assert result["report"].evidence_quality["local_evidence_truncated"] is True
     assert [request.offset for request in mcp.evidence_calls] == [0, 100, 200]
 
 
@@ -93,6 +96,7 @@ def test_graph_rejects_cross_analysis_evidence_request(tmp_path: Path) -> None:
     assert result["error"]["code"] == "EVIDENCE_ANALYSIS_MISMATCH"
     assert mcp.evidence_calls == []
     assert result["report"].primary_cause == "unresolved"
+    assert result["report"].confidence.value == "low"
 
 
 def test_graph_degrades_analysis_error_to_unresolved_report(tmp_path: Path) -> None:
@@ -133,3 +137,78 @@ def test_graph_rejects_unknown_target_and_trace_is_payload_free(tmp_path: Path) 
         "evidence_request_count",
     }
     assert all(set(event) <= allowed for event in result["trace"])
+
+
+def test_report_fallback_preserves_upload_and_bandwidth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_report = DiagnosticReport
+    calls = 0
+
+    def flaky_report(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ValueError("force fallback")
+        return real_report(**kwargs)
+
+    monkeypatch.setattr(graph_module, "DiagnosticReport", flaky_report)
+    graph = build_graph(
+        mcp_client=FakeMCPClient(),
+        diagnosis_model=FakeDiagnosisModel(initial_request=False),
+    )
+    state = _input(tmp_path)
+    state["request"]["target"] = "upload"
+
+    result = asyncio.run(graph.ainvoke(state))
+
+    assert result["report"].target.value == "upload"
+    assert result["report"].standard_bandwidth_mbps == 1000.0
+    assert result["report"].actual_bandwidth_mbps == 600.0
+    assert result["error"]["code"] == "REPORT_FAILED"
+
+
+def test_graph_rejects_evidence_over_utf8_byte_limit(tmp_path: Path) -> None:
+    class OversizedMCP(FakeMCPClient):
+        async def get_tcp_evidence(self, request):
+            return EvidenceResponse(
+                analysis_id=request.analysis_id,
+                evidence_type=request.evidence_type,
+                items=[{"evidence_id": "ev-large", "text": "汉" * 400_000}],
+                total=1,
+                source="fake",
+                coverage_range={"offset": request.offset},
+            )
+
+    graph = build_graph(
+        mcp_client=OversizedMCP(), diagnosis_model=FakeDiagnosisModel()
+    )
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert result["error"]["code"] == "INVALID_EVIDENCE_OUTPUT"
+    assert result["report"].primary_cause == "unresolved"
+
+
+def test_ready_verification_still_validates_unsafe_request(tmp_path: Path) -> None:
+    class ReadyUnsafeModel(FakeDiagnosisModel):
+        async def verify(self, context, hypotheses, evidence):
+            result = await super().verify(context, hypotheses, evidence)
+            result.ready_for_report = True
+            result.requested_evidence = [
+                EvidenceRequest(
+                    analysis_id="another-analysis",
+                    evidence_type="events",
+                )
+            ]
+            return result
+
+    graph = build_graph(
+        mcp_client=FakeMCPClient(),
+        diagnosis_model=ReadyUnsafeModel(initial_request=False),
+    )
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert result["error"]["code"] == "EVIDENCE_ANALYSIS_MISMATCH"
+    assert result["report"].primary_cause == "unresolved"
