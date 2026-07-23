@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -61,7 +63,7 @@ def _positive_float(value: Any, default: float = 1.0) -> float:
         parsed = float(value)
     except (TypeError, ValueError):
         return default
-    return parsed if parsed > 0 else default
+    return parsed if parsed > 0 and math.isfinite(parsed) else default
 
 
 def _trace(
@@ -100,6 +102,7 @@ def build_graph(
         state: AgentState, candidates: list[EvidenceRequest]
     ) -> list[EvidenceRequest]:
         normalized: list[EvidenceRequest] = []
+        current_keys: set[str] = set()
         analysis_id = state["analysis"].analysis_id
         for candidate in candidates[:MAX_REQUESTS_PER_ROUND]:
             request = EvidenceRequest.model_validate(candidate)
@@ -111,10 +114,16 @@ def build_graph(
                     recoverable=False,
                     suggested_action="Use the active analysis_id.",
                 )
+            identity = request.model_dump(mode="json")
+            identity.update(offset=0, limit=0)
+            query_key = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+            if query_key in current_keys:
+                continue
+            current_keys.add(query_key)
             previous = [
                 item
                 for item in state.get("evidence", [])
-                if item.evidence_type == request.evidence_type
+                if item.coverage_range.get("query_key") == query_key
             ]
             if previous and request.offset <= int(
                 previous[-1].coverage_range.get("offset", 0)
@@ -239,7 +248,19 @@ def build_graph(
                         recoverable=False,
                         suggested_action="Fix the MCP evidence adapter.",
                     )
+                if len(response.model_dump_json()) > 1_000_000:
+                    raise AppError(
+                        code="INVALID_EVIDENCE_OUTPUT",
+                        message="Evidence response exceeds the state size limit",
+                        recoverable=False,
+                        suggested_action="Reduce the evidence page payload.",
+                    )
                 response.coverage_range.setdefault("offset", request.offset)
+                identity = request.model_dump(mode="json")
+                identity.update(offset=0, limit=0)
+                response.coverage_range["query_key"] = json.dumps(
+                    identity, sort_keys=True, separators=(",", ":")
+                )
                 responses.append(response)
             evidence = [*state.get("evidence", []), *responses]
             round_count = int(state.get("round_count", 0)) + 1
@@ -279,11 +300,10 @@ def build_graph(
                 state["hypotheses"],
                 state.get("evidence", []),
             )
-            requests = (
-                []
-                if result.ready_for_report
-                else normalize_requests(state, result.requested_evidence)
+            validated_requests = normalize_requests(
+                state, result.requested_evidence
             )
+            requests = [] if result.ready_for_report else validated_requests
             return {
                 "verification": result,
                 "evidence_requests": requests,
@@ -303,7 +323,7 @@ def build_graph(
                 ),
             }
 
-    async def report(state: AgentState) -> dict[str, Any]:
+    async def _report_impl(state: AgentState) -> dict[str, Any]:
         verification = state.get("verification")
         hypotheses = state.get("hypotheses", HypothesisBatch())
         error = state.get("error")
@@ -353,7 +373,12 @@ def build_graph(
             ][:20],
             confidence=(
                 verification.confidence
-                if verification and verification.confidence
+                if (
+                    verification
+                    and verification.ready_for_report
+                    and verification.confidence
+                    and not error
+                )
                 else Confidence.LOW
             ),
             coverage_summary=coverage,
@@ -361,6 +386,10 @@ def build_graph(
                 "coverage_complete": coverage.complete,
                 "coverage_truncated": coverage.truncated,
                 "evidence_pages": len(state.get("evidence", [])),
+                "local_evidence_truncated": any(
+                    item.truncated for item in state.get("evidence", [])
+                ),
+                "missing_information": limitations[:10],
             },
             limitations=limitations,
             troubleshooting_steps=[
@@ -382,6 +411,30 @@ def build_graph(
                 error_code=error["code"] if error else None,
             ),
         }
+
+    async def report(state: AgentState) -> dict[str, Any]:
+        try:
+            return await _report_impl(state)
+        except Exception as exc:
+            error = _error_dict(exc, "REPORT_FAILED")
+            fallback = DiagnosticReport(
+                standard_bandwidth_mbps=1.0,
+                actual_bandwidth_mbps=1.0,
+                achievement_ratio_pct=100.0,
+                target=Target.DOWNLOAD,
+                primary_cause="unresolved",
+                confidence=Confidence.LOW,
+                coverage_summary=CoverageSummary(),
+                limitations=["REPORT_FAILED: minimal fallback generated"],
+                analysis_metadata={"error_code": error["code"]},
+            )
+            return {
+                "report": fallback,
+                "error": error,
+                "trace": _trace(
+                    state, "report", status="degraded", error_code=error["code"]
+                ),
+            }
 
     def after_node(state: AgentState) -> str:
         return "report" if state.get("error") else "continue"
