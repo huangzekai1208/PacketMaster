@@ -1,0 +1,8 @@
+# PacketMaster supports Python 3.11 through 3.13.
+# Runtime dependencies are maintained in pyproject.toml.
+-e .
+
+# Development and verification tools.
+pytest>=8
+pytest-asyncio>=0.23
+ruff>=0.6
