@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
+import psutil
 import pytest
 from typer.testing import CliRunner
 
@@ -409,3 +413,98 @@ def test_cli_real_agent_smoke_preserves_target_and_writes_evidence_report(
         if path.is_file() and path.suffix in {".json", ".jsonl", ".log"}:
             local_text += path.read_text(encoding="utf-8", errors="replace")
     assert api_key not in local_text
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="Windows CTRL_BREAK release gate"
+)
+def test_windows_real_cli_cancellation_terminates_pipeline_tree(
+    tmp_path: Path, tshark_path: Path
+) -> None:
+    capture = (tmp_path / "cancel capture.pcapng").resolve()
+    generated = subprocess.run(
+        [
+            sys.executable,
+            str(CAPTURE_GENERATOR),
+            "--output",
+            str(capture),
+            "--flows",
+            "2",
+            "--data-packets-per-flow",
+            "25000",
+            "--anomaly-after",
+            "5000",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=180,
+    )
+    assert generated.returncode == 0, generated.stdout + generated.stderr
+
+    artifact_root = (tmp_path / "cancel artifacts").resolve()
+    report_root = (tmp_path / "cancel report").resolve()
+    environment = os.environ.copy()
+    environment.update(
+        ARTIFACT_ROOT=str(artifact_root),
+        TSHARK_PATH=str(tshark_path),
+    )
+    console_log = tmp_path / "cancel-cli.log"
+    descendants: list[psutil.Process] = []
+
+    def command_line(child: psutil.Process) -> str:
+        try:
+            return " ".join(child.cmdline())
+        except psutil.Error:
+            return ""
+
+    with console_log.open("w", encoding="utf-8", errors="replace") as output:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "packetmaster.cli",
+                "diagnose",
+                str(capture),
+                "--standard",
+                "1000",
+                "--actual",
+                "600",
+                "--output-dir",
+                str(report_root),
+            ],
+            cwd=ROOT,
+            env=environment,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+        )
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and process.poll() is None:
+            try:
+                descendants = psutil.Process(process.pid).children(recursive=True)
+            except psutil.Error:
+                descendants = []
+            if any(
+                "run_pipeline.py" in command_line(child)
+                for child in descendants
+                if child.is_running()
+            ):
+                break
+            time.sleep(0.05)
+        else:
+            process.kill()
+            process.wait(timeout=10)
+            pytest.fail("real speed-analyze child did not start before timeout")
+
+        process.send_signal(signal.CTRL_BREAK_EVENT)
+        returncode = process.wait(timeout=30)
+
+    _, alive = psutil.wait_procs(descendants, timeout=10)
+    assert returncode != 0
+    assert alive == []
+    task_roots = [path for path in artifact_root.iterdir() if path.is_dir()]
+    assert len(task_roots) == 1
+    assert (task_roots[0] / "logs" / "pipeline.log").is_file()
+    assert not (report_root / "report.json").exists()
