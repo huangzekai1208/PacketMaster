@@ -1188,3 +1188,82 @@ def test_mcp_transport_compression_preserves_late_interval_and_slow_flow() -> No
     assert context.flow_compression["omitted"] == 225
     assert context.normal_interval_summary["transport_total"] == 1001
     assert context.normal_interval_summary["transport_omitted"] == 1
+
+
+def test_mcp_evidence_response_filters_values_paths_and_oversized_fields() -> None:
+    class UnsafeEvidenceAdapter(MockAnalyzerAdapter):
+        async def get_evidence(self, request):
+            return EvidenceResponse(
+                analysis_id=request.analysis_id,
+                evidence_type=request.evidence_type,
+                summary={"returned": 1, "api_key": "SUMMARY_SECRET"},
+                items=[
+                    {
+                        "evidence_id": "ev-safe",
+                        "event_type": "retransmission",
+                        "frame.number": 42,
+                        "flow_id": "f-1",
+                        "direction": "download",
+                        "tcp.len": 1000,
+                        "tcp.payload": "PAYLOAD_SECRET",
+                        "authorization": "AUTH_SECRET",
+                        "nested": {"log": "LOG_SECRET"},
+                    }
+                ],
+                total=1,
+                source="/private/user/analysis.sqlite",
+                coverage_range={
+                    "offset": 0,
+                    "complete": True,
+                    "query_key": "QUERY_SECRET",
+                },
+                warnings=["FULL_WARNING_SECRET /private/log"],
+            )
+
+    async def exercise() -> dict[str, object]:
+        server = create_server(UnsafeEvidenceAdapter(FIXTURE))
+        async with FastMCPClient(server) as client:
+            result = await client.call_tool(
+                "get_tcp_evidence",
+                {
+                    "request": EvidenceRequest(
+                        analysis_id="mock-contract", evidence_type="events"
+                    ).model_dump(mode="json")
+                },
+            )
+            assert isinstance(result.data, dict)
+            return result.data
+
+    envelope = asyncio.run(exercise())
+    serialized = json.dumps(envelope)
+
+    assert envelope["ok"] is True
+    assert envelope["data"]["items"] == [
+        {
+            "evidence_id": "ev-safe",
+            "event_type": "retransmission",
+            "frame.number": 42,
+            "flow_id": "f-1",
+            "direction": "download",
+            "tcp.len": 1000,
+        }
+    ]
+    assert envelope["data"]["summary"] == {"returned": 1}
+    assert envelope["data"]["source"] == "sqlite"
+    assert envelope["data"]["coverage_range"] == {
+        "offset": 0,
+        "complete": True,
+    }
+    assert envelope["data"]["warnings"] == ["EVIDENCE_WARNING_REDACTED"]
+    for secret in (
+        "SUMMARY_SECRET",
+        "PAYLOAD_SECRET",
+        "AUTH_SECRET",
+        "LOG_SECRET",
+        "private/user",
+        "QUERY_SECRET",
+        "FULL_WARNING_SECRET",
+        "private/log",
+    ):
+        assert secret not in serialized
+    assert len(serialized.encode("utf-8")) <= 1_000_000

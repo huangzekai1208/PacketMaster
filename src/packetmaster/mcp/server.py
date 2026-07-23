@@ -15,7 +15,12 @@ from packetmaster.analyzer.base import (
 from packetmaster.analyzer.real import RealAnalyzerAdapter
 from packetmaster.config import Settings
 from packetmaster.context import bounded_flow_metrics, bounded_interval_series
-from packetmaster.domain import AnalyzeRequest, AnalyzeResponse, EvidenceRequest
+from packetmaster.domain import (
+    AnalyzeRequest,
+    AnalyzeResponse,
+    EvidenceRequest,
+    EvidenceResponse,
+)
 from packetmaster.errors import AppError
 
 
@@ -201,6 +206,134 @@ def _safe_analysis_data(response: AnalyzeResponse) -> dict[str, Any]:
     return data
 
 
+_EVIDENCE_ITEM_FIELDS = {
+    "evidence_id",
+    "event_type",
+    "frame.number",
+    "frame.time_relative",
+    "flow_id",
+    "direction",
+    "tcp.seq",
+    "tcp.ack",
+    "tcp.window_size",
+    "tcp.len",
+    "tcp.analysis.ack_rtt",
+}
+
+
+def _safe_evidence_scalar(field: str, value: object) -> object | None:
+    if field in {"frame.number", "tcp.seq", "tcp.ack", "tcp.window_size", "tcp.len"}:
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+    if field in {"frame.time_relative", "tcp.analysis.ack_rtt"}:
+        return _number(value)
+    if field == "direction":
+        return value if value in {"download", "upload", "both"} else None
+    if field == "event_type":
+        allowed = {
+            "packet",
+            "retransmission",
+            "fast_retransmission",
+            "duplicate_ack",
+            "out_of_order",
+            "zero_window",
+            "window_full",
+        }
+        return value if value in allowed else None
+    if field in {"evidence_id", "flow_id"} and isinstance(value, str):
+        return value[:512]
+    return None
+
+
+def _safe_evidence_item(item: object, evidence_type: str) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    if evidence_type == "flow_summary":
+        output = _safe_metrics(item)
+        flow_id = item.get("flow_id")
+        if isinstance(flow_id, str):
+            output["flow_id"] = flow_id[:512]
+        return output
+    if evidence_type in {"io_timeline", "throughput_distribution"}:
+        output = _safe_metrics(item, interval=True)
+        interval_id = item.get("interval_id")
+        if isinstance(interval_id, int) and not isinstance(interval_id, bool):
+            output["interval_id"] = interval_id
+        return output
+    if evidence_type in {"summary", "rtt_distribution"}:
+        output = _safe_metrics(item)
+        name = item.get("name")
+        if name in {"tcp_summary", "coverage_summary"}:
+            output["name"] = name
+        return output
+    if evidence_type == "syn_options":
+        output = _safe_syn_options(item)
+        name = item.get("name")
+        if isinstance(name, str) and len(name) <= 64:
+            output["name"] = name
+        return output
+    output: dict[str, Any] = {}
+    for field in _EVIDENCE_ITEM_FIELDS:
+        if field not in item:
+            continue
+        value = _safe_evidence_scalar(field, item[field])
+        if value is not None:
+            output[field] = value
+    return output
+
+
+def _safe_evidence_source(source: str) -> str:
+    if source == "mock":
+        return "mock"
+    if source.startswith("filtered:"):
+        directions = [
+            item
+            for item in source.removeprefix("filtered:").split(",")
+            if item in {"download", "upload", "none"}
+        ]
+        return "filtered:" + ",".join(directions)
+    if source.lower().endswith(".sqlite"):
+        return "sqlite"
+    return "adapter"
+
+
+def _safe_evidence_data(response: EvidenceResponse) -> dict[str, Any]:
+    coverage: dict[str, Any] = {}
+    for key in ("offset", "limit"):
+        value = response.coverage_range.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            coverage[key] = value
+    complete = response.coverage_range.get("complete")
+    if isinstance(complete, bool):
+        coverage["complete"] = complete
+    warnings = [
+        item
+        if item in {"PACKET_QUERY_TOTAL_LOWER_BOUND"}
+        else "EVIDENCE_WARNING_REDACTED"
+        for item in response.warnings[:20]
+    ]
+    data = response.model_dump(mode="json")
+    data.update(
+        summary={
+            "returned": len(response.items),
+        },
+        items=[
+            _safe_evidence_item(item, response.evidence_type)
+            for item in response.items[:500]
+        ],
+        source=_safe_evidence_source(response.source),
+        coverage_range=coverage,
+        warnings=warnings,
+    )
+    if len(json.dumps(data, ensure_ascii=False).encode("utf-8")) > 1_000_000:
+        raise AppError(
+            code="INVALID_EVIDENCE_OUTPUT",
+            message="Sanitized MCP evidence response exceeds 1 MiB",
+            recoverable=False,
+            suggested_action="Reduce the evidence page size and retry.",
+        )
+    return data
+
+
 def create_server(adapter: AnalyzerAdapter) -> FastMCP:
     server = FastMCP("packetmaster")
 
@@ -238,7 +371,7 @@ def create_server(adapter: AnalyzerAdapter) -> FastMCP:
         try:
             parsed = EvidenceRequest.model_validate(request)
             result = await adapter.get_evidence(parsed)
-            return {"ok": True, "data": result.model_dump(mode="json")}
+            return {"ok": True, "data": _safe_evidence_data(result)}
         except ValidationError as exc:
             return _invalid_request(exc)
         except AppError as exc:
