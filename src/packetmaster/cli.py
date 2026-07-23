@@ -65,6 +65,27 @@ async def run_diagnosis(
                 "actual_bandwidth_mbps": actual,
             }
         )
+    graph_error = result.get("error")
+    if graph_error is not None:
+        if not isinstance(graph_error, dict):
+            raise AppError(
+                code="INVALID_GRAPH_OUTPUT",
+                message="PacketMaster graph returned an invalid error",
+                recoverable=False,
+                suggested_action="Check the PacketMaster graph version.",
+            )
+        details = graph_error.get("details")
+        raise AppError(
+            code=str(graph_error.get("code", "DIAGNOSIS_FAILED")),
+            message=str(graph_error.get("message", "Diagnosis failed")),
+            recoverable=bool(graph_error.get("recoverable", False)),
+            suggested_action=str(
+                graph_error.get(
+                    "suggested_action", "Inspect local artifacts and retry."
+                )
+            ),
+            details=details if isinstance(details, dict) else {},
+        )
     return DiagnosticReport.model_validate(result["report"])
 
 
@@ -77,14 +98,14 @@ def diagnose(
     output_dir: Annotated[str | None, typer.Option("--output-dir")] = None,
     keep_artifacts: Annotated[bool, typer.Option("--keep-artifacts")] = False,
 ) -> None:
-    settings = Settings.load()
-    request_id = create_request_id()
-    destination = (
-        Path(output_dir).expanduser().resolve()
-        if output_dir is not None
-        else (settings.artifact_root / request_id).expanduser().resolve()
-    )
     try:
+        settings = Settings.load()
+        request_id = create_request_id()
+        destination = (
+            Path(output_dir).expanduser().resolve()
+            if output_dir is not None
+            else (settings.artifact_root / request_id).expanduser().resolve()
+        )
         report = asyncio.run(
             run_diagnosis(
                 pcap_path=pcap_path,

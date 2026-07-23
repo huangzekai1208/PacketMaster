@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -142,6 +143,88 @@ def test_cli_maps_app_error_to_nonzero_exit(
     assert result.exit_code == 2
     assert "ANALYSIS_FAILED" in result.output
     assert not (tmp_path / "out" / "report.json").exists()
+
+
+def test_run_diagnosis_raises_error_returned_by_graph(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            pass
+
+    class FakeGraph:
+        async def ainvoke(self, state):
+            return {
+                "report": _report(Target.DOWNLOAD),
+                "error": {
+                    "code": "ANALYSIS_FAILED",
+                    "message": "failed",
+                    "recoverable": True,
+                    "suggested_action": "retry",
+                    "details": {"stage": "analyze"},
+                },
+            }
+
+    monkeypatch.setattr(cli, "RealAnalyzerAdapter", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "create_server", lambda adapter: object())
+    monkeypatch.setattr(cli, "SpeedMCPClient", FakeClient)
+    monkeypatch.setattr(cli, "DiagnosisModel", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "ContextBuilder", lambda: object())
+    monkeypatch.setattr(cli, "build_graph", lambda **kwargs: FakeGraph())
+
+    with pytest.raises(AppError) as raised:
+        asyncio.run(
+            cli.run_diagnosis(
+                pcap_path=str((tmp_path / "capture.pcapng").resolve()),
+                standard=1000,
+                actual=600,
+                target=Target.DOWNLOAD,
+                request_id="graph-error",
+                settings=Settings(artifact_root=tmp_path / "artifacts"),
+            )
+        )
+
+    assert raised.value.to_dict() == {
+        "code": "ANALYSIS_FAILED",
+        "message": "failed",
+        "recoverable": True,
+        "suggested_action": "retry",
+        "details": {"stage": "analyze"},
+    }
+
+
+def test_cli_wraps_settings_failure_as_structured_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "capture.pcapng"
+    capture.write_bytes(b"capture")
+
+    def fail_settings():
+        raise RuntimeError("invalid settings")
+
+    monkeypatch.setattr(cli.Settings, "load", fail_settings)
+    result = runner.invoke(
+        cli.app,
+        [
+            "diagnose",
+            str(capture.resolve()),
+            "--standard",
+            "1000",
+            "--actual",
+            "600",
+        ],
+    )
+
+    assert result.exit_code == 1
+    error = json.loads(result.output)
+    assert error["code"] == "CLI_FAILED"
+    assert error["details"] == {"exception_type": "RuntimeError"}
 
 
 def test_cli_keep_artifacts_writes_keep_marker(
