@@ -16,6 +16,7 @@ from tests.helpers import load_script_module
 ROOT = Path(__file__).resolve().parents[2]
 RUN_PIPELINE = ROOT / "speed-analyze" / "scripts" / "run_pipeline.py"
 FILTER_SCRIPT = ROOT / "speed-analyze" / "scripts" / "speed_filter_strip.py"
+CAPTURE_GENERATOR = ROOT / "scripts" / "generate_test_capture.py"
 
 
 def run_pipeline(
@@ -59,6 +60,29 @@ def read_json(path: Path) -> dict[str, object]:
         value = json.load(json_file)
     assert isinstance(value, dict)
     return value
+
+
+def generate_capture(output: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            str(CAPTURE_GENERATOR),
+            "--output",
+            str(output),
+            "--flows",
+            "2",
+            "--data-packets-per-flow",
+            "2500",
+            "--anomaly-after",
+            "5000",
+            "--zero-window",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
 
 
 def run_filter(capture: Path, output: Path) -> subprocess.CompletedProcess[str]:
@@ -342,6 +366,51 @@ def test_real_pipeline_keeps_requested_direction(
     filtered = manifest["artifact_paths"]["filtered_captures"]
     assert set(filtered) == expected
     assert len(set(filtered.values())) == len(expected)
+
+
+def test_generated_multiflow_capture_indexes_evidence_after_packet_5000(
+    tmp_path: Path, tshark_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api_key = "sk-release-gate-secret"
+    monkeypatch.setenv("MODEL_API_KEY", api_key)
+    capture = (tmp_path / "generated" / "多流 后段异常.pcapng").resolve()
+    generated = generate_capture(capture)
+    assert generated.returncode == 0, generated.stdout + generated.stderr
+    metadata = json.loads(generated.stdout)
+    assert metadata["anomaly_start_frame"] > 5000
+    duplicate = (tmp_path / "generated" / "deterministic-copy.pcapng").resolve()
+    duplicate_result = generate_capture(duplicate)
+    assert duplicate_result.returncode == 0
+    assert hashlib.sha256(capture.read_bytes()).digest() == hashlib.sha256(
+        duplicate.read_bytes()
+    ).digest()
+
+    output = (tmp_path / "generated-analysis").resolve()
+    result = run_pipeline(capture, output, tshark_path=tshark_path)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    coverage = read_json(output / "coverage.json")
+    analysis = read_json(output / "tcp_analysis.json")
+    assert coverage["speed_packets_analyzed"] > 5000
+    assert coverage["complete"] is True
+    assert coverage["truncated"] is False
+    assert len(analysis["flow_summary"]) >= 2
+    with sqlite3.connect(output / "analysis.sqlite") as connection:
+        late_events = connection.execute(
+            "SELECT frame_number, event_type FROM events "
+            "WHERE frame_number > 5000 ORDER BY frame_number"
+        ).fetchall()
+    assert late_events
+    assert {event_type for _, event_type in late_events} >= {
+        "retransmission",
+        "duplicate_ack",
+        "zero_window",
+    }
+    text_artifacts = result.stdout + result.stderr
+    for path in output.iterdir():
+        if path.suffix in {".json", ".jsonl"}:
+            text_artifacts += path.read_text(encoding="utf-8")
+    assert api_key not in text_artifacts
 
 
 def test_analyze_captures_streams_past_5000_and_indexes_final_event(

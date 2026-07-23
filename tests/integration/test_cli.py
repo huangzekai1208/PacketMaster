@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -11,8 +13,11 @@ import packetmaster.cli as cli
 from packetmaster.config import Settings
 from packetmaster.domain import Confidence, CoverageSummary, DiagnosticReport, Target
 from packetmaster.errors import AppError
+from tests.fakes import FakeDiagnosisModel
 
 runner = CliRunner()
+ROOT = Path(__file__).resolve().parents[2]
+CAPTURE_GENERATOR = ROOT / "scripts" / "generate_test_capture.py"
 
 
 def _report(target: Target) -> DiagnosticReport:
@@ -227,6 +232,43 @@ def test_cli_wraps_settings_failure_as_structured_error(
     assert error["details"] == {"exception_type": "RuntimeError"}
 
 
+def test_cli_wraps_output_path_resolution_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "capture.pcapng"
+    capture.write_bytes(b"capture")
+
+    class BrokenPath:
+        def __init__(self, value: str) -> None:
+            pass
+
+        def expanduser(self):
+            return self
+
+        def resolve(self):
+            raise OSError("output path unavailable")
+
+    monkeypatch.setattr(cli, "Path", BrokenPath)
+    result = runner.invoke(
+        cli.app,
+        [
+            "diagnose",
+            str(capture.resolve()),
+            "--standard",
+            "1000",
+            "--actual",
+            "600",
+            "--output-dir",
+            "unavailable-output",
+        ],
+    )
+
+    assert result.exit_code == 1
+    error = json.loads(result.output)
+    assert error["code"] == "CLI_FAILED"
+    assert error["details"] == {"exception_type": "OSError"}
+
+
 def test_cli_keep_artifacts_writes_keep_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -257,3 +299,75 @@ def test_cli_keep_artifacts_writes_keep_marker(
 
     assert result.exit_code == 0, result.output
     assert len(list(artifact_root.glob("*/.keep"))) == 1
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"),
+    [
+        ([], "download"),
+        (["--target", "upload"], "upload"),
+        (["--target", "both"], "both"),
+    ],
+)
+def test_cli_real_agent_smoke_preserves_target_and_writes_evidence_report(
+    tmp_path: Path,
+    tshark_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra: list[str],
+    expected: str,
+) -> None:
+    capture = (tmp_path / f"agent-{expected}.pcapng").resolve()
+    generated = subprocess.run(
+        [
+            sys.executable,
+            str(CAPTURE_GENERATOR),
+            "--output",
+            str(capture),
+            "--target",
+            expected,
+            "--flows",
+            "2",
+            "--data-packets-per-flow",
+            "500",
+            "--anomaly-after",
+            "1000",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    assert generated.returncode == 0, generated.stdout + generated.stderr
+    settings = Settings(
+        artifact_root=tmp_path / "artifacts",
+        tshark_path=str(tshark_path),
+    )
+    model = FakeDiagnosisModel()
+    monkeypatch.setattr(cli.Settings, "load", lambda: settings)
+    monkeypatch.setattr(cli, "DiagnosisModel", lambda **kwargs: model)
+    output = tmp_path / f"report-{expected}"
+
+    result = runner.invoke(
+        cli.app,
+        [
+            "diagnose",
+            str(capture),
+            "--standard",
+            "1000",
+            "--actual",
+            "600",
+            "--output-dir",
+            str(output),
+            *extra,
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert report["target"] == expected
+    assert report["coverage_summary"]["speed_packets_analyzed"] > 0
+    assert report["coverage_summary"]["complete"] is True
+    assert report["primary_cause"] == "开放式候选原因"
+    assert report["key_evidence"]
+    assert model.targets == [expected]

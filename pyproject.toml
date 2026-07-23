@@ -31,6 +31,12 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "performance: optional large-capture release gates",
+]
+filterwarnings = [
+    "ignore:authlib\\.jose module is deprecated.*:authlib.deprecate.AuthlibDeprecationWarning",
+]
 
 [tool.ruff]
 target-version = "py311"
