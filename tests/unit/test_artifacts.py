@@ -149,6 +149,18 @@ def test_keep_prevents_expired_task_cleanup(tmp_path: Path) -> None:
     assert paths.root.exists()
 
 
+def test_active_task_is_not_removed_until_marked_complete(tmp_path: Path) -> None:
+    manager = ArtifactManager(tmp_path, ttl_hours=1)
+    paths = manager.create("active-request")
+    manager.mark_active(paths)
+    now = time.time()
+    os.utime(paths.root, (now - 7200, now - 7200))
+
+    assert manager.cleanup_expired(now) == []
+    manager.mark_complete(paths)
+    assert manager.cleanup_expired(now + 7200) == [paths.root]
+
+
 def test_cleanup_removes_expired_task_directories_only(tmp_path: Path) -> None:
     manager = ArtifactManager(tmp_path, ttl_hours=1)
     expired = manager.create("expired")

@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     model_name: str = "gpt-4.1-mini"
     model_timeout_seconds: int = Field(default=120, gt=0)
     speed_analyzer_mode: str = "real"
+    speed_analyzer_script: Path | None = None
     artifact_root: Path = Path("artifacts")
     artifact_ttl_hours: int = Field(default=24, gt=0)
     tshark_path: str = "tshark"

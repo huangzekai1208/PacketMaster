@@ -37,6 +37,11 @@ def _analysis(intervals: list[dict[str, object]]) -> AnalyzeResponse:
                 "direction": "download",
                 "payload_bytes": 8_000_000,
                 "retransmission_count": 3,
+                "time_start": 1.0,
+                "time_end": 11.0,
+                "duration_seconds": 10.0,
+                "throughput_mbps": 6.4,
+                "rtt_histogram": [{"upper_bound_ms": 10, "count": 2}],
             }
         },
         tcp_summary={
@@ -108,6 +113,11 @@ def test_context_contains_direction_bandwidth_and_full_coverage() -> None:
     assert context.global_metrics["retransmission_count"] == 3
     assert context.global_metrics["payload_bytes"] == 8_000_000
     assert context.flow_metrics["f-1"]["direction"] == "download"
+    assert context.flow_metrics["f-1"]["time_start"] == 1.0
+    assert context.flow_metrics["f-1"]["time_end"] == 11.0
+    assert context.flow_metrics["f-1"]["duration_seconds"] == 10.0
+    assert context.flow_metrics["f-1"]["throughput_mbps"] == 6.4
+    assert context.flow_metrics["f-1"]["rtt_histogram"][0]["count"] == 2
 
 
 def test_context_recursively_excludes_payload_logs_and_secrets() -> None:
@@ -202,6 +212,45 @@ def test_context_applies_global_evidence_bounds_and_keeps_late_pages() -> None:
     assert "packet_data" not in serialized
     assert "authorization" not in serialized
     assert len(serialized) < 100_000
+
+
+def test_context_compresses_excess_anomalies_with_explicit_coverage() -> None:
+    intervals = [
+        {
+            "interval_start": float(index),
+            "interval_end": float(index + 1),
+            "direction": "download",
+            "retransmission_count": 1,
+            "payload_bytes": 100,
+        }
+        for index in range(30)
+    ]
+
+    context = ContextBuilder(max_intervals=10).build(
+        _analysis(intervals),
+        [],
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+    )
+
+    assert [item["interval_start"] for item in context.anomaly_intervals] == [
+        0.0,
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        25.0,
+        26.0,
+        27.0,
+        28.0,
+        29.0,
+    ]
+    summary = context.normal_interval_summary
+    assert summary["anomaly_total"] == 30
+    assert summary["anomaly_returned"] == 10
+    assert summary["anomaly_omitted"] == 20
+    assert summary["anomaly_compression"] == "head_tail"
+    assert summary["anomaly_coverage"] == {"first": 0.0, "last": 29.0}
 
 
 class FakeStructuredModel:

@@ -119,6 +119,16 @@ def _new_metrics() -> dict[str, Any]:
     return metrics
 
 
+def _histogram(counts: list[int]) -> list[dict[str, int | float | str]]:
+    return [
+        {
+            "upper_bound_ms": "inf" if math.isinf(upper_bound) else upper_bound,
+            "count": count,
+        }
+        for upper_bound, count in zip(RTT_BUCKETS_MS, counts, strict=True)
+    ]
+
+
 def _is_set(value: str | None) -> bool:
     return bool(value and value.strip().lower() not in {"0", "false", "no"})
 
@@ -234,6 +244,10 @@ class TcpAccumulator:
         self._metrics = _new_metrics()
         self._payload_bytes_by_direction = {"download": 0, "upload": 0}
         self._flows: dict[str, dict[str, Any]] = {}
+        self._flow_directions: dict[str, str] = {}
+        self._flow_min_times: dict[str, float] = {}
+        self._flow_max_times: dict[str, float] = {}
+        self._flow_rtt_counts: dict[str, list[int]] = {}
         self._intervals: dict[tuple[float, str], dict[str, Any]] = {}
         self._rtt_counts = [0] * len(RTT_BUCKETS_MS)
         self._events: list[dict[str, Any]] = []
@@ -297,6 +311,18 @@ class TcpAccumulator:
         )
 
         flow_metrics = self._flows.setdefault(flow_id, _new_metrics())
+        previous_direction = self._flow_directions.setdefault(
+            flow_id, packet_direction.value
+        )
+        if previous_direction != packet_direction.value:
+            self._flow_directions[flow_id] = Target.BOTH.value
+        if time_relative is not None:
+            self._flow_min_times[flow_id] = min(
+                self._flow_min_times.get(flow_id, time_relative), time_relative
+            )
+            self._flow_max_times[flow_id] = max(
+                self._flow_max_times.get(flow_id, time_relative), time_relative
+            )
         metric_groups = [self._metrics, flow_metrics]
         if time_relative is not None:
             interval_start = (
@@ -329,6 +355,10 @@ class TcpAccumulator:
             for index, upper_bound in enumerate(RTT_BUCKETS_MS):
                 if rtt_ms <= upper_bound:
                     self._rtt_counts[index] += 1
+                    flow_rtt_counts = self._flow_rtt_counts.setdefault(
+                        flow_id, [0] * len(RTT_BUCKETS_MS)
+                    )
+                    flow_rtt_counts[index] += 1
                     break
 
         self._observe_syn_options(row)
@@ -365,14 +395,7 @@ class TcpAccumulator:
             complete=True,
             truncated=False,
         )
-        histogram = []
-        for upper_bound, count in zip(RTT_BUCKETS_MS, self._rtt_counts, strict=True):
-            histogram.append(
-                {
-                    "upper_bound_ms": "inf" if math.isinf(upper_bound) else upper_bound,
-                    "count": count,
-                }
-            )
+        histogram = _histogram(self._rtt_counts)
         tcp_summary = dict(self._metrics)
         tcp_summary.update(
             {
@@ -409,10 +432,36 @@ class TcpAccumulator:
             "window_scale_shifts": dict(self._window_scale_shifts),
             "sack_permitted_count": self._sack_permitted_count,
         }
+        flows: dict[str, dict[str, Any]] = {}
+        for flow_id, metrics in self._flows.items():
+            time_start = self._flow_min_times.get(flow_id)
+            time_end = self._flow_max_times.get(flow_id)
+            flow_duration = (
+                time_end - time_start
+                if time_start is not None and time_end is not None
+                else 0.0
+            )
+            flows[flow_id] = {
+                **metrics,
+                "direction": self._flow_directions[flow_id],
+                "time_start": time_start,
+                "time_end": time_end,
+                "duration_seconds": flow_duration,
+                "throughput_mbps": (
+                    metrics["payload_bytes"] * 8 / (flow_duration * 1_000_000)
+                    if flow_duration > 0
+                    else 0.0
+                ),
+                "rtt_histogram": _histogram(
+                    self._flow_rtt_counts.get(
+                        flow_id, [0] * len(RTT_BUCKETS_MS)
+                    )
+                ),
+            }
         return AggregationResult(
             coverage_summary=coverage,
             tcp_summary=tcp_summary,
-            flows={key: dict(value) for key, value in self._flows.items()},
+            flows=flows,
             intervals=intervals,
             events=list(self._events),
             syn_options=syn_options,

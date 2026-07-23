@@ -93,6 +93,7 @@ def create_default_server(settings: Settings | None = None) -> FastMCP:
     return create_server(
         RealAnalyzerAdapter(
             artifact_root=runtime.artifact_root,
+            pipeline_script=runtime.speed_analyzer_script,
             tshark_path=runtime.tshark_path,
         )
     )

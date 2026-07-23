@@ -105,6 +105,12 @@ class ArtifactManager:
     def mark_keep(self, paths: ArtifactPaths) -> None:
         (paths.root / ".keep").touch()
 
+    def mark_active(self, paths: ArtifactPaths) -> None:
+        (paths.root / ".active").touch()
+
+    def mark_complete(self, paths: ArtifactPaths) -> None:
+        (paths.root / ".active").unlink(missing_ok=True)
+
     def cleanup_expired(self, now: float) -> list[Path]:
         cutoff = now - self.ttl_hours * 3600
         removed: list[Path] = []
@@ -115,6 +121,7 @@ class ArtifactManager:
             if (
                 candidate.is_dir()
                 and not (candidate / ".keep").exists()
+                and not (candidate / ".active").exists()
                 and candidate.stat().st_mtime < cutoff
             ):
                 shutil.rmtree(candidate)

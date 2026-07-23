@@ -50,3 +50,17 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 packetmaster = ["prompts/*.md"]
+
+[tool.setuptools.data-files]
+"share/packetmaster/speed-analyze/scripts" = [
+    "speed-analyze/scripts/run_pipeline.py",
+    "speed-analyze/scripts/speed_filter_strip.py",
+    "speed-analyze/scripts/tcp_extract.py",
+]
+"share/packetmaster/speed-analyze/scripts/lib" = [
+    "speed-analyze/scripts/lib/__init__.py",
+    "speed-analyze/scripts/lib/aggregate.py",
+    "speed-analyze/scripts/lib/progress.py",
+    "speed-analyze/scripts/lib/store.py",
+    "speed-analyze/scripts/lib/tshark.py",
+]

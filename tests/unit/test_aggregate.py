@@ -186,6 +186,41 @@ def test_rtt_uses_fixed_histogram_without_samples() -> None:
     assert "rtt_samples" not in accumulator.finalize().tcp_summary
 
 
+def test_per_flow_summary_contains_direction_throughput_time_and_rtt() -> None:
+    accumulator = aggregate.TcpAccumulator(target="both")
+    accumulator.observe(
+        packet_row(
+            1,
+            **{
+                "frame.time_relative": "1.0",
+                "tcp.len": "1000000",
+                "tcp.analysis.ack_rtt": "0.005",
+            },
+        ),
+        "upload",
+    )
+    accumulator.observe(
+        packet_row(
+            2,
+            **{
+                "frame.time_relative": "3.0",
+                "tcp.len": "1000000",
+                "tcp.analysis.ack_rtt": "0.010",
+            },
+        ),
+        "upload",
+    )
+
+    flow = next(iter(accumulator.finalize().flows.values()))
+
+    assert flow["direction"] == "upload"
+    assert flow["time_start"] == 1.0
+    assert flow["time_end"] == 3.0
+    assert flow["duration_seconds"] == 2.0
+    assert flow["throughput_mbps"] == 8.0
+    assert sum(bucket["count"] for bucket in flow["rtt_histogram"]) == 2
+
+
 def test_syn_options_and_event_evidence_are_aggregated_from_fixture() -> None:
     fixture = Path(__file__).parents[1] / "fixtures" / "packet_rows.jsonl"
     rows = [

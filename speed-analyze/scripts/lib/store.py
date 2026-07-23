@@ -368,6 +368,111 @@ class AnalysisStore:
             next_offset = None
         return {"items": items, "total": total, "next_offset": next_offset}
 
+    def query_custom_page(
+        self,
+        fields: Sequence[str],
+        predicates: Sequence[object],
+        offset: int,
+        limit: int,
+        flow_ids: Sequence[str] | None = None,
+        time_start: float | None = None,
+        time_end: float | None = None,
+    ) -> dict[str, object]:
+        self._ensure_open()
+        _paging(offset, limit)
+        where_sql, parameters = self._where_clause(
+            predicates, flow_ids, time_start, time_end
+        )
+        total = self._connection.execute(
+            f"SELECT COUNT(*) FROM events{where_sql}", parameters
+        ).fetchone()[0]
+        items = self.query_custom(
+            fields,
+            predicates,
+            offset,
+            limit,
+            flow_ids=flow_ids,
+            time_start=time_start,
+            time_end=time_end,
+        )
+        next_offset = offset + len(items)
+        if next_offset >= total:
+            next_offset = None
+        return {"items": items, "total": total, "next_offset": next_offset}
+
+    def _query_json_rows(
+        self,
+        table: str,
+        identity_column: str,
+        identity_field: str,
+        data_column: str,
+        offset: int,
+        limit: int,
+        identity_value: object | None = None,
+    ) -> dict[str, object]:
+        self._ensure_open()
+        _paging(offset, limit)
+        allowed = {
+            ("flows", "flow_id", "flow_id", "data_json"),
+            ("intervals", "rowid", "interval_id", "data_json"),
+            ("syn_options", "name", "name", "value_json"),
+            ("summary", "name", "name", "value_json"),
+        }
+        if (table, identity_column, identity_field, data_column) not in allowed:
+            raise ValueError("unsupported summary table")
+        where_sql = (
+            f" WHERE {identity_column} = ?" if identity_value is not None else ""
+        )
+        parameters = [identity_value] if identity_value is not None else []
+        total = self._connection.execute(
+            f"SELECT COUNT(*) FROM {table}{where_sql}", parameters
+        ).fetchone()[0]
+        rows = self._connection.execute(
+            f"SELECT {identity_column}, {data_column} AS data_json "
+            f"FROM {table}{where_sql} ORDER BY {identity_column} LIMIT ? OFFSET ?",
+            (*parameters, limit, offset),
+        ).fetchall()
+        items = []
+        for row in rows:
+            value = json.loads(row["data_json"])
+            if not isinstance(value, dict):
+                raise ValueError(f"invalid {table} JSON row")
+            items.append({identity_field: row[identity_column], **value})
+        next_offset = offset + len(items)
+        if next_offset >= total:
+            next_offset = None
+        return {"items": items, "total": total, "next_offset": next_offset}
+
+    def query_flows(
+        self, offset: int, limit: int, flow_id: str | None = None
+    ) -> dict[str, object]:
+        return self._query_json_rows(
+            "flows",
+            "flow_id",
+            "flow_id",
+            "data_json",
+            offset,
+            limit,
+            flow_id,
+        )
+
+    def query_intervals(self, offset: int, limit: int) -> dict[str, object]:
+        return self._query_json_rows(
+            "intervals", "rowid", "interval_id", "data_json", offset, limit
+        )
+
+    def query_syn_options(self, offset: int, limit: int) -> dict[str, object]:
+        return self._query_json_rows(
+            "syn_options", "name", "name", "value_json", offset, limit
+        )
+
+    def query_summary(
+        self, offset: int, limit: int, name: str | None = None
+    ) -> dict[str, object]:
+        return self._query_json_rows(
+            "summary", "name", "name", "value_json", offset, limit, name
+        )
+
     def close(self) -> None:
         if self._closed:
             return

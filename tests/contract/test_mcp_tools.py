@@ -18,6 +18,7 @@ from packetmaster.domain import (
     AnalyzeRequest,
     AnalyzeResponse,
     CustomEvidenceQuery,
+    EvidencePredicate,
     EvidenceRequest,
     EvidenceResponse,
     Target,
@@ -102,6 +103,29 @@ def test_unsafe_evidence_query_is_rejected() -> None:
             )
         )
     assert error.value.code == "UNSAFE_EVIDENCE_QUERY"
+
+
+def test_oversized_serialized_evidence_query_is_rejected_before_adapter_io() -> None:
+    adapter = MockAnalyzerAdapter(FIXTURE)
+    request = EvidenceRequest(
+        analysis_id="mock-contract",
+        evidence_type="events",
+        query=CustomEvidenceQuery(
+            predicates=[
+                EvidencePredicate(
+                    field="tcp.len",
+                    operator="eq",
+                    value={"nested": "x" * 40_000},
+                )
+            ]
+        ),
+    )
+
+    with pytest.raises(AppError) as error:
+        asyncio.run(adapter.get_evidence(request))
+
+    assert error.value.code == "UNSAFE_EVIDENCE_QUERY"
+    assert "size" in error.value.message.lower()
 
 
 def test_fixture_is_payload_free() -> None:
@@ -262,6 +286,36 @@ def test_real_adapter_timeout_terminates_process(
         asyncio.run(adapter.analyze(request))
     assert error.value.code == "ANALYSIS_TIMEOUT"
     assert process.terminated is True
+
+
+def test_real_adapter_clears_active_marker_when_pipeline_log_open_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "capture.pcapng"
+    capture.write_bytes(b"capture")
+    script = tmp_path / "pipeline.py"
+    script.write_text("# fixture", encoding="utf-8")
+    real_open = Path.open
+
+    def fail_pipeline_log(path: Path, *args: object, **kwargs: object):
+        if path.name == "pipeline.log":
+            raise OSError("disk unavailable")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_pipeline_log)
+    adapter = RealAnalyzerAdapter(
+        artifact_root=tmp_path / "artifacts",
+        pipeline_script=script,
+    )
+
+    with pytest.raises(OSError, match="disk unavailable"):
+        asyncio.run(
+            adapter.analyze(
+                _request(request_id="log-open", pcap_path=str(capture.resolve()))
+            )
+        )
+
+    assert not (tmp_path / "artifacts" / "log-open" / ".active").exists()
 
 
 def test_real_adapter_rejects_unsafe_analysis_id(tmp_path: Path) -> None:
@@ -568,6 +622,38 @@ def test_real_adapter_rejects_existing_analysis_id(tmp_path: Path) -> None:
     assert error.value.code == "ANALYSIS_ID_CONFLICT"
 
 
+def test_real_adapter_reuses_completed_identical_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "capture.pcapng"
+    capture.write_bytes(b"capture")
+    script = tmp_path / "pipeline.py"
+    script.write_text("# fixture", encoding="utf-8")
+    starts = 0
+
+    async def create_process(*args: object, **kwargs: object) -> FakeProcess:
+        nonlocal starts
+        starts += 1
+        output = Path(str(args[args.index("--output") + 1]))
+        input_path = Path(str(args[args.index("--input") + 1]))
+        _write_real_outputs(output, "download", input_path=input_path)
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    adapter = RealAnalyzerAdapter(
+        artifact_root=tmp_path / "artifacts",
+        pipeline_script=script,
+    )
+    request = _request(request_id="real-contract", pcap_path=str(capture))
+
+    first = asyncio.run(adapter.analyze(request))
+    second = asyncio.run(adapter.analyze(request))
+
+    assert starts == 1
+    assert first.analysis_id == second.analysis_id == "real-contract"
+    assert second.resource_usage["reused"] is True
+
+
 def test_concurrent_same_analysis_id_starts_only_one_pipeline(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -607,10 +693,12 @@ def test_concurrent_same_analysis_id_starts_only_one_pipeline(
 
     results = asyncio.run(exercise())
     assert starts == 1
-    assert sum(isinstance(item, AnalyzeResponse) for item in results) == 1
+    assert sum(isinstance(item, AnalyzeResponse) for item in results) >= 1
     errors = [item for item in results if isinstance(item, AppError)]
-    assert len(errors) == 1
-    assert errors[0].code == "ANALYSIS_ID_CONFLICT"
+    assert all(error.code == "ANALYSIS_ID_CONFLICT" for error in errors)
+    assert len(errors) + sum(
+        isinstance(item, AnalyzeResponse) for item in results
+    ) == 2
 
 
 def test_request_id_rejects_pure_dots() -> None:

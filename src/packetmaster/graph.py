@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from typing import Any, TypedDict
@@ -20,6 +21,7 @@ from packetmaster.domain import (
     EvidenceRequest,
     EvidenceResponse,
     HypothesisBatch,
+    Observability,
     Target,
     VerificationResult,
 )
@@ -28,6 +30,15 @@ from packetmaster.errors import AppError
 MAX_EVIDENCE_ROUNDS = 3
 MAX_REQUESTS_PER_ROUND = 10
 MAX_EVIDENCE_RESPONSE_BYTES = 1_000_000
+MAX_KEY_EVIDENCE_PAGES = 20
+MAX_KEY_EVIDENCE_REFERENCES_PER_PAGE = 5
+_REPORT_REFERENCE_FIELDS = (
+    "evidence_id",
+    "frame.number",
+    "frame.time_relative",
+    "flow_id",
+    "direction",
+)
 
 
 class AgentState(TypedDict, total=False):
@@ -65,6 +76,38 @@ def _positive_float(value: Any, default: float = 1.0) -> float:
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 and math.isfinite(parsed) else default
+
+
+def _report_key_evidence(responses: list[EvidenceResponse]) -> list[dict[str, Any]]:
+    pages: list[dict[str, Any]] = []
+    for response in responses[:MAX_KEY_EVIDENCE_PAGES]:
+        coverage = response.coverage_range
+        query_key = coverage.get("query_key")
+        references = [
+            {
+                field: item[field]
+                for field in _REPORT_REFERENCE_FIELDS
+                if field in item
+                and isinstance(item[field], str | bool | int | float)
+            }
+            for item in response.items[:MAX_KEY_EVIDENCE_REFERENCES_PER_PAGE]
+        ]
+        pages.append(
+            {
+                "evidence_type": response.evidence_type,
+                "total": response.total,
+                "truncated": response.truncated,
+                "page_offset": coverage.get("offset"),
+                "coverage_complete": coverage.get("complete"),
+                "query_key_sha256": (
+                    hashlib.sha256(query_key.encode("utf-8")).hexdigest()
+                    if isinstance(query_key, str)
+                    else None
+                ),
+                "references": references,
+            }
+        )
+    return pages
 
 
 def _trace(
@@ -337,7 +380,6 @@ def build_graph(
             if verification and verification.ready_for_report and not error
             else []
         )
-        primary = accepted[0].cause if accepted else "unresolved"
         limitations = list(verification.limitations if verification else [])
         if error:
             limitations.insert(0, f"{error['code']}: analysis workflow degraded")
@@ -355,6 +397,30 @@ def build_graph(
             if analysis is not None
             else CoverageSummary()
         )
+        coverage_reliable = (
+            coverage.complete
+            and not coverage.truncated
+            and coverage.speed_packets_analyzed > 0
+        )
+        observable_accepted = [
+            hypothesis
+            for hypothesis in accepted
+            if hypothesis.observability is not Observability.OUTSIDE_CAPTURE
+        ]
+        if not coverage_reliable:
+            observable_accepted = []
+            limitations.append(
+                "Analysis coverage is incomplete or truncated; "
+                "conclusion is unresolved."
+            )
+        elif accepted and not observable_accepted:
+            limitations.append(
+                "Accepted hypotheses are outside capture observability; "
+                "external validation is required."
+            )
+        primary = (
+            observable_accepted[0].cause if observable_accepted else "unresolved"
+        )
         standard = _positive_float(state.get("standard_bandwidth_mbps"))
         actual = _positive_float(state.get("actual_bandwidth_mbps"))
         try:
@@ -368,20 +434,15 @@ def build_graph(
             target=report_target,
             primary_cause=primary,
             candidate_causes=hypotheses.hypotheses,
-            key_evidence=[
-                {
-                    "evidence_type": item.evidence_type,
-                    "total": item.total,
-                    "truncated": item.truncated,
-                }
-                for item in state.get("evidence", [])
-            ][:20],
+            key_evidence=_report_key_evidence(state.get("evidence", [])),
             confidence=(
                 verification.confidence
                 if (
                     verification
                     and verification.ready_for_report
                     and verification.confidence
+                    and observable_accepted
+                    and coverage_reliable
                     and not error
                 )
                 else Confidence.LOW

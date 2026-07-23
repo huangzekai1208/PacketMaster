@@ -154,6 +154,46 @@ def test_cli_maps_app_error_to_nonzero_exit(
     assert not (tmp_path / "out" / "report.json").exists()
 
 
+def test_cli_writes_degraded_report_when_base_analysis_succeeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "capture.pcapng"
+    capture.write_bytes(b"capture")
+    report = _report(Target.DOWNLOAD)
+    report.analysis_metadata["error_code"] = "MODEL_CALL_FAILED"
+    error = AppError(
+        code="MODEL_CALL_FAILED",
+        message="model unavailable",
+        recoverable=True,
+        suggested_action="retry model diagnosis",
+    )
+
+    async def fake_run(**kwargs):
+        return cli.DiagnosisOutcome(report=report, error=error)
+
+    monkeypatch.setattr(cli, "run_diagnosis", fake_run)
+    output = tmp_path / "degraded"
+    result = runner.invoke(
+        cli.app,
+        [
+            "diagnose",
+            str(capture.resolve()),
+            "--standard",
+            "1000",
+            "--actual",
+            "600",
+            "--output-dir",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 2
+    saved = json.loads((output / "report.json").read_text(encoding="utf-8"))
+    assert saved["primary_cause"] == "unresolved"
+    assert saved["analysis_metadata"]["error_code"] == "MODEL_CALL_FAILED"
+    assert "MODEL_CALL_FAILED" in result.output
+
+
 def test_run_diagnosis_raises_error_returned_by_graph(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -305,6 +345,41 @@ def test_cli_keep_artifacts_writes_keep_marker(
     assert len(list(artifact_root.glob("*/.keep"))) == 1
 
 
+def test_cli_cleans_expired_artifacts_before_diagnosis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "capture.pcapng"
+    capture.write_bytes(b"capture")
+    artifact_root = tmp_path / "artifacts"
+    manager = cli.ArtifactManager(artifact_root, ttl_hours=1)
+    expired = manager.create("expired")
+    old = time.time() - 7200
+    os.utime(expired.root, (old, old))
+    settings = Settings(artifact_root=artifact_root, artifact_ttl_hours=1)
+
+    async def fake_run(**kwargs):
+        return _report(kwargs["target"])
+
+    monkeypatch.setattr(cli.Settings, "load", lambda: settings)
+    monkeypatch.setattr(cli, "run_diagnosis", fake_run)
+    result = runner.invoke(
+        cli.app,
+        [
+            "diagnose",
+            str(capture.resolve()),
+            "--standard",
+            "1000",
+            "--actual",
+            "600",
+            "--output-dir",
+            str(tmp_path / "report"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not expired.root.exists()
+
+
 @pytest.mark.parametrize(
     ("extra", "expected"),
     [
@@ -413,6 +488,13 @@ def test_cli_real_agent_smoke_preserves_target_and_writes_evidence_report(
         if path.is_file() and path.suffix in {".json", ".jsonl", ".log"}:
             local_text += path.read_text(encoding="utf-8", errors="replace")
     assert api_key not in local_text
+    trace_files = list(settings.artifact_root.glob("*/trace.jsonl"))
+    assert len(trace_files) == 1
+    trace = trace_files[0].read_text(encoding="utf-8")
+    trace_events = [json.loads(line) for line in trace.splitlines()]
+    assert trace_events[0]["node"] == "validate"
+    assert trace_events[-1]["node"] == "report"
+    assert api_key not in trace
 
 
 @pytest.mark.skipif(

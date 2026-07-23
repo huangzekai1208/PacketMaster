@@ -8,6 +8,7 @@ from packetmaster.domain import (
     CoverageSummary,
     CustomEvidenceQuery,
     DiagnosticReport,
+    EvidencePredicate,
     EvidenceRequest,
     EvidenceResponse,
     Hypothesis,
@@ -158,6 +159,8 @@ def test_diagnostic_report_requires_positive_bandwidth_and_evidence() -> None:
 
 
 def test_coverage_and_query_reject_negative_values() -> None:
+    assert CoverageSummary().complete is False
+
     with pytest.raises(ValidationError):
         CoverageSummary(total_packets_seen=-1)
 
@@ -171,6 +174,32 @@ def test_coverage_and_query_reject_negative_values() -> None:
             summary={},
             total=-1,
         )
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        CustomEvidenceQuery.model_construct(flow_ids=["f"] * 33),
+        CustomEvidenceQuery.model_construct(fields=["tcp.len"] * 17),
+        CustomEvidenceQuery.model_construct(
+            predicates=[
+                EvidencePredicate(field="tcp.len", operator="gt", value=0)
+            ]
+            * 17
+        ),
+        CustomEvidenceQuery.model_construct(flow_ids=["f" * 257]),
+    ],
+)
+def test_custom_evidence_query_enforces_collection_and_string_bounds(
+    query: CustomEvidenceQuery,
+) -> None:
+    with pytest.raises(ValidationError):
+        CustomEvidenceQuery.model_validate(query.model_dump())
+
+
+def test_in_predicate_rejects_more_than_32_values() -> None:
+    with pytest.raises(ValidationError):
+        EvidencePredicate(field="tcp.len", operator="in", value=list(range(33)))
 
 
 def test_app_error_is_raisable_and_catchable() -> None:

@@ -26,6 +26,9 @@ _METRIC_KEYS = {
     "window_max",
     "rtt_histogram",
     "timing",
+    "time_start",
+    "time_end",
+    "duration_seconds",
     "throughput_mbps",
     *_EVENT_COUNT_KEYS,
 }
@@ -185,12 +188,37 @@ class ContextBuilder:
             "payload_bytes": sum(
                 int(item.get("payload_bytes", 0)) for item in normals
             ),
+            "anomaly_total": len(anomalies),
         }
         if starts:
             summary.update(
                 first_interval_start=min(starts), last_interval_start=max(starts)
             )
-        return anomalies[-self.max_intervals :], summary
+        if len(anomalies) > self.max_intervals:
+            head_count = (self.max_intervals + 1) // 2
+            tail_count = self.max_intervals - head_count
+            returned = anomalies[:head_count]
+            if tail_count:
+                returned.extend(anomalies[-tail_count:])
+            compression = "head_tail"
+        else:
+            returned = anomalies
+            compression = "none"
+        anomaly_starts = [
+            float(item["interval_start"])
+            for item in anomalies
+            if isinstance(item.get("interval_start"), int | float)
+        ]
+        summary.update(
+            anomaly_returned=len(returned),
+            anomaly_omitted=len(anomalies) - len(returned),
+            anomaly_compression=compression,
+            anomaly_coverage={
+                "first": min(anomaly_starts) if anomaly_starts else None,
+                "last": max(anomaly_starts) if anomaly_starts else None,
+            },
+        )
+        return returned, summary
 
     def _flows(self, flows: dict[str, Any]) -> dict[str, Any]:
         projected = {

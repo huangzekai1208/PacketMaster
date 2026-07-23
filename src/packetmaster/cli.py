@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
@@ -24,6 +26,12 @@ from packetmaster.report import render_terminal, write_report
 app = typer.Typer(help="PacketMaster TCP 测速不达标诊断")
 
 
+@dataclass(frozen=True)
+class DiagnosisOutcome:
+    report: DiagnosticReport
+    error: AppError | None = None
+
+
 @app.callback()
 def main() -> None:
     """PacketMaster TCP 测速不达标诊断。"""
@@ -37,9 +45,10 @@ async def run_diagnosis(
     target: Target,
     request_id: str,
     settings: Settings,
-) -> DiagnosticReport:
+) -> DiagnosisOutcome:
     adapter = RealAnalyzerAdapter(
         artifact_root=settings.artifact_root,
+        pipeline_script=settings.speed_analyzer_script,
         tshark_path=settings.tshark_path,
     )
     server = create_server(adapter)
@@ -65,6 +74,13 @@ async def run_diagnosis(
                 "actual_bandwidth_mbps": actual,
             }
         )
+    artifact_manager = ArtifactManager(
+        settings.artifact_root, settings.artifact_ttl_hours
+    )
+    trace_paths = artifact_manager.create(request_id)
+    for event in result.get("trace", []):
+        artifact_manager.append_trace(trace_paths, event)
+    report = DiagnosticReport.model_validate(result["report"])
     graph_error = result.get("error")
     if graph_error is not None:
         if not isinstance(graph_error, dict):
@@ -75,7 +91,7 @@ async def run_diagnosis(
                 suggested_action="Check the PacketMaster graph version.",
             )
         details = graph_error.get("details")
-        raise AppError(
+        error = AppError(
             code=str(graph_error.get("code", "DIAGNOSIS_FAILED")),
             message=str(graph_error.get("message", "Diagnosis failed")),
             recoverable=bool(graph_error.get("recoverable", False)),
@@ -86,7 +102,10 @@ async def run_diagnosis(
             ),
             details=details if isinstance(details, dict) else {},
         )
-    return DiagnosticReport.model_validate(result["report"])
+        if result.get("analysis") is not None:
+            return DiagnosisOutcome(report=report, error=error)
+        raise error
+    return DiagnosisOutcome(report=report)
 
 
 @app.command()
@@ -100,13 +119,17 @@ def diagnose(
 ) -> None:
     try:
         settings = Settings.load()
+        artifact_manager = ArtifactManager(
+            settings.artifact_root, settings.artifact_ttl_hours
+        )
+        artifact_manager.cleanup_expired(time.time())
         request_id = create_request_id()
         destination = (
             Path(output_dir).expanduser().resolve()
             if output_dir is not None
             else (settings.artifact_root / request_id).expanduser().resolve()
         )
-        report = asyncio.run(
+        raw_outcome = asyncio.run(
             run_diagnosis(
                 pcap_path=pcap_path,
                 standard=standard,
@@ -116,14 +139,19 @@ def diagnose(
                 settings=settings,
             )
         )
+        outcome = (
+            raw_outcome
+            if isinstance(raw_outcome, DiagnosisOutcome)
+            else DiagnosisOutcome(report=raw_outcome)
+        )
+        report = outcome.report
         report_path = write_report(report, destination / "report.json")
         if keep_artifacts:
-            manager = ArtifactManager(
-                settings.artifact_root, settings.artifact_ttl_hours
-            )
-            manager.mark_keep(manager.create(request_id))
+            artifact_manager.mark_keep(artifact_manager.create(request_id))
         typer.echo(render_terminal(report))
         typer.echo(f"JSON 报告: {report_path}")
+        if outcome.error is not None:
+            raise outcome.error
     except AppError as exc:
         typer.echo(json.dumps(exc.to_dict(), ensure_ascii=False), err=True)
         raise typer.Exit(code=2) from exc

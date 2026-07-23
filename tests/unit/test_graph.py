@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 
 import packetmaster.graph as graph_module
-from packetmaster.domain import DiagnosticReport, EvidenceRequest, EvidenceResponse
+from packetmaster.domain import (
+    Confidence,
+    DiagnosticReport,
+    EvidenceRequest,
+    EvidenceResponse,
+    Observability,
+)
 from packetmaster.graph import build_graph
 from tests.fakes import FakeDiagnosisModel, FakeMCPClient
 
@@ -212,3 +218,94 @@ def test_ready_verification_still_validates_unsafe_request(tmp_path: Path) -> No
 
     assert result["error"]["code"] == "EVIDENCE_ANALYSIS_MISMATCH"
     assert result["report"].primary_cause == "unresolved"
+
+
+def test_incomplete_coverage_forces_unresolved_low_confidence(tmp_path: Path) -> None:
+    mcp = FakeMCPClient()
+    original = mcp.analyze_speed_capture
+
+    async def incomplete(request):
+        response = await original(request)
+        response.coverage_summary.complete = False
+        response.coverage_summary.truncated = True
+        response.coverage_summary.truncation_reason = "fixture truncation"
+        return response
+
+    mcp.analyze_speed_capture = incomplete
+    graph = build_graph(mcp_client=mcp, diagnosis_model=FakeDiagnosisModel())
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert result["report"].primary_cause == "unresolved"
+    assert result["report"].confidence is Confidence.LOW
+    assert any("coverage" in item.lower() for item in result["report"].limitations)
+
+
+def test_outside_capture_only_forces_unresolved_low_confidence(tmp_path: Path) -> None:
+    class OutsideHighModel(FakeDiagnosisModel):
+        async def verify(self, context, hypotheses, evidence):
+            result = await super().verify(context, hypotheses, evidence)
+            result.accepted_hypotheses[0].observability = Observability.OUTSIDE_CAPTURE
+            result.confidence = Confidence.HIGH
+            return result
+
+    graph = build_graph(
+        mcp_client=FakeMCPClient(), diagnosis_model=OutsideHighModel()
+    )
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert result["report"].primary_cause == "unresolved"
+    assert result["report"].confidence is Confidence.LOW
+    assert any(
+        "outside" in item.lower() for item in result["report"].limitations
+    )
+
+
+def test_report_key_evidence_contains_bounded_traceable_references(
+    tmp_path: Path,
+) -> None:
+    class TraceableMCP(FakeMCPClient):
+        async def get_tcp_evidence(self, request):
+            self.evidence_calls.append(request)
+            return EvidenceResponse(
+                analysis_id=request.analysis_id,
+                evidence_type=request.evidence_type,
+                items=[
+                    {
+                        "evidence_id": f"ev-{index}",
+                        "frame.number": index,
+                        "frame.time_relative": index / 10,
+                        "flow_id": "f-1",
+                        "direction": "download",
+                        "tcp.payload": "MUST_NOT_REACH_REPORT",
+                    }
+                    for index in range(20)
+                ],
+                total=20,
+                truncated=True,
+                source="private.sqlite",
+                coverage_range={"offset": request.offset, "complete": False},
+            )
+
+    graph = build_graph(
+        mcp_client=TraceableMCP(), diagnosis_model=FakeDiagnosisModel()
+    )
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    key_evidence = result["report"].key_evidence[0]
+    assert key_evidence["page_offset"] == 0
+    assert key_evidence["coverage_complete"] is False
+    assert len(key_evidence["references"]) == 5
+    assert key_evidence["references"][0] == {
+        "evidence_id": "ev-0",
+        "frame.number": 0,
+        "frame.time_relative": 0.0,
+        "flow_id": "f-1",
+        "direction": "download",
+    }
+    serialized = json.dumps(key_evidence)
+    assert "query_key_sha256" in key_evidence
+    assert "MUST_NOT_REACH_REPORT" not in serialized
+    assert "private.sqlite" not in serialized

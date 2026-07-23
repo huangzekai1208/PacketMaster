@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
@@ -11,6 +12,13 @@ from pathlib import Path
 
 import pytest
 
+from packetmaster.analyzer.real import RealAnalyzerAdapter
+from packetmaster.domain import (
+    CustomEvidenceQuery,
+    EvidenceOperator,
+    EvidencePredicate,
+    EvidenceRequest,
+)
 from tests.helpers import load_script_module
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -417,6 +425,65 @@ def test_generated_multiflow_capture_indexes_evidence_after_packet_5000(
         if path.suffix in {".json", ".jsonl"}:
             text_artifacts += path.read_text(encoding="utf-8")
     assert api_key not in text_artifacts
+
+
+def test_real_adapter_queries_indexed_summary_and_normal_packet_fields(
+    tmp_path: Path, sample_capture: Path, tshark_path: Path
+) -> None:
+    artifact_root = (tmp_path / "query-artifacts").resolve()
+    analysis_id = "evidence-query"
+    output = artifact_root / analysis_id
+    result = run_pipeline(
+        sample_capture,
+        output,
+        tshark_path=tshark_path,
+        analysis_id=analysis_id,
+        target="both",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    adapter = RealAnalyzerAdapter(
+        artifact_root=artifact_root,
+        tshark_path=str(tshark_path),
+    )
+
+    flow_page = asyncio.run(
+        adapter.get_evidence(
+            EvidenceRequest(
+                analysis_id=analysis_id,
+                evidence_type="flow_summary",
+                limit=10,
+            )
+        )
+    )
+    packet_page = asyncio.run(
+        adapter.get_evidence(
+            EvidenceRequest(
+                analysis_id=analysis_id,
+                evidence_type="custom_packet_query",
+                query=CustomEvidenceQuery(
+                    fields=["frame.number", "flow_id", "tcp.len"],
+                    predicates=[
+                        EvidencePredicate(
+                            field="tcp.len",
+                            operator=EvidenceOperator.GT,
+                            value=0,
+                        )
+                    ],
+                ),
+                limit=2,
+            )
+        )
+    )
+
+    assert flow_page.total >= 2
+    assert all("flow_id" in item for item in flow_page.items)
+    assert packet_page.total >= 2
+    assert len(packet_page.items) == 2
+    assert all(
+        item["frame.number"] > 0 and item["flow_id"] and item["tcp.len"] > 0
+        for item in packet_page.items
+    )
+    assert packet_page.source.endswith(".pcapng")
 
 
 def test_analyze_captures_streams_past_5000_and_indexes_final_event(

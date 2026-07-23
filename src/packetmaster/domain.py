@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from packetmaster.platform import is_absolute_path
 
@@ -57,6 +57,9 @@ class ContractModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+BoundedQueryString = Annotated[str, Field(min_length=1, max_length=256)]
+
+
 class AnalyzeRequest(ContractModel):
     request_id: str = Field(pattern=r"^[A-Za-z0-9._-]+$")
     pcap_path: str
@@ -86,7 +89,7 @@ class CoverageSummary(ContractModel):
     speed_packets_analyzed: int = Field(default=0, ge=0)
     analyzed_bytes: int = Field(default=0, ge=0)
     analyzed_duration_seconds: float = Field(default=0.0, ge=0)
-    complete: bool = True
+    complete: bool = False
     truncated: bool = False
     truncation_reason: str | None = None
 
@@ -107,26 +110,38 @@ class AnalyzeResponse(ContractModel):
 
 
 class EvidencePredicate(ContractModel):
-    field: str
+    field: BoundedQueryString
     operator: EvidenceOperator
     value: Any = None
 
+    @model_validator(mode="after")
+    def validate_value_complexity(self) -> EvidencePredicate:
+        if self.operator is EvidenceOperator.IN:
+            if not isinstance(self.value, list) or not 1 <= len(self.value) <= 32:
+                raise ValueError("in predicate requires between 1 and 32 values")
+            values = self.value
+        else:
+            values = [self.value]
+        if any(isinstance(value, str) and len(value) > 256 for value in values):
+            raise ValueError("predicate string values must not exceed 256 characters")
+        return self
+
 
 class CustomEvidenceQuery(ContractModel):
-    flow_ids: list[str] = Field(default_factory=list)
+    flow_ids: list[BoundedQueryString] = Field(default_factory=list, max_length=32)
     time_start: float | None = Field(default=None, ge=0)
     time_end: float | None = Field(default=None, ge=0)
-    predicates: list[EvidencePredicate] = Field(default_factory=list)
-    fields: list[str] = Field(default_factory=list)
+    predicates: list[EvidencePredicate] = Field(default_factory=list, max_length=16)
+    fields: list[BoundedQueryString] = Field(default_factory=list, max_length=16)
 
 
 class EvidenceRequest(ContractModel):
     analysis_id: str
     evidence_type: str
-    flow_id: str | None = None
+    flow_id: BoundedQueryString | None = None
     time_start: float | None = Field(default=None, ge=0)
     time_end: float | None = Field(default=None, ge=0)
-    fields: list[str] = Field(default_factory=list)
+    fields: list[BoundedQueryString] = Field(default_factory=list, max_length=16)
     query: CustomEvidenceQuery | None = None
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=100, ge=1, le=500)

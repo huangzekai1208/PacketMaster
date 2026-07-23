@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -27,6 +28,32 @@ EVIDENCE_FIELDS = {
     "tcp.analysis.ack_rtt",
 }
 
+EVENT_EVIDENCE_TYPES: dict[str, tuple[str, ...] | None] = {
+    "events": None,
+    "retransmission": ("retransmission", "fast_retransmission"),
+    "retransmissions": ("retransmission", "fast_retransmission"),
+    "fast_retransmission": ("fast_retransmission",),
+    "duplicate_ack": ("duplicate_ack",),
+    "duplicate_acks": ("duplicate_ack",),
+    "out_of_order": ("out_of_order",),
+    "window_changes": ("zero_window", "window_full"),
+    "zero_window": ("zero_window",),
+    "window_full": ("window_full",),
+}
+INDEXED_EVIDENCE_TYPES = {
+    "summary",
+    "flow_summary",
+    "io_timeline",
+    "rtt_distribution",
+    "throughput_distribution",
+    "syn_options",
+}
+PACKET_EVIDENCE_TYPES = {"packet_fields", "custom_packet_query"}
+SUPPORTED_EVIDENCE_TYPES = (
+    set(EVENT_EVIDENCE_TYPES) | INDEXED_EVIDENCE_TYPES | PACKET_EVIDENCE_TYPES
+)
+MAX_EVIDENCE_REQUEST_BYTES = 32 * 1024
+
 
 @dataclass(frozen=True)
 class EvidenceFilters:
@@ -50,14 +77,41 @@ def normalized_evidence_filters(request: EvidenceRequest) -> EvidenceFilters:
         query.time_end if query and query.time_end is not None else request.time_end
     )
     predicates: list[object] = list(query.predicates) if query else []
-    if request.evidence_type != "events":
+    event_types = EVENT_EVIDENCE_TYPES.get(request.evidence_type)
+    if event_types:
         predicates.append(
-            {"field": "event_type", "operator": "eq", "value": request.evidence_type}
+            {
+                "field": "event_type",
+                "operator": "eq" if len(event_types) == 1 else "in",
+                "value": event_types[0] if len(event_types) == 1 else list(event_types),
+            }
         )
     return EvidenceFilters(flow_ids, time_start, time_end, predicates)
 
 
 def validate_evidence_request(request: EvidenceRequest) -> None:
+    request_size = len(
+        json.dumps(
+            request.model_dump(mode="json"),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    if request_size > MAX_EVIDENCE_REQUEST_BYTES:
+        raise AppError(
+            code="UNSAFE_EVIDENCE_QUERY",
+            message="Evidence request size exceeds the 32 KiB limit",
+            recoverable=False,
+            suggested_action="Reduce predicate values or split the query.",
+            details={"size_bytes": request_size},
+        )
+    if request.evidence_type not in SUPPORTED_EVIDENCE_TYPES:
+        raise AppError(
+            code="UNSUPPORTED_EVIDENCE_TYPE",
+            message=f"Unsupported evidence type: {request.evidence_type}",
+            recoverable=False,
+            suggested_action="Use a registered evidence type or custom_packet_query.",
+        )
     fields = list(request.fields)
     predicates = []
     if request.query is not None:
