@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import sqlite3
@@ -27,6 +28,7 @@ from packetmaster.errors import AppError
 from packetmaster.mcp.client import SpeedMCPClient
 from packetmaster.mcp.server import create_server
 from packetmaster.platform import subprocess_group_options, terminate_process
+from tests.helpers import load_script_module
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "mock_analysis.json"
 
@@ -189,7 +191,10 @@ def _write_real_outputs(
     (output / "filtered").mkdir(exist_ok=True)
     (output / "coverage.json").write_text(json.dumps(coverage), encoding="utf-8")
     (output / "tcp_analysis.json").write_text(json.dumps(summary), encoding="utf-8")
-    (output / "speed_stats.json").write_text("{}", encoding="utf-8")
+    (output / "speed_stats.json").write_text(
+        json.dumps({"sha256": hashlib.sha256(input_path.read_bytes()).hexdigest()}),
+        encoding="utf-8",
+    )
     (output / "progress.jsonl").write_text("", encoding="utf-8")
     (output / "logs" / "filter.log").write_text("", encoding="utf-8")
     manifest = {
@@ -622,6 +627,193 @@ def test_real_adapter_rejects_existing_analysis_id(tmp_path: Path) -> None:
     assert error.value.code == "ANALYSIS_ID_CONFLICT"
 
 
+def test_packet_query_uses_global_epoch_directed_filter_timeout_and_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "artifacts" / "packet-query"
+    filtered = root / "filtered"
+    filtered.mkdir(parents=True)
+    download = filtered / "download.pcapng"
+    upload = filtered / "upload.pcapng"
+    download.write_bytes(b"download")
+    upload.write_bytes(b"upload")
+    (root / "manifest.json").write_text(
+        json.dumps(
+            {
+                "artifact_paths": {
+                    "filtered_captures": {
+                        "download": str(download.resolve()),
+                        "upload": str(upload.resolve()),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    (root / "tcp_analysis.json").write_text(
+        json.dumps(
+            {
+                "coverage_summary": {},
+                "tcp_summary": {},
+                "flow_summary": {},
+                "interval_summary": [],
+                "syn_options": {},
+                "timebase_epoch": 100.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    rows = {
+        download: [
+            {
+                "frame.number": "1",
+                "frame.time_relative": "0",
+                "frame.time_epoch": "100",
+                "ip.src": "192.0.2.10",
+                "ip.dst": "198.51.100.20",
+                "tcp.srcport": "50000",
+                "tcp.dstport": "443",
+                "tcp.len": "1000",
+            }
+        ],
+        upload: [
+            {
+                "frame.number": str(number),
+                "frame.time_relative": str(number - 2),
+                "frame.time_epoch": str(108 + number),
+                "ip.src": "192.0.2.10",
+                "ip.dst": "198.51.100.20",
+                "tcp.srcport": "50000",
+                "tcp.dstport": "443",
+                "tcp.len": "1000",
+            }
+            for number in (2, 3)
+        ],
+    }
+    calls: list[tuple[Path, list[str], str, float | None]] = []
+
+    class FakeTShark:
+        @staticmethod
+        def find_tshark(configured: str | None) -> Path:
+            return Path(configured or "tshark")
+
+        @staticmethod
+        def stream_tshark_fields(
+            tshark_path: Path,
+            capture: Path,
+            fields: list[str],
+            display_filter: str,
+            timeout_seconds: float | None = None,
+        ):
+            calls.append((capture, fields, display_filter, timeout_seconds))
+            yield from rows[capture]
+
+    adapter = RealAnalyzerAdapter(
+        artifact_root=tmp_path / "artifacts",
+        pipeline_script=Path.cwd() / "speed-analyze" / "scripts" / "run_pipeline.py",
+        tshark_path="tshark",
+        evidence_timeout_seconds=7,
+    )
+    monkeypatch.setattr(adapter, "_load_tshark_module", lambda: FakeTShark)
+    flow_id = "tcp|192.0.2.10:50000|198.51.100.20:443"
+
+    response = asyncio.run(
+        adapter.get_evidence(
+            EvidenceRequest(
+                analysis_id="packet-query",
+                evidence_type="custom_packet_query",
+                query=CustomEvidenceQuery(
+                    flow_ids=[flow_id],
+                    time_start=9,
+                    fields=["frame.number", "frame.time_relative", "tcp.len"],
+                    predicates=[
+                        EvidencePredicate(field="tcp.len", operator="gt", value=0)
+                    ],
+                ),
+                limit=1,
+            )
+        )
+    )
+
+    assert response.items[0]["frame.number"] == 2
+    assert response.items[0]["frame.time_relative"] == 10.0
+    assert response.source == "filtered:upload"
+    assert response.total == 2
+    assert response.total_exact is False
+    assert response.next_offset == 1
+    assert calls
+    assert all(call[3] == 7 for call in calls)
+    assert all("frame.time_epoch >= 109" in call[2] for call in calls)
+    assert all("tcp.len > 0" in call[2] for call in calls)
+    assert all("192.0.2.10" in call[2] and "50000" in call[2] for call in calls)
+    assert all("frame.time_epoch" in call[1] for call in calls)
+
+
+def test_custom_event_packet_query_prefers_sqlite_without_starting_tshark(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "artifacts" / "indexed-packet-query"
+    root.mkdir(parents=True)
+    store_module = load_script_module("lib/store.py", "indexed_packet_query_store")
+    with store_module.AnalysisStore(root / "analysis.sqlite") as store:
+        store.initialize()
+        store.append_event(
+            {
+                "evidence_id": "ev-indexed",
+                "event_type": "retransmission",
+                "frame.number": 42,
+                "frame.time_relative": 1.5,
+                "flow_id": "f-1",
+                "direction": "download",
+                "tcp.seq": 1,
+                "tcp.ack": 2,
+                "tcp.window_size": 65535,
+                "tcp.len": 1000,
+                "tcp.analysis.ack_rtt": 0.01,
+            }
+        )
+        store.flush_events()
+    adapter = RealAnalyzerAdapter(
+        artifact_root=tmp_path / "artifacts",
+        pipeline_script=Path.cwd() / "speed-analyze" / "scripts" / "run_pipeline.py",
+    )
+    monkeypatch.setattr(
+        adapter,
+        "_query_packet_evidence",
+        lambda *args: pytest.fail("TShark packet scan must not start"),
+    )
+
+    response = asyncio.run(
+        adapter.get_evidence(
+            EvidenceRequest(
+                analysis_id="indexed-packet-query",
+                evidence_type="custom_packet_query",
+                query=CustomEvidenceQuery(
+                    fields=["evidence_id", "event_type", "frame.number"],
+                    predicates=[
+                        EvidencePredicate(
+                            field="event_type",
+                            operator="eq",
+                            value="retransmission",
+                        )
+                    ],
+                ),
+            )
+        )
+    )
+
+    assert response.items == [
+        {
+            "evidence_id": "ev-indexed",
+            "event_type": "retransmission",
+            "frame.number": 42,
+        }
+    ]
+    assert response.total == 1
+    assert response.total_exact is True
+    assert response.source.endswith("analysis.sqlite")
+
+
 def test_real_adapter_reuses_completed_identical_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -652,6 +844,42 @@ def test_real_adapter_reuses_completed_identical_request(
     assert starts == 1
     assert first.analysis_id == second.analysis_id == "real-contract"
     assert second.resource_usage["reused"] is True
+
+
+def test_real_adapter_does_not_reuse_same_size_mtime_with_different_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "capture.pcapng"
+    capture.write_bytes(b"capture-A")
+    original_mtime_ns = capture.stat().st_mtime_ns
+    script = tmp_path / "pipeline.py"
+    script.write_text("# fixture", encoding="utf-8")
+    starts = 0
+
+    async def create_process(*args: object, **kwargs: object) -> FakeProcess:
+        nonlocal starts
+        starts += 1
+        output = Path(str(args[args.index("--output") + 1]))
+        input_path = Path(str(args[args.index("--input") + 1]))
+        _write_real_outputs(output, "download", input_path=input_path)
+        return FakeProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    adapter = RealAnalyzerAdapter(
+        artifact_root=tmp_path / "artifacts",
+        pipeline_script=script,
+    )
+    request = _request(request_id="real-contract", pcap_path=str(capture))
+    asyncio.run(adapter.analyze(request))
+
+    capture.write_bytes(b"capture-B")
+    os.utime(capture, ns=(capture.stat().st_atime_ns, original_mtime_ns))
+
+    with pytest.raises(AppError) as error:
+        asyncio.run(adapter.analyze(request))
+
+    assert error.value.code == "ANALYSIS_ID_CONFLICT"
+    assert starts == 1
 
 
 def test_concurrent_same_analysis_id_starts_only_one_pipeline(
@@ -730,3 +958,64 @@ def test_invalid_mcp_request_does_not_echo_sensitive_input() -> None:
     assert envelope["ok"] is False
     assert secret not in serialized
     assert len(serialized) < 4096
+
+
+def test_mcp_analysis_response_recursively_filters_untrusted_summary_fields() -> None:
+    class UnsafeSummaryAdapter(MockAnalyzerAdapter):
+        async def analyze(self, request, progress_callback=None):
+            response = await super().analyze(request, progress_callback)
+            response.tcp_summary.update(
+                raw_payload="RAW_SECRET",
+                log_lines=["FULL_LOG_SECRET"],
+                authorization="AUTH_SECRET",
+            )
+            response.flow_summary["f-secret"] = {
+                "direction": "download",
+                "payload_bytes": 10,
+                "nested": {"api_key": "KEY_SECRET"},
+            }
+            response.interval_summary.append(
+                {
+                    "interval_start": 0.0,
+                    "direction": "download",
+                    "throughput_mbps": 1.0,
+                    "raw_packet": "PACKET_SECRET",
+                }
+            )
+            response.syn_options["log_body"] = "SYN_LOG_SECRET"
+            response.warnings = ["raw secret warning /private/full.log"]
+            return response
+
+    async def exercise() -> dict[str, object]:
+        server = create_server(UnsafeSummaryAdapter(FIXTURE))
+        async with FastMCPClient(server) as client:
+            result = await client.call_tool(
+                "analyze_speed_capture", {"request": _request().model_dump(mode="json")}
+            )
+            assert isinstance(result.data, dict)
+            return result.data
+
+    envelope = asyncio.run(exercise())
+    serialized = json.dumps(envelope)
+    assert envelope["ok"] is True
+    assert envelope["data"]["tcp_summary"]["retransmissions"] == 2
+    assert envelope["data"]["flow_summary"]["f-secret"] == {
+        "direction": "download",
+        "payload_bytes": 10,
+    }
+    assert envelope["data"]["interval_summary"][-1] == {
+        "interval_start": 0.0,
+        "direction": "download",
+        "throughput_mbps": 1.0,
+    }
+    assert envelope["data"]["warnings"] == ["ANALYZER_WARNING_REDACTED"]
+    for secret in (
+        "RAW_SECRET",
+        "FULL_LOG_SECRET",
+        "AUTH_SECRET",
+        "KEY_SECRET",
+        "PACKET_SECRET",
+        "SYN_LOG_SECRET",
+        "private/full.log",
+    ):
+        assert secret not in serialized

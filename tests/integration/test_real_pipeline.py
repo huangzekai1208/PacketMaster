@@ -483,7 +483,9 @@ def test_real_adapter_queries_indexed_summary_and_normal_packet_fields(
         item["frame.number"] > 0 and item["flow_id"] and item["tcp.len"] > 0
         for item in packet_page.items
     )
-    assert packet_page.source.endswith(".pcapng")
+    assert packet_page.source == "filtered:download"
+    assert packet_page.total_exact is False
+    assert packet_page.warnings == ["PACKET_QUERY_TOTAL_LOWER_BOUND"]
 
 
 def test_analyze_captures_streams_past_5000_and_indexes_final_event(
@@ -621,6 +623,7 @@ def test_both_captures_use_one_epoch_timebase_without_overlapping_intervals(
     }
     assert interval_starts == {"download": 0.0, "upload": 10.0}
     assert result.coverage_summary.analyzed_duration_seconds == pytest.approx(10.2)
+    assert result.timebase_epoch == 100.0
 
 
 def _timing_row(

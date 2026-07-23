@@ -318,6 +318,7 @@ def _merge_coverage(
         intervals=result.intervals,
         events=result.events,
         syn_options=result.syn_options,
+        timebase_epoch=result.timebase_epoch,
     )
 
 

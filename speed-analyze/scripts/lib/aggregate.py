@@ -46,6 +46,7 @@ class AggregationResult:
     intervals: list[dict[str, Any]]
     events: list[dict[str, Any]]
     syn_options: dict[str, Any]
+    timebase_epoch: float | None = None
 
     def to_summary_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +55,7 @@ class AggregationResult:
             "flow_summary": self.flows,
             "interval_summary": self.intervals,
             "syn_options": self.syn_options,
+            "timebase_epoch": self.timebase_epoch,
         }
 
 

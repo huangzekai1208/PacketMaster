@@ -238,6 +238,11 @@ def test_incomplete_coverage_forces_unresolved_low_confidence(tmp_path: Path) ->
 
     assert result["report"].primary_cause == "unresolved"
     assert result["report"].confidence is Confidence.LOW
+    assert all(
+        item.confidence is Confidence.LOW
+        for item in result["report"].candidate_causes
+    )
+    assert result["report"].troubleshooting_steps == []
     assert any("coverage" in item.lower() for item in result["report"].limitations)
 
 
@@ -247,6 +252,7 @@ def test_outside_capture_only_forces_unresolved_low_confidence(tmp_path: Path) -
             result = await super().verify(context, hypotheses, evidence)
             result.accepted_hypotheses[0].observability = Observability.OUTSIDE_CAPTURE
             result.confidence = Confidence.HIGH
+            result.accepted_hypotheses[0].suggestion = "UNVERIFIED_ACTION"
             return result
 
     graph = build_graph(
@@ -257,6 +263,11 @@ def test_outside_capture_only_forces_unresolved_low_confidence(tmp_path: Path) -
 
     assert result["report"].primary_cause == "unresolved"
     assert result["report"].confidence is Confidence.LOW
+    assert all(
+        item.confidence is Confidence.LOW
+        for item in result["report"].candidate_causes
+    )
+    assert result["report"].troubleshooting_steps == []
     assert any(
         "outside" in item.lower() for item in result["report"].limitations
     )
@@ -297,6 +308,7 @@ def test_report_key_evidence_contains_bounded_traceable_references(
     key_evidence = result["report"].key_evidence[0]
     assert key_evidence["page_offset"] == 0
     assert key_evidence["coverage_complete"] is False
+    assert key_evidence["total_exact"] is True
     assert len(key_evidence["references"]) == 5
     assert key_evidence["references"][0] == {
         "evidence_id": "ev-0",

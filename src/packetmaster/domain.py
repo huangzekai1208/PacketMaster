@@ -153,6 +153,7 @@ class EvidenceResponse(ContractModel):
     summary: dict[str, Any] = Field(default_factory=dict)
     items: list[dict[str, Any]] = Field(default_factory=list)
     total: int = Field(default=0, ge=0)
+    total_exact: bool = True
     next_offset: int | None = None
     truncated: bool = False
     source: str = ""

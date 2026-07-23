@@ -96,6 +96,7 @@ def _report_key_evidence(responses: list[EvidenceResponse]) -> list[dict[str, An
             {
                 "evidence_type": response.evidence_type,
                 "total": response.total,
+                "total_exact": response.total_exact,
                 "truncated": response.truncated,
                 "page_offset": coverage.get("offset"),
                 "coverage_complete": coverage.get("complete"),
@@ -421,6 +422,37 @@ def build_graph(
         primary = (
             observable_accepted[0].cause if observable_accepted else "unresolved"
         )
+        report_confidence = (
+            verification.confidence
+            if (
+                verification
+                and verification.ready_for_report
+                and verification.confidence
+                and observable_accepted
+                and coverage_reliable
+                and not error
+            )
+            else Confidence.LOW
+        )
+        if observable_accepted and report_confidence is not Confidence.LOW:
+            report_candidates = [
+                item.model_copy(
+                    update={
+                        "confidence": (
+                            Confidence.MEDIUM
+                            if item.confidence is Confidence.HIGH
+                            and report_confidence is Confidence.MEDIUM
+                            else item.confidence
+                        )
+                    }
+                )
+                for item in observable_accepted
+            ]
+        else:
+            report_candidates = [
+                item.model_copy(update={"confidence": Confidence.LOW})
+                for item in hypotheses.hypotheses
+            ]
         standard = _positive_float(state.get("standard_bandwidth_mbps"))
         actual = _positive_float(state.get("actual_bandwidth_mbps"))
         try:
@@ -433,20 +465,9 @@ def build_graph(
             achievement_ratio_pct=actual / standard * 100,
             target=report_target,
             primary_cause=primary,
-            candidate_causes=hypotheses.hypotheses,
+            candidate_causes=report_candidates,
             key_evidence=_report_key_evidence(state.get("evidence", [])),
-            confidence=(
-                verification.confidence
-                if (
-                    verification
-                    and verification.ready_for_report
-                    and verification.confidence
-                    and observable_accepted
-                    and coverage_reliable
-                    and not error
-                )
-                else Confidence.LOW
-            ),
+            confidence=report_confidence,
             coverage_summary=coverage,
             evidence_quality={
                 "coverage_complete": coverage.complete,
@@ -459,7 +480,9 @@ def build_graph(
             },
             limitations=limitations,
             troubleshooting_steps=[
-                item.suggestion for item in hypotheses.hypotheses if item.suggestion
+                item.suggestion
+                for item in (report_candidates if primary != "unresolved" else [])
+                if item.suggestion
             ][:20],
             optimization_suggestions=[],
             analysis_metadata={

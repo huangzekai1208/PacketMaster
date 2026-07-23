@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from statistics import median
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -85,6 +86,100 @@ def _project(mapping: dict[str, Any], allowed: set[str]) -> dict[str, Any]:
     }
 
 
+def _metric_value(item: dict[str, Any], key: str) -> float | None:
+    value = item.get(key)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value)
+
+
+def _rtt_value(item: dict[str, Any]) -> float | None:
+    histogram = item.get("rtt_histogram")
+    if not isinstance(histogram, list):
+        return None
+    total = 0
+    weighted = 0.0
+    for bucket in histogram:
+        if not isinstance(bucket, dict):
+            continue
+        count = bucket.get("count")
+        bound = bucket.get("upper_bound_ms")
+        if not isinstance(count, int) or count < 0:
+            continue
+        if bound == "inf":
+            numeric_bound = 2000.0
+        elif isinstance(bound, int | float) and not isinstance(bound, bool):
+            numeric_bound = float(bound)
+        else:
+            continue
+        total += count
+        weighted += count * numeric_bound
+    return weighted / total if total else None
+
+
+def _baselines(items: list[dict[str, Any]]) -> dict[str, dict[str, float]]:
+    grouped: dict[str, dict[str, list[float]]] = {}
+    for item in items:
+        direction = str(item.get("direction", "unknown"))
+        values = grouped.setdefault(direction, {})
+        for key in ("throughput_mbps", "window_min"):
+            if (value := _metric_value(item, key)) is not None:
+                values.setdefault(key, []).append(value)
+        if (rtt := _rtt_value(item)) is not None:
+            values.setdefault("rtt", []).append(rtt)
+    return {
+        direction: {key: float(median(samples)) for key, samples in values.items()}
+        for direction, values in grouped.items()
+    }
+
+
+def _relative_anomaly(
+    item: dict[str, Any],
+    baselines: dict[str, dict[str, float]],
+    previous: dict[str, Any] | None = None,
+) -> bool:
+    baseline = baselines.get(str(item.get("direction", "unknown")), {})
+    throughput = _metric_value(item, "throughput_mbps")
+    window = _metric_value(item, "window_min")
+    rtt = _rtt_value(item)
+    if throughput is not None and baseline.get("throughput_mbps", 0) > 0:
+        if throughput < baseline["throughput_mbps"] * 0.5:
+            return True
+    if window is not None and baseline.get("window_min", 0) > 0:
+        if window < baseline["window_min"] * 0.5:
+            return True
+    if rtt is not None and baseline.get("rtt", 0) > 0:
+        if rtt > baseline["rtt"] * 2:
+            return True
+    if previous is None:
+        return False
+    previous_throughput = _metric_value(previous, "throughput_mbps")
+    previous_window = _metric_value(previous, "window_min")
+    previous_rtt = _rtt_value(previous)
+    return any(
+        (
+            (
+            throughput is not None
+            and previous_throughput is not None
+            and previous_throughput > 0
+            and throughput < previous_throughput * 0.5
+            ),
+            (
+            window is not None
+            and previous_window is not None
+            and previous_window > 0
+            and window < previous_window * 0.5
+            ),
+            (
+            rtt is not None
+            and previous_rtt is not None
+            and previous_rtt > 0
+            and rtt > previous_rtt * 2
+            ),
+        )
+    )
+
+
 def bounded_evidence(
     responses: list[EvidenceResponse], *, max_layers: int = 8, max_items: int = 80
 ) -> dict[str, dict[str, Any]]:
@@ -104,6 +199,7 @@ def bounded_evidence(
             entries.append((response.evidence_type, _project(item, _EVIDENCE_KEYS)))
         metadata[response.evidence_type] = {
             "total": response.total,
+            "total_exact": response.total_exact,
             "next_offset": response.next_offset,
             "truncated": response.truncated,
             "coverage_range": _small_value(response.coverage_range),
@@ -129,6 +225,7 @@ class DiagnosisContext(BaseModel):
     coverage: dict[str, Any]
     global_metrics: dict[str, Any]
     flow_metrics: dict[str, Any]
+    flow_compression: dict[str, int] = Field(default_factory=dict)
     anomaly_intervals: list[dict[str, Any]] = Field(default_factory=list)
     normal_interval_summary: dict[str, Any] = Field(default_factory=dict)
     syn_options: dict[str, Any] = Field(default_factory=dict)
@@ -163,7 +260,7 @@ class ContextBuilder:
         self.max_context_chars = max_context_chars
 
     @staticmethod
-    def _is_anomalous(interval: dict[str, Any]) -> bool:
+    def _has_event_anomaly(interval: dict[str, Any]) -> bool:
         return any(
             isinstance(interval.get(key), int | float) and interval[key] > 0
             for key in _EVENT_COUNT_KEYS
@@ -173,8 +270,17 @@ class ContextBuilder:
         self, intervals: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         projected = [_project(item, _INTERVAL_KEYS) for item in intervals]
-        anomalies = [item for item in projected if self._is_anomalous(item)]
-        normals = [item for item in projected if not self._is_anomalous(item)]
+        baselines = _baselines(projected)
+        previous_by_direction: dict[str, dict[str, Any]] = {}
+        anomalies: list[dict[str, Any]] = []
+        normals: list[dict[str, Any]] = []
+        for item in projected:
+            direction = str(item.get("direction", "unknown"))
+            is_anomalous = self._has_event_anomaly(item) or _relative_anomaly(
+                item, baselines, previous_by_direction.get(direction)
+            )
+            (anomalies if is_anomalous else normals).append(item)
+            previous_by_direction[direction] = item
         starts = [
             float(item["interval_start"])
             for item in normals
@@ -220,18 +326,38 @@ class ContextBuilder:
         )
         return returned, summary
 
-    def _flows(self, flows: dict[str, Any]) -> dict[str, Any]:
+    def _flows(self, flows: dict[str, Any]) -> tuple[dict[str, Any], dict[str, int]]:
         projected = {
             str(flow_id)[:256]: _project(data, _METRIC_KEYS | {"direction"})
             for flow_id, data in flows.items()
             if isinstance(data, dict)
         }
-        ranked = sorted(
-            projected.items(),
-            key=lambda item: float(item[1].get("payload_bytes", 0)),
-            reverse=True,
-        )
-        return dict(ranked[: self.max_flows])
+        baselines = _baselines(list(projected.values()))
+        anomalous = [
+            item
+            for item in projected.items()
+            if self._has_event_anomaly(item[1])
+            or _relative_anomaly(item[1], baselines)
+        ]
+        anomalous_ids = {flow_id for flow_id, _ in anomalous}
+        normal = [
+            item for item in projected.items() if item[0] not in anomalous_ids
+        ]
+        def payload_rank(item: tuple[str, dict[str, Any]]) -> float:
+            return float(item[1].get("payload_bytes", 0))
+
+        anomalous.sort(key=payload_rank, reverse=True)
+        normal.sort(key=payload_rank, reverse=True)
+        ranked = [*anomalous, *normal]
+        returned = ranked[: self.max_flows]
+        anomaly_returned = sum(flow_id in anomalous_ids for flow_id, _ in returned)
+        return dict(returned), {
+            "total": len(projected),
+            "returned": len(returned),
+            "omitted": len(projected) - len(returned),
+            "anomaly_total": len(anomalous),
+            "anomaly_returned": anomaly_returned,
+        }
 
     def build(
         self,
@@ -244,6 +370,7 @@ class ContextBuilder:
         if standard_bandwidth_mbps <= 0 or actual_bandwidth_mbps <= 0:
             raise ValueError("bandwidth values must be positive")
         anomalies, normal_summary = self._intervals(analysis.interval_summary)
+        flows, flow_compression = self._flows(analysis.flow_summary)
         raw_coverage = analysis.coverage_summary
         coverage = {
             "input_size_bytes": raw_coverage.input_size_bytes,
@@ -272,7 +399,8 @@ class ContextBuilder:
             },
             coverage=coverage,
             global_metrics=_project(analysis.tcp_summary, _METRIC_KEYS),
-            flow_metrics=self._flows(analysis.flow_summary),
+            flow_metrics=flows,
+            flow_compression=flow_compression,
             anomaly_intervals=anomalies,
             normal_interval_summary=normal_summary,
             syn_options=_small_value(analysis.syn_options),

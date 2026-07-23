@@ -4,6 +4,8 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
 from packetmaster.context import ContextBuilder, DiagnosisContext
 from packetmaster.domain import (
     AnalysisStatus,
@@ -206,6 +208,7 @@ def test_context_applies_global_evidence_bounds_and_keeps_late_pages() -> None:
     assert any(item["evidence_id"] == "ev-11-19" for item in items)
     last_layer = context.evidence_layers["layer-11"]
     assert last_layer["total"] == 200
+    assert last_layer["total_exact"] is True
     assert last_layer["next_offset"] == 240
     assert last_layer["truncated"] is True
     assert last_layer["coverage_range"] == {"complete": False}
@@ -251,6 +254,99 @@ def test_context_compresses_excess_anomalies_with_explicit_coverage() -> None:
     assert summary["anomaly_omitted"] == 20
     assert summary["anomaly_compression"] == "head_tail"
     assert summary["anomaly_coverage"] == {"first": 0.0, "last": 29.0}
+
+
+def test_context_detects_throughput_collapse_without_tcp_event_flags() -> None:
+    intervals = [
+        {
+            "interval_start": float(index),
+            "interval_end": float(index + 1),
+            "direction": "download",
+            "throughput_mbps": 1000.0 if index < 20 else 1.0,
+            "payload_bytes": 125_000_000 if index < 20 else 125_000,
+            "retransmission_count": 0,
+        }
+        for index in range(30)
+    ]
+
+    context = ContextBuilder(max_intervals=10).build(
+        _analysis(intervals),
+        [],
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+    )
+
+    starts = [item["interval_start"] for item in context.anomaly_intervals]
+    assert 20.0 in starts
+    assert 29.0 in starts
+    assert context.normal_interval_summary["anomaly_total"] == 10
+    assert context.normal_interval_summary["anomaly_omitted"] == 0
+
+
+def test_context_flow_compression_keeps_low_throughput_anomalous_flow() -> None:
+    analysis = _analysis([])
+    analysis.flow_summary = {
+        f"normal-{index}": {
+            "direction": "download",
+            "payload_bytes": 10_000_000 + index,
+            "throughput_mbps": 900.0,
+            "retransmission_count": 0,
+        }
+        for index in range(40)
+    }
+    analysis.flow_summary["slow-flow"] = {
+        "direction": "download",
+        "payload_bytes": 1_000,
+        "throughput_mbps": 2.0,
+        "retransmission_count": 0,
+    }
+
+    context = ContextBuilder(max_flows=8).build(
+        analysis,
+        [],
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+    )
+
+    assert "slow-flow" in context.flow_metrics
+    assert context.flow_compression == {
+        "total": 41,
+        "returned": 8,
+        "omitted": 33,
+        "anomaly_total": 1,
+        "anomaly_returned": 1,
+    }
+
+
+@pytest.mark.parametrize("anomaly", ["rtt", "window"])
+def test_context_detects_rtt_or_window_shift_without_tcp_events(anomaly: str) -> None:
+    intervals = [
+        {
+            "interval_start": float(index),
+            "direction": "download",
+            "throughput_mbps": 900.0,
+            "window_min": 65535 if index < 9 or anomaly != "window" else 100,
+            "rtt_histogram": [
+                {
+                    "upper_bound_ms": (
+                        10 if index < 9 or anomaly != "rtt" else 500
+                    ),
+                    "count": 10,
+                }
+            ],
+            "retransmission_count": 0,
+        }
+        for index in range(10)
+    ]
+
+    context = ContextBuilder().build(
+        _analysis(intervals),
+        [],
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+    )
+
+    assert [item["interval_start"] for item in context.anomaly_intervals] == [9.0]
 
 
 class FakeStructuredModel:

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import inspect
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -48,6 +50,7 @@ _DEFAULT_EVIDENCE_FIELDS = [
     "event_type",
     "frame.number",
     "frame.time_relative",
+    "frame.time_epoch",
     "flow_id",
     "direction",
     "tcp.seq",
@@ -84,7 +87,11 @@ _INTEGER_PACKET_FIELDS = {
     "tcp.window_size",
     "tcp.len",
 }
-_FLOAT_PACKET_FIELDS = {"frame.time_relative", "tcp.analysis.ack_rtt"}
+_FLOAT_PACKET_FIELDS = {
+    "frame.time_relative",
+    "frame.time_epoch",
+    "tcp.analysis.ack_rtt",
+}
 _EVENT_PACKET_FIELDS = {
     "tcp.analysis.fast_retransmission": "fast_retransmission",
     "tcp.analysis.retransmission": "retransmission",
@@ -149,7 +156,9 @@ def _packet_flow_id(row: dict[str, str]) -> str | None:
     return f"tcp|{format_endpoint(endpoints[0])}|{format_endpoint(endpoints[1])}"
 
 
-def _packet_item(row: dict[str, str], direction: str) -> dict[str, object]:
+def _packet_item(
+    row: dict[str, str], direction: str, epoch_baseline: float | None
+) -> dict[str, object]:
     frame_number = _packet_scalar("frame.number", row.get("frame.number", ""))
     event_type = "packet"
     for field, candidate in _EVENT_PACKET_FIELDS.items():
@@ -164,7 +173,158 @@ def _packet_item(row: dict[str, str], direction: str) -> dict[str, object]:
     }
     for field in _INTEGER_PACKET_FIELDS | _FLOAT_PACKET_FIELDS:
         item[field] = _packet_scalar(field, row.get(field, ""))
+    epoch = item.pop("frame.time_epoch", None)
+    if isinstance(epoch, int | float) and epoch_baseline is not None:
+        item["frame.time_relative"] = float(epoch) - epoch_baseline
     return item
+
+
+def _flow_endpoints(flow_id: str) -> tuple[tuple[str, int], tuple[str, int]] | None:
+    parts = flow_id.split("|")
+    if len(parts) != 3 or parts[0] != "tcp":
+        return None
+
+    def parse_endpoint(value: str) -> tuple[str, int]:
+        if value.startswith("["):
+            closing = value.find("]:")
+            if closing < 0:
+                raise ValueError
+            address_text = value[1:closing]
+            port_text = value[closing + 2 :]
+        else:
+            address_text, port_text = value.rsplit(":", 1)
+        address = str(ipaddress.ip_address(address_text))
+        port = int(port_text)
+        if not 0 <= port <= 65535:
+            raise ValueError
+        return address, port
+
+    try:
+        return parse_endpoint(parts[1]), parse_endpoint(parts[2])
+    except (ValueError, TypeError):
+        return None
+
+
+def _numeric_filter_literal(value: object) -> str | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return format(numeric, ".15g")
+
+
+def _flow_filter(flow_ids: list[str] | None) -> str | None:
+    if not flow_ids:
+        return None
+    flows: list[str] = []
+    for flow_id in flow_ids:
+        endpoints = _flow_endpoints(flow_id)
+        if endpoints is None:
+            continue
+        (first_address, first_port), (second_address, second_port) = endpoints
+        first_field = "ipv6" if ":" in first_address else "ip"
+        second_field = "ipv6" if ":" in second_address else "ip"
+        forward = (
+            f"({first_field}.src == {first_address} && tcp.srcport == {first_port} "
+            f"&& {second_field}.dst == {second_address} "
+            f"&& tcp.dstport == {second_port})"
+        )
+        reverse = (
+            f"({second_field}.src == {second_address} && tcp.srcport == {second_port} "
+            f"&& {first_field}.dst == {first_address} "
+            f"&& tcp.dstport == {first_port})"
+        )
+        flows.append(f"({forward} || {reverse})")
+    return f"({' || '.join(flows)})" if flows else "false"
+
+
+def _predicate_filter(predicate: object) -> str | None:
+    field, operator, expected = _predicate_values(predicate)
+    if field in {"evidence_id", "flow_id", "direction"}:
+        return None
+    if field == "event_type":
+        if operator not in {"eq", "in"}:
+            return None
+        values = (
+            expected
+            if operator == "in" and isinstance(expected, list)
+            else [expected]
+        )
+        event_fields = [
+            raw_field
+            for raw_field, event_type in _EVENT_PACKET_FIELDS.items()
+            if event_type in values
+        ]
+        return f"({' || '.join(event_fields)})" if event_fields else None
+    if field not in _INTEGER_PACKET_FIELDS | _FLOAT_PACKET_FIELDS:
+        return None
+    if operator == "exists":
+        return field if expected is not False else f"!{field}"
+    values = expected if operator == "in" and isinstance(expected, list) else [expected]
+    literals = [
+        literal
+        for value in values
+        if (literal := _numeric_filter_literal(value)) is not None
+    ]
+    if not literals:
+        return None
+    if operator == "in":
+        return f"({' || '.join(f'{field} == {value}' for value in literals)})"
+    symbol = {
+        "eq": "==",
+        "ne": "!=",
+        "gt": ">",
+        "gte": ">=",
+        "lt": "<",
+        "lte": "<=",
+    }.get(operator)
+    return f"{field} {symbol} {literals[0]}" if symbol else None
+
+
+def _directed_display_filter(
+    filters: Any, epoch_baseline: float | None
+) -> str:
+    clauses = ["tcp"]
+    if filters.time_start is not None and epoch_baseline is not None:
+        clauses.append(
+            "frame.time_epoch >= "
+            + format(epoch_baseline + filters.time_start, ".15g")
+        )
+    if filters.time_end is not None and epoch_baseline is not None:
+        clauses.append(
+            "frame.time_epoch <= "
+            + format(epoch_baseline + filters.time_end, ".15g")
+        )
+    if flow_filter := _flow_filter(filters.flow_ids):
+        clauses.append(flow_filter)
+    clauses.extend(
+        compiled
+        for predicate in filters.predicates
+        if (compiled := _predicate_filter(predicate)) is not None
+    )
+    return " && ".join(f"({clause})" for clause in clauses)
+
+
+def _packet_query_targets_indexed_events(request: EvidenceRequest) -> bool:
+    if request.query is None:
+        return False
+    indexed_event_types = set(_EVENT_PACKET_FIELDS.values())
+    for predicate in request.query.predicates:
+        field, operator, expected = _predicate_values(predicate)
+        if field != "event_type" or operator not in {"eq", "in"}:
+            continue
+        values = (
+            expected
+            if operator == "in" and isinstance(expected, list)
+            else [expected]
+        )
+        if values and all(value in indexed_event_types for value in values):
+            return True
+    return False
 
 
 def _predicate_values(predicate: object) -> tuple[str, str, object]:
@@ -246,6 +406,7 @@ class _AnalysisSummary(BaseModel):
     flow_summary: dict[str, Any]
     interval_summary: list[dict[str, Any]]
     syn_options: dict[str, Any]
+    timebase_epoch: float | None = None
 
 
 def _sanitize_artifacts(root: Path, value: object) -> object:
@@ -339,6 +500,7 @@ class RealAnalyzerAdapter:
         pipeline_script: Path | None = None,
         tshark_path: str | None = None,
         timeout_calculator: Callable[[int], float] = dynamic_timeout_seconds,
+        evidence_timeout_seconds: float = 120.0,
     ) -> None:
         self.artifact_root = Path(artifact_root).expanduser().resolve()
         self.pipeline_script = (
@@ -348,6 +510,9 @@ class RealAnalyzerAdapter:
         )
         self.tshark_path = tshark_path
         self.timeout_calculator = timeout_calculator
+        if evidence_timeout_seconds <= 0:
+            raise ValueError("evidence_timeout_seconds must be positive")
+        self.evidence_timeout_seconds = float(evidence_timeout_seconds)
         self._artifacts = ArtifactManager(self.artifact_root, ttl_hours=24)
 
     def _analysis_root(self, analysis_id: str) -> Path:
@@ -522,6 +687,26 @@ class RealAnalyzerAdapter:
             return False
         return existing == fingerprint
 
+    @staticmethod
+    def _matches_existing_content(task_root: Path, input_path: Path) -> bool:
+        try:
+            stats = _read_json_object(task_root / "speed_stats.json")
+        except AppError:
+            return False
+        expected = stats.get("sha256")
+        if not isinstance(expected, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{64}", expected
+        ):
+            return False
+        digest = hashlib.sha256()
+        try:
+            with input_path.open("rb") as input_file:
+                while chunk := input_file.read(1024 * 1024):
+                    digest.update(chunk)
+        except OSError:
+            return False
+        return digest.hexdigest() == expected.lower()
+
     def _response_from_artifacts(
         self,
         request: AnalyzeRequest,
@@ -687,7 +872,10 @@ class RealAnalyzerAdapter:
             matches = self._matches_existing_request(task_root, fingerprint)
             if matches and manifest_path.is_file():
                 existing_manifest = _read_json_object(manifest_path)
-                if existing_manifest.get("status") in {"completed", "partial"}:
+                if existing_manifest.get("status") in {
+                    "completed",
+                    "partial",
+                } and self._matches_existing_content(task_root, input_path):
                     existing_paths = self._artifacts.create(request.request_id)
                     return self._response_from_artifacts(
                         request,
@@ -850,7 +1038,9 @@ class RealAnalyzerAdapter:
 
     def _query_packet_evidence(
         self, root: Path, request: EvidenceRequest
-    ) -> tuple[list[dict[str, object]], int, int | None, str, list[str]]:
+    ) -> tuple[
+        list[dict[str, object]], int, bool, int | None, str, list[str]
+    ]:
         tshark = self._load_tshark_module()
         try:
             tshark_path = tshark.find_tshark(self.tshark_path)
@@ -863,6 +1053,19 @@ class RealAnalyzerAdapter:
             ) from exc
         captures = self._filtered_captures(root)
         filters = normalized_evidence_filters(request)
+        summary = _AnalysisSummary.model_validate(
+            _read_json_object(root / "tcp_analysis.json")
+        )
+        epoch_baseline = summary.timebase_epoch
+        if (
+            filters.time_start is not None or filters.time_end is not None
+        ) and epoch_baseline is None:
+            raise AppError(
+                code="EVIDENCE_UNAVAILABLE",
+                message="Packet evidence has no shared timestamp baseline",
+                recoverable=True,
+                suggested_action="Rerun the analysis with the current pipeline.",
+            )
         requested_fields = (
             (request.query.fields if request.query else [])
             or request.fields
@@ -880,18 +1083,57 @@ class RealAnalyzerAdapter:
                 ]
             )
         )
+        support_fields = list(
+            dict.fromkeys(
+                [
+                    "frame.number",
+                    "frame.time_relative",
+                    "frame.time_epoch",
+                    "ip.src",
+                    "ip.dst",
+                    "ipv6.src",
+                    "ipv6.dst",
+                    "tcp.srcport",
+                    "tcp.dstport",
+                    *[
+                        field
+                        for field in requested_fields
+                        if field in _INTEGER_PACKET_FIELDS | _FLOAT_PACKET_FIELDS
+                    ],
+                    *[
+                        field
+                        for predicate in filters.predicates
+                        if (field := _predicate_values(predicate)[0])
+                        in _INTEGER_PACKET_FIELDS | _FLOAT_PACKET_FIELDS
+                    ],
+                    *(
+                        list(_EVENT_PACKET_FIELDS)
+                        if "event_type" in requested_fields
+                        or any(
+                            _predicate_values(predicate)[0] == "event_type"
+                            for predicate in filters.predicates
+                        )
+                        else []
+                    ),
+                ]
+            )
+        )
+        display_filter = _directed_display_filter(filters, epoch_baseline)
         items: list[dict[str, object]] = []
         matched = 0
         has_more = False
-        sources: list[str] = []
+        source_directions: set[str] = set()
         for direction, capture in sorted(captures.items()):
-            sources.append(str(capture))
             rows = tshark.stream_tshark_fields(
-                tshark_path, capture, _PACKET_SUPPORT_FIELDS, "tcp"
+                tshark_path,
+                capture,
+                support_fields,
+                display_filter,
+                timeout_seconds=self.evidence_timeout_seconds,
             )
             try:
                 for row in rows:
-                    item = _packet_item(row, direction)
+                    item = _packet_item(row, direction, epoch_baseline)
                     if item["flow_id"] is None:
                         continue
                     packet_time = item.get("frame.time_relative")
@@ -912,6 +1154,7 @@ class RealAnalyzerAdapter:
                         for predicate in filters.predicates
                     ):
                         continue
+                    source_directions.add(direction)
                     if matched < request.offset:
                         matched += 1
                         continue
@@ -928,22 +1171,43 @@ class RealAnalyzerAdapter:
                 break
         next_offset = request.offset + len(items) if has_more else None
         total = request.offset + len(items) + (1 if has_more else 0)
-        warnings = (
-            ["Packet-query total is a lower bound while more rows exist."]
-            if has_more
-            else []
+        warnings = ["PACKET_QUERY_TOTAL_LOWER_BOUND"] if has_more else []
+        source = (
+            "filtered:" + ",".join(sorted(source_directions))
+            if source_directions
+            else "filtered:none"
         )
-        return items, total, next_offset, sources[0], warnings
+        return items, total, not has_more, next_offset, source, warnings
 
     async def get_evidence(self, request: EvidenceRequest) -> EvidenceResponse:
         root = self._analysis_root(request.analysis_id)
         validate_evidence_request(request)
-        if request.evidence_type in PACKET_EVIDENCE_TYPES:
-            items, total, next_offset, source, warnings = (
-                self._query_packet_evidence(root, request)
-            )
+        database = root / "analysis.sqlite"
+        use_indexed_packet_query = (
+            request.evidence_type in PACKET_EVIDENCE_TYPES
+            and database.is_file()
+            and _packet_query_targets_indexed_events(request)
+        )
+        if (
+            request.evidence_type in PACKET_EVIDENCE_TYPES
+            and not use_indexed_packet_query
+        ):
+            try:
+                items, total, total_exact, next_offset, source, warnings = (
+                    await asyncio.wait_for(
+                        asyncio.to_thread(self._query_packet_evidence, root, request),
+                        timeout=self.evidence_timeout_seconds + 1,
+                    )
+                )
+            except TimeoutError as exc:
+                raise AppError(
+                    code="EVIDENCE_TIMEOUT",
+                    message="Directed packet evidence query timed out",
+                    recoverable=True,
+                    suggested_action="Narrow the flow or time range and retry.",
+                ) from exc
         else:
-            database = root / "analysis.sqlite"
+            total_exact = True
             if not database.is_file():
                 raise AppError(
                     code="EVIDENCE_UNAVAILABLE",
@@ -955,7 +1219,10 @@ class RealAnalyzerAdapter:
             try:
                 with module.AnalysisStore(database) as store:
                     store.initialize()
-                    if request.evidence_type in EVENT_EVIDENCE_TYPES:
+                    if (
+                        request.evidence_type in EVENT_EVIDENCE_TYPES
+                        or use_indexed_packet_query
+                    ):
                         filters = normalized_evidence_filters(request)
                         fields = (
                             (request.query.fields if request.query else [])
@@ -1018,6 +1285,7 @@ class RealAnalyzerAdapter:
             summary={"returned": len(items)},
             items=items,
             total=total,
+            total_exact=total_exact,
             next_offset=next_offset,
             truncated=next_offset is not None,
             source=source,

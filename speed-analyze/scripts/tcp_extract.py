@@ -104,6 +104,7 @@ def _with_input_size(
         intervals=result.intervals,
         events=result.events,
         syn_options=result.syn_options,
+        timebase_epoch=result.timebase_epoch,
     )
 
 
@@ -206,7 +207,17 @@ def analyze_captures(
                     f"Completed {direction} TCP extraction",
                 )
 
-        result = _with_input_size(accumulator.finalize(), input_size_bytes)
+        result = accumulator.finalize()
+        result = AggregationResult(
+            coverage_summary=result.coverage_summary,
+            tcp_summary=result.tcp_summary,
+            flows=result.flows,
+            intervals=result.intervals,
+            events=result.events,
+            syn_options=result.syn_options,
+            timebase_epoch=float(baseline) if baseline is not None else None,
+        )
+        result = _with_input_size(result, input_size_bytes)
         if store is not None:
             store.write_result(result)
         return result

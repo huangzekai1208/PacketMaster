@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import subprocess
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -295,6 +296,61 @@ def test_stream_tshark_fields_terminates_process_when_closed_early(
 
     assert process.terminate_calls == 1
     assert process.wait_calls == 1
+
+
+def test_stream_tshark_fields_times_out_and_terminates_blocked_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tshark_module
+) -> None:
+    released = threading.Event()
+
+    class BlockingStdout:
+        def __iter__(self):
+            released.wait(timeout=1)
+            return iter(())
+
+        def close(self) -> None:
+            released.set()
+
+    class BlockingProcess:
+        def __init__(self) -> None:
+            self.stdout = BlockingStdout()
+            self.finished = False
+            self.terminate_calls = 0
+
+        def poll(self) -> int | None:
+            return -15 if self.finished else None
+
+        def wait(self, timeout: float | None = None) -> int:
+            released.wait(timeout=timeout or 1)
+            self.finished = True
+            return -15
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            self.finished = True
+            released.set()
+
+        def kill(self) -> None:
+            self.finished = True
+            released.set()
+
+    process = BlockingProcess()
+    monkeypatch.setattr(
+        tshark_module.subprocess, "Popen", lambda *args, **kwargs: process
+    )
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        list(
+            tshark_module.stream_tshark_fields(
+                Path("tshark"),
+                tmp_path / "capture.pcapng",
+                ["frame.number"],
+                "tcp",
+                timeout_seconds=0.01,
+            )
+        )
+
+    assert process.terminate_calls == 1
 
 
 def test_progress_writer_appends_utf8_jsonl_with_utc_timestamps(tmp_path: Path) -> None:

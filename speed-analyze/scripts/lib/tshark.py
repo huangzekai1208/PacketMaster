@@ -5,6 +5,7 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -108,6 +109,7 @@ def stream_tshark_fields(
     capture: Path,
     fields: list[str],
     display_filter: str,
+    timeout_seconds: float | None = None,
 ) -> Iterator[dict[str, str]]:
     """Yield selected TShark fields one packet at a time."""
     command = [str(tshark_path), "-r", str(capture), "-T", "fields"]
@@ -133,6 +135,21 @@ def stream_tshark_fields(
             ) from exc
 
         completed = False
+        timed_out = threading.Event()
+
+        def stop_on_timeout() -> None:
+            if process.poll() is None:
+                timed_out.set()
+                _terminate_process(process)
+
+        timer = (
+            threading.Timer(timeout_seconds, stop_on_timeout)
+            if timeout_seconds is not None
+            else None
+        )
+        if timer is not None:
+            timer.daemon = True
+            timer.start()
         try:
             assert process.stdout is not None
             for line in process.stdout:
@@ -142,6 +159,8 @@ def stream_tshark_fields(
 
             returncode = process.wait()
             completed = True
+            if timed_out.is_set():
+                raise TimeoutError("TShark field extraction timed out")
             if returncode != 0:
                 stderr_file.seek(0)
                 stderr = stderr_file.read(500)
@@ -149,6 +168,8 @@ def stream_tshark_fields(
                     f"ANALYSIS_FAILED: TShark exited with {returncode}: {stderr}"
                 )
         finally:
+            if timer is not None:
+                timer.cancel()
             if not completed:
                 _terminate_process(process)
             if process.stdout is not None:

@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     model_api_key: SecretStr | None = Field(default=None, repr=False)
     model_name: str = "gpt-4.1-mini"
     model_timeout_seconds: int = Field(default=120, gt=0)
+    evidence_timeout_seconds: int = Field(default=120, gt=0, le=600)
     speed_analyzer_mode: str = "real"
     speed_analyzer_script: Path | None = None
     artifact_root: Path = Path("artifacts")

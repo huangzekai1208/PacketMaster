@@ -50,6 +50,7 @@ async def run_diagnosis(
         artifact_root=settings.artifact_root,
         pipeline_script=settings.speed_analyzer_script,
         tshark_path=settings.tshark_path,
+        evidence_timeout_seconds=settings.evidence_timeout_seconds,
     )
     server = create_server(adapter)
 
