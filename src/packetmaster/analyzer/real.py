@@ -1222,7 +1222,7 @@ class RealAnalyzerAdapter:
             async def stop_query() -> None:
                 cancel_event.set()
                 with suppress(BaseException):
-                    await asyncio.wait_for(asyncio.shield(query_task), timeout=5)
+                    await asyncio.shield(query_task)
 
             try:
                 items, total, total_exact, next_offset, source, warnings = (
