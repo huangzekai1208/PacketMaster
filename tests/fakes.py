@@ -55,14 +55,19 @@ class FakeMCPClient:
             evidence_type=request.evidence_type,
             items=[{"evidence_id": f"ev-{len(self.evidence_calls)}"}],
             total=1,
+            next_offset=request.offset + request.limit,
+            truncated=True,
             source="fake",
-            coverage_range={"complete": True},
+            coverage_range={"offset": request.offset, "complete": False},
         )
 
 
 class FakeDiagnosisModel:
-    def __init__(self, *, request_forever: bool = False) -> None:
+    def __init__(
+        self, *, request_forever: bool = False, initial_request: bool = True
+    ) -> None:
         self.request_forever = request_forever
+        self.initial_request = initial_request
         self.targets: list[str] = []
         self.verify_calls = 0
 
@@ -90,7 +95,9 @@ class FakeDiagnosisModel:
         )
         return HypothesisBatch(
             hypotheses=[hypothesis],
-            requested_evidence=[self._request(context.analysis_id)],
+            requested_evidence=(
+                [self._request(context.analysis_id)] if self.initial_request else []
+            ),
         )
 
     async def verify(self, context, hypotheses, evidence) -> VerificationResult:

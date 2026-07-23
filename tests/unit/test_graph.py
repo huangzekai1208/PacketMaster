@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from packetmaster.domain import EvidenceRequest
 from packetmaster.graph import build_graph
 from tests.fakes import FakeDiagnosisModel, FakeMCPClient
 
@@ -58,6 +59,39 @@ def test_graph_caps_evidence_loop_at_three_rounds(tmp_path: Path) -> None:
     assert model.verify_calls == 3
     assert len(mcp.evidence_calls) == 3
     assert all(1 <= request.limit <= 500 for request in mcp.evidence_calls)
+    assert result["report"].primary_cause == "unresolved"
+    assert [request.offset for request in mcp.evidence_calls] == [0, 100, 200]
+
+
+def test_graph_verifies_summary_only_hypothesis(tmp_path: Path) -> None:
+    model = FakeDiagnosisModel(initial_request=False)
+    graph = build_graph(mcp_client=FakeMCPClient(), diagnosis_model=model)
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert model.verify_calls == 1
+    assert result["report"].primary_cause == "开放式候选原因"
+
+
+def test_graph_rejects_cross_analysis_evidence_request(tmp_path: Path) -> None:
+    class CrossAnalysisModel(FakeDiagnosisModel):
+        async def generate_hypotheses(self, context):
+            batch = await super().generate_hypotheses(context)
+            batch.requested_evidence = [
+                EvidenceRequest(
+                    analysis_id="another-analysis",
+                    evidence_type="events",
+                )
+            ]
+            return batch
+
+    mcp = FakeMCPClient()
+    graph = build_graph(mcp_client=mcp, diagnosis_model=CrossAnalysisModel())
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert result["error"]["code"] == "EVIDENCE_ANALYSIS_MISMATCH"
+    assert mcp.evidence_calls == []
     assert result["report"].primary_cause == "unresolved"
 
 

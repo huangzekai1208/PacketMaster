@@ -56,6 +56,14 @@ def _error_dict(error: Exception, default_code: str) -> dict[str, Any]:
     ).to_dict()
 
 
+def _positive_float(value: Any, default: float = 1.0) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 def _trace(
     state: AgentState,
     node: str,
@@ -64,11 +72,16 @@ def _trace(
     error_code: str | None = None,
     evidence_request_count: int = 0,
 ) -> list[dict[str, Any]]:
+    raw_target = state.get("target", Target.DOWNLOAD)
+    try:
+        target = Target(raw_target).value
+    except (TypeError, ValueError):
+        target = Target.DOWNLOAD.value
     event = {
         "node": node,
         "round": int(state.get("round_count", 0)),
         "status": status,
-        "target": state.get("target", Target.DOWNLOAD).value,
+        "target": target,
         "error_code": error_code,
         "evidence_request_count": evidence_request_count,
     }
@@ -82,6 +95,37 @@ def build_graph(
     context_builder: ContextBuilder | None = None,
 ):
     builder = context_builder or ContextBuilder()
+
+    def normalize_requests(
+        state: AgentState, candidates: list[EvidenceRequest]
+    ) -> list[EvidenceRequest]:
+        normalized: list[EvidenceRequest] = []
+        analysis_id = state["analysis"].analysis_id
+        for candidate in candidates[:MAX_REQUESTS_PER_ROUND]:
+            request = EvidenceRequest.model_validate(candidate)
+            validate_evidence_request(request)
+            if request.analysis_id != analysis_id:
+                raise AppError(
+                    code="EVIDENCE_ANALYSIS_MISMATCH",
+                    message="Evidence request targets another analysis",
+                    recoverable=False,
+                    suggested_action="Use the active analysis_id.",
+                )
+            previous = [
+                item
+                for item in state.get("evidence", [])
+                if item.evidence_type == request.evidence_type
+            ]
+            if previous and request.offset <= int(
+                previous[-1].coverage_range.get("offset", 0)
+            ):
+                if previous[-1].next_offset is None:
+                    continue
+                request = request.model_copy(
+                    update={"offset": previous[-1].next_offset}
+                )
+            normalized.append(request)
+        return normalized
 
     async def validate(state: AgentState) -> dict[str, Any]:
         try:
@@ -155,7 +199,7 @@ def build_graph(
                 actual_bandwidth_mbps=state["actual_bandwidth_mbps"],
             )
             hypotheses = await diagnosis_model.generate_hypotheses(context)
-            requests = hypotheses.requested_evidence[:MAX_REQUESTS_PER_ROUND]
+            requests = normalize_requests(state, hypotheses.requested_evidence)
             return {
                 "context": context,
                 "hypotheses": hypotheses,
@@ -183,7 +227,20 @@ def build_graph(
             for candidate in requests:
                 request = EvidenceRequest.model_validate(candidate)
                 validate_evidence_request(request)
-                responses.append(await mcp_client.get_tcp_evidence(request))
+                response = await mcp_client.get_tcp_evidence(request)
+                if (
+                    response.analysis_id != state["analysis"].analysis_id
+                    or response.evidence_type != request.evidence_type
+                    or len(response.items) > request.limit
+                ):
+                    raise AppError(
+                        code="INVALID_EVIDENCE_OUTPUT",
+                        message="Evidence response violates the request contract",
+                        recoverable=False,
+                        suggested_action="Fix the MCP evidence adapter.",
+                    )
+                response.coverage_range.setdefault("offset", request.offset)
+                responses.append(response)
             evidence = [*state.get("evidence", []), *responses]
             round_count = int(state.get("round_count", 0)) + 1
             context = builder.build(
@@ -222,7 +279,11 @@ def build_graph(
                 state["hypotheses"],
                 state.get("evidence", []),
             )
-            requests = result.requested_evidence[:MAX_REQUESTS_PER_ROUND]
+            requests = (
+                []
+                if result.ready_for_report
+                else normalize_requests(state, result.requested_evidence)
+            )
             return {
                 "verification": result,
                 "evidence_requests": requests,
@@ -245,27 +306,41 @@ def build_graph(
     async def report(state: AgentState) -> dict[str, Any]:
         verification = state.get("verification")
         hypotheses = state.get("hypotheses", HypothesisBatch())
-        accepted = verification.accepted_hypotheses if verification else []
-        primary = accepted[0].cause if accepted else "unresolved"
         error = state.get("error")
+        accepted = (
+            verification.accepted_hypotheses
+            if verification and verification.ready_for_report and not error
+            else []
+        )
+        primary = accepted[0].cause if accepted else "unresolved"
         limitations = list(verification.limitations if verification else [])
         if error:
             limitations.insert(0, f"{error['code']}: analysis workflow degraded")
         if not accepted and not limitations:
             limitations.append("Evidence is insufficient; result remains unresolved.")
+        if (
+            verification
+            and not verification.ready_for_report
+            and state.get("round_count", 0) >= MAX_EVIDENCE_ROUNDS
+        ):
+            limitations.append("Evidence round limit reached before verification.")
         analysis = state.get("analysis")
         coverage = (
             analysis.coverage_summary
             if analysis is not None
             else CoverageSummary()
         )
-        standard = max(float(state.get("standard_bandwidth_mbps", 1.0)), 0.001)
-        actual = max(float(state.get("actual_bandwidth_mbps", 1.0)), 0.001)
+        standard = _positive_float(state.get("standard_bandwidth_mbps"))
+        actual = _positive_float(state.get("actual_bandwidth_mbps"))
+        try:
+            report_target = Target(state.get("target", Target.DOWNLOAD))
+        except (TypeError, ValueError):
+            report_target = Target.DOWNLOAD
         diagnostic = DiagnosticReport(
             standard_bandwidth_mbps=standard,
             actual_bandwidth_mbps=actual,
             achievement_ratio_pct=actual / standard * 100,
-            target=state.get("target", Target.DOWNLOAD),
+            target=report_target,
             primary_cause=primary,
             candidate_causes=hypotheses.hypotheses,
             key_evidence=[
@@ -282,6 +357,11 @@ def build_graph(
                 else Confidence.LOW
             ),
             coverage_summary=coverage,
+            evidence_quality={
+                "coverage_complete": coverage.complete,
+                "coverage_truncated": coverage.truncated,
+                "evidence_pages": len(state.get("evidence", [])),
+            },
             limitations=limitations,
             troubleshooting_steps=[
                 item.suggestion for item in hypotheses.hypotheses if item.suggestion
@@ -309,10 +389,13 @@ def build_graph(
     def after_reason(state: AgentState) -> str:
         if state.get("error"):
             return "report"
-        return "inspect_evidence" if state.get("evidence_requests") else "report"
+        return "inspect_evidence" if state.get("evidence_requests") else "verify"
 
     def after_verify(state: AgentState) -> str:
         if state.get("error"):
+            return "report"
+        verification = state.get("verification")
+        if verification and verification.ready_for_report:
             return "report"
         if (
             state.get("evidence_requests")
@@ -338,7 +421,11 @@ def build_graph(
     graph.add_conditional_edges(
         "reason",
         after_reason,
-        {"inspect_evidence": "inspect_evidence", "report": "report"},
+        {
+            "inspect_evidence": "inspect_evidence",
+            "verify": "verify",
+            "report": "report",
+        },
     )
     graph.add_conditional_edges(
         "inspect_evidence",
