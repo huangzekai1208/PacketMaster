@@ -248,8 +248,18 @@ def test_incomplete_coverage_forces_unresolved_low_confidence(tmp_path: Path) ->
 
 def test_outside_capture_only_forces_unresolved_low_confidence(tmp_path: Path) -> None:
     class OutsideHighModel(FakeDiagnosisModel):
+        async def generate_hypotheses(self, context):
+            batch = await super().generate_hypotheses(context)
+            batch.hypotheses.append(
+                batch.hypotheses[0].model_copy(
+                    update={"cause": "rejected-direct-cause"}
+                )
+            )
+            return batch
+
         async def verify(self, context, hypotheses, evidence):
             result = await super().verify(context, hypotheses, evidence)
+            result.accepted_hypotheses = [result.accepted_hypotheses[0]]
             result.accepted_hypotheses[0].observability = Observability.OUTSIDE_CAPTURE
             result.confidence = Confidence.HIGH
             result.accepted_hypotheses[0].suggestion = "UNVERIFIED_ACTION"
@@ -267,6 +277,9 @@ def test_outside_capture_only_forces_unresolved_low_confidence(tmp_path: Path) -
         item.confidence is Confidence.LOW
         for item in result["report"].candidate_causes
     )
+    assert [item.cause for item in result["report"].candidate_causes] == [
+        "开放式候选原因"
+    ]
     assert result["report"].troubleshooting_steps == []
     assert any(
         "outside" in item.lower() for item in result["report"].limitations

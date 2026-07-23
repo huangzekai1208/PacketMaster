@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -110,6 +111,7 @@ def stream_tshark_fields(
     fields: list[str],
     display_filter: str,
     timeout_seconds: float | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> Iterator[dict[str, str]]:
     """Yield selected TShark fields one packet at a time."""
     command = [str(tshark_path), "-r", str(capture), "-T", "fields"]
@@ -136,20 +138,32 @@ def stream_tshark_fields(
 
         completed = False
         timed_out = threading.Event()
+        cancelled = threading.Event()
+        stop_watcher = threading.Event()
 
-        def stop_on_timeout() -> None:
-            if process.poll() is None:
-                timed_out.set()
-                _terminate_process(process)
+        def watch_process() -> None:
+            deadline = (
+                time.monotonic() + timeout_seconds
+                if timeout_seconds is not None
+                else None
+            )
+            while not stop_watcher.wait(0.05):
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled.set()
+                    _terminate_process(process)
+                    return
+                if deadline is not None and time.monotonic() >= deadline:
+                    timed_out.set()
+                    _terminate_process(process)
+                    return
 
-        timer = (
-            threading.Timer(timeout_seconds, stop_on_timeout)
-            if timeout_seconds is not None
+        watcher = (
+            threading.Thread(target=watch_process, daemon=True)
+            if timeout_seconds is not None or cancel_event is not None
             else None
         )
-        if timer is not None:
-            timer.daemon = True
-            timer.start()
+        if watcher is not None:
+            watcher.start()
         try:
             assert process.stdout is not None
             for line in process.stdout:
@@ -159,6 +173,8 @@ def stream_tshark_fields(
 
             returncode = process.wait()
             completed = True
+            if cancelled.is_set():
+                raise InterruptedError("TShark field extraction was cancelled")
             if timed_out.is_set():
                 raise TimeoutError("TShark field extraction timed out")
             if returncode != 0:
@@ -168,8 +184,9 @@ def stream_tshark_fields(
                     f"ANALYSIS_FAILED: TShark exited with {returncode}: {stderr}"
                 )
         finally:
-            if timer is not None:
-                timer.cancel()
+            stop_watcher.set()
+            if watcher is not None and watcher is not threading.current_thread():
+                watcher.join(timeout=0.2)
             if not completed:
                 _terminate_process(process)
             if process.stdout is not None:

@@ -453,9 +453,14 @@ def build_graph(
                 for item in observable_accepted
             ]
         else:
+            candidate_source = (
+                accepted
+                if verification and verification.ready_for_report and not error
+                else hypotheses.hypotheses
+            )
             report_candidates = [
                 item.model_copy(update={"confidence": Confidence.LOW})
-                for item in hypotheses.hypotheses
+                for item in candidate_source
             ]
         standard = _positive_float(state.get("standard_bandwidth_mbps"))
         actual = _positive_float(state.get("actual_bandwidth_mbps"))

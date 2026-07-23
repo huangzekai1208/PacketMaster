@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import re
 from typing import Any
 
 from fastmcp import Context, FastMCP
@@ -121,20 +123,85 @@ def _safe_metrics(value: object, *, interval: bool = False) -> dict[str, Any]:
 
 
 def _safe_coverage(response: AnalyzeResponse) -> dict[str, Any]:
-    coverage = response.coverage_summary
-    return {
-        "input_size_bytes": coverage.input_size_bytes,
-        "total_packets_seen": coverage.total_packets_seen,
-        "tcp_packets_seen": coverage.tcp_packets_seen,
-        "speed_packets_analyzed": coverage.speed_packets_analyzed,
-        "analyzed_bytes": coverage.analyzed_bytes,
-        "analyzed_duration_seconds": coverage.analyzed_duration_seconds,
-        "complete": coverage.complete,
-        "truncated": coverage.truncated,
-        "truncation_reason": (
-            "ANALYSIS_TRUNCATED" if coverage.truncation_reason else None
-        ),
-    }
+    return _safe_coverage_mapping(response.coverage_summary.model_dump(mode="json"))
+
+
+def _safe_coverage_mapping(value: object) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    output: dict[str, Any] = {}
+    for key in (
+        "input_size_bytes",
+        "total_packets_seen",
+        "tcp_packets_seen",
+        "speed_packets_analyzed",
+        "analyzed_bytes",
+        "analyzed_duration_seconds",
+    ):
+        number = _number(value.get(key))
+        if number is not None and number >= 0:
+            output[key] = number
+    for key in ("complete", "truncated"):
+        if isinstance(value.get(key), bool):
+            output[key] = value[key]
+    output["truncation_reason"] = (
+        "ANALYSIS_TRUNCATED" if value.get("truncation_reason") else None
+    )
+    return output
+
+
+def _safe_flow_id(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 512:
+        return None
+    if re.fullmatch(r"f-[0-9]+", value):
+        return value
+    parts = value.split("|")
+    if len(parts) != 3 or parts[0] != "tcp":
+        return None
+
+    def valid_endpoint(endpoint: str) -> bool:
+        try:
+            if endpoint.startswith("["):
+                closing = endpoint.find("]:")
+                if closing < 0:
+                    return False
+                address = endpoint[1:closing]
+                port = endpoint[closing + 2 :]
+            else:
+                address, port = endpoint.rsplit(":", 1)
+            ipaddress.ip_address(address)
+            return 0 <= int(port) <= 65535
+        except (ValueError, TypeError):
+            return False
+
+    return value if all(valid_endpoint(item) for item in parts[1:]) else None
+
+
+def _safe_evidence_id(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 1024:
+        return None
+    if re.fullmatch(r"ev-[0-9]+", value):
+        return value
+    if re.fullmatch(r"packet-(download|upload)-[0-9]+", value):
+        return value
+    parts = value.split(":", 3)
+    if (
+        len(parts) == 4
+        and parts[0].isdigit()
+        and parts[1]
+        in {
+            "retransmission",
+            "fast_retransmission",
+            "duplicate_ack",
+            "out_of_order",
+            "zero_window",
+            "window_full",
+        }
+        and parts[2] in {"download", "upload"}
+        and _safe_flow_id(parts[3]) is not None
+    ):
+        return value
+    return None
 
 
 def _safe_syn_options(value: object) -> dict[str, Any]:
@@ -150,7 +217,8 @@ def _safe_syn_options(value: object) -> dict[str, Any]:
             output[key] = {
                 str(item_key)[:32]: number
                 for item_key, item_value in list(mapping.items())[:64]
-                if (number := _number(item_value)) is not None
+                if re.fullmatch(r"[0-9]{1,10}", str(item_key))
+                and (number := _number(item_value)) is not None
             }
     return output
 
@@ -168,8 +236,9 @@ def _safe_analysis_data(response: AnalyzeResponse) -> dict[str, Any]:
     data["coverage_summary"] = _safe_coverage(response)
     data["tcp_summary"] = _safe_metrics(response.tcp_summary)
     safe_flows = {
-        str(flow_id)[:256]: _safe_metrics(metrics)
+        safe_flow_id: _safe_metrics(metrics)
         for flow_id, metrics in response.flow_summary.items()
+        if (safe_flow_id := _safe_flow_id(flow_id)) is not None
     }
     safe_intervals = [
         _safe_metrics(interval, interval=True)
@@ -239,8 +308,10 @@ def _safe_evidence_scalar(field: str, value: object) -> object | None:
             "window_full",
         }
         return value if value in allowed else None
-    if field in {"evidence_id", "flow_id"} and isinstance(value, str):
-        return value[:512]
+    if field == "evidence_id":
+        return _safe_evidence_id(value)
+    if field == "flow_id":
+        return _safe_flow_id(value)
     return None
 
 
@@ -249,9 +320,9 @@ def _safe_evidence_item(item: object, evidence_type: str) -> dict[str, Any]:
         return {}
     if evidence_type == "flow_summary":
         output = _safe_metrics(item)
-        flow_id = item.get("flow_id")
-        if isinstance(flow_id, str):
-            output["flow_id"] = flow_id[:512]
+        flow_id = _safe_flow_id(item.get("flow_id"))
+        if flow_id is not None:
+            output["flow_id"] = flow_id
         return output
     if evidence_type in {"io_timeline", "throughput_distribution"}:
         output = _safe_metrics(item, interval=True)
@@ -260,8 +331,10 @@ def _safe_evidence_item(item: object, evidence_type: str) -> dict[str, Any]:
             output["interval_id"] = interval_id
         return output
     if evidence_type in {"summary", "rtt_distribution"}:
-        output = _safe_metrics(item)
         name = item.get("name")
+        if name == "coverage_summary":
+            return {"name": name, **_safe_coverage_mapping(item)}
+        output = _safe_metrics(item)
         if name in {"tcp_summary", "coverage_summary"}:
             output["name"] = name
         return output
@@ -297,6 +370,13 @@ def _safe_evidence_source(source: str) -> str:
 
 
 def _safe_evidence_data(response: EvidenceResponse) -> dict[str, Any]:
+    if len(response.items) > 500:
+        raise AppError(
+            code="INVALID_EVIDENCE_OUTPUT",
+            message="Evidence response exceeds the 500-item contract limit",
+            recoverable=False,
+            suggested_action="Fix the evidence adapter pagination.",
+        )
     coverage: dict[str, Any] = {}
     for key in ("offset", "limit"):
         value = response.coverage_range.get(key)
@@ -318,7 +398,7 @@ def _safe_evidence_data(response: EvidenceResponse) -> dict[str, Any]:
         },
         items=[
             _safe_evidence_item(item, response.evidence_type)
-            for item in response.items[:500]
+            for item in response.items
         ],
         source=_safe_evidence_source(response.source),
         coverage_range=coverage,

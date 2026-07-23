@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 import psutil
@@ -712,6 +713,7 @@ def test_packet_query_uses_global_epoch_directed_filter_timeout_and_source(
             fields: list[str],
             display_filter: str,
             timeout_seconds: float | None = None,
+            cancel_event: threading.Event | None = None,
         ):
             calls.append((capture, fields, display_filter, timeout_seconds))
             yield from rows[capture]
@@ -781,6 +783,42 @@ def test_packet_query_uses_global_epoch_directed_filter_timeout_and_source(
     assert beyond.items == []
     assert beyond.total == 3
     assert beyond.total_exact is True
+
+
+def test_cancelled_packet_evidence_waits_for_background_query_to_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = RealAnalyzerAdapter(
+        artifact_root=tmp_path / "artifacts",
+        pipeline_script=Path.cwd() / "speed-analyze" / "scripts" / "run_pipeline.py",
+        evidence_timeout_seconds=10,
+    )
+    stopped = threading.Event()
+
+    def blocking_query(root, request, cancel_event):
+        assert cancel_event.wait(timeout=2)
+        stopped.set()
+        raise InterruptedError("cancelled")
+
+    monkeypatch.setattr(adapter, "_query_packet_evidence", blocking_query)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(
+            adapter.get_evidence(
+                EvidenceRequest(
+                    analysis_id="cancel-evidence",
+                    evidence_type="packet_fields",
+                )
+            )
+        )
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(exercise())
+
+    assert stopped.is_set()
 
 
 def test_custom_event_packet_query_prefers_sqlite_without_starting_tshark(
@@ -1062,10 +1100,14 @@ def test_mcp_analysis_response_recursively_filters_untrusted_summary_fields() ->
                     }
                 ],
             )
-            response.flow_summary["f-secret"] = {
+            response.flow_summary["f-1"] = {
                 "direction": "download",
                 "payload_bytes": 10,
                 "nested": {"api_key": "KEY_SECRET"},
+            }
+            response.flow_summary["authorization=BEARER_SECRET"] = {
+                "direction": "download",
+                "payload_bytes": 99,
             }
             response.interval_summary.append(
                 {
@@ -1076,6 +1118,10 @@ def test_mcp_analysis_response_recursively_filters_untrusted_summary_fields() ->
                 }
             )
             response.syn_options["log_body"] = "SYN_LOG_SECRET"
+            response.syn_options["mss_values"] = {
+                "1460": 1,
+                "raw_payload=PCAP_SECRET": 1,
+            }
             response.warnings = ["raw secret warning /private/full.log"]
             response.coverage_summary.truncation_reason = "API_KEY_IN_COVERAGE"
             return response
@@ -1093,10 +1139,11 @@ def test_mcp_analysis_response_recursively_filters_untrusted_summary_fields() ->
     serialized = json.dumps(envelope)
     assert envelope["ok"] is True
     assert envelope["data"]["tcp_summary"]["retransmissions"] == 2
-    assert envelope["data"]["flow_summary"]["f-secret"] == {
+    assert envelope["data"]["flow_summary"]["f-1"] == {
         "direction": "download",
         "payload_bytes": 10,
     }
+    assert envelope["data"]["syn_options"]["mss_values"] == {"1460": 1}
     assert envelope["data"]["interval_summary"][-1] == {
         "interval_start": 0.0,
         "direction": "download",
@@ -1114,6 +1161,8 @@ def test_mcp_analysis_response_recursively_filters_untrusted_summary_fields() ->
         "PAYLOAD_IN_ALLOWED_KEY",
         "LOG_IN_ALLOWED_KEY",
         "API_KEY_IN_COVERAGE",
+        "BEARER_SECRET",
+        "PCAP_SECRET",
     ):
         assert secret not in serialized
 
@@ -1133,14 +1182,14 @@ def test_mcp_transport_compression_preserves_late_interval_and_slow_flow() -> No
                 for index in range(1001)
             ]
             response.flow_summary = {
-                f"normal-{index}": {
+                f"f-{index}": {
                     "direction": "download",
                     "throughput_mbps": 900.0,
                     "payload_bytes": 1_000_000 + index,
                 }
                 for index in range(256)
             }
-            response.flow_summary["slow-flow"] = {
+            response.flow_summary["f-9999"] = {
                 "direction": "download",
                 "throughput_mbps": 1.0,
                 "payload_bytes": 1,
@@ -1166,7 +1215,7 @@ def test_mcp_transport_compression_preserves_late_interval_and_slow_flow() -> No
         for interval in data["interval_summary"]
     )
     assert len(data["flow_summary"]) <= 256
-    assert "slow-flow" in data["flow_summary"]
+    assert "f-9999" in data["flow_summary"]
     assert data["transport_summary"]["intervals"]["total"] == 1001
     assert data["transport_summary"]["intervals"]["omitted"] == 1
     assert data["transport_summary"]["flows"]["total"] == 257
@@ -1179,7 +1228,7 @@ def test_mcp_transport_compression_preserves_late_interval_and_slow_flow() -> No
         standard_bandwidth_mbps=1000,
         actual_bandwidth_mbps=600,
     )
-    assert "slow-flow" in context.flow_metrics
+    assert "f-9999" in context.flow_metrics
     assert any(
         interval["interval_start"] == 1000.0
         for interval in context.anomaly_intervals
@@ -1199,7 +1248,7 @@ def test_mcp_evidence_response_filters_values_paths_and_oversized_fields() -> No
                 summary={"returned": 1, "api_key": "SUMMARY_SECRET"},
                 items=[
                     {
-                        "evidence_id": "ev-safe",
+                        "evidence_id": "ev-1",
                         "event_type": "retransmission",
                         "frame.number": 42,
                         "flow_id": "f-1",
@@ -1240,7 +1289,7 @@ def test_mcp_evidence_response_filters_values_paths_and_oversized_fields() -> No
     assert envelope["ok"] is True
     assert envelope["data"]["items"] == [
         {
-            "evidence_id": "ev-safe",
+            "evidence_id": "ev-1",
             "event_type": "retransmission",
             "frame.number": 42,
             "flow_id": "f-1",
@@ -1267,3 +1316,51 @@ def test_mcp_evidence_response_filters_values_paths_and_oversized_fields() -> No
     ):
         assert secret not in serialized
     assert len(serialized.encode("utf-8")) <= 1_000_000
+
+
+def test_mcp_summary_evidence_preserves_safe_coverage_fields() -> None:
+    class CoverageEvidenceAdapter(MockAnalyzerAdapter):
+        async def get_evidence(self, request):
+            return EvidenceResponse(
+                analysis_id=request.analysis_id,
+                evidence_type="summary",
+                items=[
+                    {
+                        "name": "coverage_summary",
+                        "total_packets_seen": 123,
+                        "tcp_packets_seen": 120,
+                        "complete": True,
+                        "truncated": False,
+                        "truncation_reason": "PRIVATE_REASON",
+                    }
+                ],
+                total=1,
+            )
+
+    async def exercise() -> dict[str, object]:
+        server = create_server(CoverageEvidenceAdapter(FIXTURE))
+        async with FastMCPClient(server) as client:
+            result = await client.call_tool(
+                "get_tcp_evidence",
+                {
+                    "request": EvidenceRequest(
+                        analysis_id="mock-contract", evidence_type="summary"
+                    ).model_dump(mode="json")
+                },
+            )
+            assert isinstance(result.data, dict)
+            return result.data
+
+    envelope = asyncio.run(exercise())
+
+    assert envelope["data"]["items"] == [
+        {
+            "name": "coverage_summary",
+            "total_packets_seen": 123,
+            "tcp_packets_seen": 120,
+            "complete": True,
+            "truncated": False,
+            "truncation_reason": "ANALYSIS_TRUNCATED",
+        }
+    ]
+    assert "PRIVATE_REASON" not in json.dumps(envelope)

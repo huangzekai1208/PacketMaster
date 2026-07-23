@@ -15,7 +15,9 @@ import shutil
 import sqlite3
 import sys
 import sysconfig
+import threading
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -1050,7 +1052,10 @@ class RealAnalyzerAdapter:
         }
 
     def _query_packet_evidence(
-        self, root: Path, request: EvidenceRequest
+        self,
+        root: Path,
+        request: EvidenceRequest,
+        cancel_event: threading.Event | None = None,
     ) -> tuple[
         list[dict[str, object]], int, bool, int | None, str, list[str]
     ]:
@@ -1143,6 +1148,7 @@ class RealAnalyzerAdapter:
                 support_fields,
                 display_filter,
                 timeout_seconds=self.evidence_timeout_seconds,
+                cancel_event=cancel_event,
             )
             try:
                 for row in rows:
@@ -1206,14 +1212,30 @@ class RealAnalyzerAdapter:
             request.evidence_type in PACKET_EVIDENCE_TYPES
             and not use_indexed_packet_query
         ):
+            cancel_event = threading.Event()
+            query_task = asyncio.create_task(
+                asyncio.to_thread(
+                    self._query_packet_evidence, root, request, cancel_event
+                )
+            )
+
+            async def stop_query() -> None:
+                cancel_event.set()
+                with suppress(BaseException):
+                    await asyncio.wait_for(asyncio.shield(query_task), timeout=5)
+
             try:
                 items, total, total_exact, next_offset, source, warnings = (
                     await asyncio.wait_for(
-                        asyncio.to_thread(self._query_packet_evidence, root, request),
+                        asyncio.shield(query_task),
                         timeout=self.evidence_timeout_seconds + 1,
                     )
                 )
+            except asyncio.CancelledError:
+                await stop_query()
+                raise
             except TimeoutError as exc:
+                await stop_query()
                 raise AppError(
                     code="EVIDENCE_TIMEOUT",
                     message="Directed packet evidence query timed out",
