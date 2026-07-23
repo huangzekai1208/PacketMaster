@@ -105,8 +105,8 @@ def generate_capture(
     include_zero_window: bool,
     payload_size: int,
 ) -> dict[str, int | str | bool]:
-    if flow_count < 1:
-        raise ValueError("flows must be positive")
+    if not 1 <= flow_count <= 64:
+        raise ValueError("flows must be between 1 and 64")
     if data_packets_per_flow < 1:
         raise ValueError("data-packets-per-flow must be positive")
     if target not in {"download", "upload", "both"}:

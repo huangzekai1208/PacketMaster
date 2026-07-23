@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import struct
 from pathlib import Path
 
@@ -77,6 +78,8 @@ def tshark_path() -> Path:
         return module.find_tshark()
     except RuntimeError as exc:
         if str(exc).startswith("DEPENDENCY_UNAVAILABLE"):
+            if os.environ.get("PACKETMASTER_REQUIRE_TSHARK") == "1":
+                pytest.fail("TShark is required by this release gate")
             pytest.skip("tshark not installed")
         raise
 

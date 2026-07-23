@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -32,10 +33,38 @@ def _performance_capture() -> Path:
     return capture
 
 
+def _expected_coverage(capture: Path) -> dict[str, int]:
+    configured = os.environ.get("PERF_METADATA_PATH")
+    metadata_path = (
+        Path(configured).expanduser().resolve()
+        if configured
+        else capture.with_name(f"{capture.name}.metadata.json")
+    )
+    if not metadata_path.is_file():
+        pytest.fail(f"performance metadata is not a file: {metadata_path}")
+    try:
+        value = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        pytest.fail(f"invalid performance metadata: {exc}")
+    required = (
+        "input_size_bytes",
+        "total_packets_seen",
+        "tcp_packets_seen",
+        "speed_packets_analyzed",
+    )
+    if not isinstance(value, dict) or any(
+        not isinstance(value.get(field), int) or value[field] <= 0
+        for field in required
+    ):
+        pytest.fail(f"performance metadata needs positive integers: {required}")
+    return {field: value[field] for field in required}
+
+
 def test_large_capture_is_complete_and_stays_within_rss_budget(
     tmp_path: Path,
 ) -> None:
     capture = _performance_capture()
+    expected = _expected_coverage(capture)
     adapter = RealAnalyzerAdapter(artifact_root=tmp_path / "artifacts")
 
     response = asyncio.run(
@@ -49,9 +78,14 @@ def test_large_capture_is_complete_and_stays_within_rss_budget(
     )
 
     coverage = response.coverage_summary
-    assert coverage.input_size_bytes == capture.stat().st_size
-    assert coverage.speed_packets_analyzed > 0
+    assert capture.stat().st_size == expected["input_size_bytes"]
+    assert coverage.input_size_bytes == expected["input_size_bytes"]
+    assert coverage.total_packets_seen == expected["total_packets_seen"]
+    assert coverage.tcp_packets_seen == expected["tcp_packets_seen"]
+    assert coverage.speed_packets_analyzed == expected["speed_packets_analyzed"]
     assert coverage.complete is True
     assert coverage.truncated is False
     rss_budget = int(os.environ.get("PERF_MAX_RSS_BYTES", _DEFAULT_MAX_RSS_BYTES))
-    assert response.resource_usage["rss_peak_bytes"] <= rss_budget
+    sampled_rss_peak = response.resource_usage["rss_peak_bytes"]
+    assert sampled_rss_peak > 0
+    assert sampled_rss_peak <= rss_budget

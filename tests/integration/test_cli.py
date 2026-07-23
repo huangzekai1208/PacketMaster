@@ -316,6 +316,27 @@ def test_cli_real_agent_smoke_preserves_target_and_writes_evidence_report(
     extra: list[str],
     expected: str,
 ) -> None:
+    api_key = f"sk-agent-smoke-{expected}"
+
+    class RecordingDiagnosisModel(FakeDiagnosisModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.model_inputs: list[object] = []
+
+        async def generate_hypotheses(self, context):
+            self.model_inputs.append(context.model_dump(mode="json"))
+            return await super().generate_hypotheses(context)
+
+        async def verify(self, context, hypotheses, evidence):
+            self.model_inputs.append(
+                {
+                    "context": context.model_dump(mode="json"),
+                    "hypotheses": hypotheses.model_dump(mode="json"),
+                    "evidence": [item.model_dump(mode="json") for item in evidence],
+                }
+            )
+            return await super().verify(context, hypotheses, evidence)
+
     capture = (tmp_path / f"agent-{expected}.pcapng").resolve()
     generated = subprocess.run(
         [
@@ -342,10 +363,17 @@ def test_cli_real_agent_smoke_preserves_target_and_writes_evidence_report(
     settings = Settings(
         artifact_root=tmp_path / "artifacts",
         tshark_path=str(tshark_path),
+        model_api_key=api_key,
     )
-    model = FakeDiagnosisModel()
+    model = RecordingDiagnosisModel()
     monkeypatch.setattr(cli.Settings, "load", lambda: settings)
-    monkeypatch.setattr(cli, "DiagnosisModel", lambda **kwargs: model)
+
+    def build_model(**kwargs):
+        configured = kwargs["settings"].model_api_key
+        assert configured.get_secret_value() == api_key
+        return model
+
+    monkeypatch.setattr(cli, "DiagnosisModel", build_model)
     output = tmp_path / f"report-{expected}"
 
     result = runner.invoke(
@@ -369,5 +397,15 @@ def test_cli_real_agent_smoke_preserves_target_and_writes_evidence_report(
     assert report["coverage_summary"]["speed_packets_analyzed"] > 0
     assert report["coverage_summary"]["complete"] is True
     assert report["primary_cause"] == "开放式候选原因"
-    assert report["key_evidence"]
+    assert report["key_evidence"][0]["evidence_type"] == "retransmission"
+    assert report["key_evidence"][0]["total"] > 0
     assert model.targets == [expected]
+    serialized_inputs = json.dumps(model.model_inputs, ensure_ascii=False)
+    assert api_key not in serialized_inputs
+    assert "tcp.payload" not in serialized_inputs.lower()
+    assert "A" * 64 not in serialized_inputs
+    local_text = ""
+    for path in settings.artifact_root.rglob("*"):
+        if path.is_file() and path.suffix in {".json", ".jsonl", ".log"}:
+            local_text += path.read_text(encoding="utf-8", errors="replace")
+    assert api_key not in local_text

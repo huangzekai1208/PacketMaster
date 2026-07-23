@@ -62,6 +62,14 @@ def read_json(path: Path) -> dict[str, object]:
     return value
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def generate_capture(output: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
@@ -381,9 +389,7 @@ def test_generated_multiflow_capture_indexes_evidence_after_packet_5000(
     duplicate = (tmp_path / "generated" / "deterministic-copy.pcapng").resolve()
     duplicate_result = generate_capture(duplicate)
     assert duplicate_result.returncode == 0
-    assert hashlib.sha256(capture.read_bytes()).digest() == hashlib.sha256(
-        duplicate.read_bytes()
-    ).digest()
+    assert sha256_file(capture) == sha256_file(duplicate)
 
     output = (tmp_path / "generated-analysis").resolve()
     result = run_pipeline(capture, output, tshark_path=tshark_path)
@@ -407,7 +413,7 @@ def test_generated_multiflow_capture_indexes_evidence_after_packet_5000(
         "zero_window",
     }
     text_artifacts = result.stdout + result.stderr
-    for path in output.iterdir():
+    for path in output.rglob("*"):
         if path.suffix in {".json", ".jsonl"}:
             text_artifacts += path.read_text(encoding="utf-8")
     assert api_key not in text_artifacts

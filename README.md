@@ -62,12 +62,13 @@ python scripts/generate_test_capture.py \
 
 GitHub Actions 在 Windows 和 macOS 上安装真实 TShark 并运行所有非性能测试。Windows job 是正式发布门禁，macOS job 是开发兼容门禁。
 
-约 2 GB 的大报文性能门禁需在带有 `packetmaster-performance` 标签的 Windows 自托管 runner 上手动运行，并配置仓库变量 `PERF_PCAP_PATH`。也可在实机本地执行：
+约 2 GB 的大报文性能门禁需在带有 `packetmaster-performance` 标签的 Windows 自托管 runner 上手动运行，并配置仓库变量 `PERF_PCAP_PATH` 和 `PERF_METADATA_PATH`。也可在实机本地执行：
 
 ```powershell
 $env:PERF_PCAP_PATH = "D:\captures\release-2gb.pcapng"
+$env:PERF_METADATA_PATH = "D:\captures\release-2gb.pcapng.metadata.json"
 $env:PERF_MAX_RSS_BYTES = "1073741824"
 python -m pytest tests/performance/test_large_capture.py -v
 ```
 
-该门禁要求分析覆盖完整、无截断、包数大于零，且子进程 RSS 峰值不超过预算。
+元数据 JSON 必须由发布夹具的独立生成流程提供 `input_size_bytes`、`total_packets_seen`、`tcp_packets_seen` 和 `speed_packets_analyzed` 四个正整数。门禁要求分析结果与这些期望值完全相等、无截断，且子进程树的采样 RSS 峰值大于零并不超过预算。RSS 约每 250 ms 采样一次，不是操作系统级精确峰值，因此发布预算应保留安全余量。

@@ -20,6 +20,7 @@ jobs:
             tshark_path: tshark
     runs-on: ${{ matrix.os }}
     env:
+      PACKETMASTER_REQUIRE_TSHARK: "1"
       TSHARK_PATH: ${{ matrix.tshark_path }}
     steps:
       - uses: actions/checkout@v4
@@ -34,6 +35,13 @@ jobs:
       - name: Install TShark on macOS
         if: runner.os == 'macOS'
         run: brew install wireshark
+      - name: Verify TShark on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '& "$env:TSHARK_PATH" --version'
+      - name: Verify TShark on macOS
+        if: runner.os == 'macOS'
+        run: '"$TSHARK_PATH" --version'
       - name: Install PacketMaster
         run: python -m pip install -e ".[dev]"
       - name: Run non-performance tests
@@ -46,8 +54,10 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, Windows, X64, packetmaster-performance]
     env:
+      PACKETMASTER_REQUIRE_TSHARK: "1"
       TSHARK_PATH: 'C:\Program Files\Wireshark\tshark.exe'
       PERF_PCAP_PATH: ${{ vars.PERF_PCAP_PATH }}
+      PERF_METADATA_PATH: ${{ vars.PERF_METADATA_PATH }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -55,9 +65,13 @@ jobs:
           python-version: "3.13"
           cache: pip
       - run: python -m pip install -e ".[dev]"
-      - name: Require the local large-capture fixture
-        if: env.PERF_PCAP_PATH == ''
+      - name: Verify TShark
         shell: pwsh
-        run: throw 'Set the PERF_PCAP_PATH repository variable for this runner.'
+        run: '& "$env:TSHARK_PATH" --version'
+      - name: Require the local large-capture fixture
+        if: env.PERF_PCAP_PATH == '' || env.PERF_METADATA_PATH == ''
+        shell: pwsh
+        run: >-
+          throw 'Set PERF_PCAP_PATH and PERF_METADATA_PATH repository variables.'
       - name: Run large-capture release gate
         run: python -m pytest tests/performance/test_large_capture.py -v
