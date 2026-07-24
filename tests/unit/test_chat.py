@@ -1,7 +1,14 @@
 import pytest
 from pydantic import ValidationError
 
-from packetmaster.chat import build_model_context, validate_question
+from packetmaster.artifacts import ArtifactManager
+from packetmaster.chat import (
+    ChatCommand,
+    ChatSession,
+    build_model_context,
+    parse_command,
+    validate_question,
+)
 from packetmaster.domain import (
     ChatAnswer,
     ChatEvidenceCitation,
@@ -75,3 +82,30 @@ def test_chat_models_reject_extra_fields_and_invalid_citation() -> None:
         PathReference(placeholder="/Users/me/test.pcapng")
     with pytest.raises(ValidationError):
         ChatEvidenceCitation(analysis_id="a", evidence_type="e", frame_number=-1)
+
+
+def test_slash_commands_are_deterministic_and_case_insensitive() -> None:
+    assert parse_command("/REPORT").command is ChatCommand.REPORT
+    assert parse_command("/evidence flow-1").argument == "flow-1"
+    assert parse_command("/unknown").command is ChatCommand.UNKNOWN
+    assert parse_command("  ").command is ChatCommand.EMPTY
+    assert parse_command("主因是什么？") is None
+
+
+def test_chat_session_archives_old_turns_with_byte_bound() -> None:
+    session = ChatSession(ChatSessionState(session_id="session-1"))
+    for index in range(10):
+        session.append_turn(f"问题 {index}", "回答" * 1000)
+
+    assert len(session.state.conversation_turns) == 8
+    assert len(session.state.conversation_summary.encode("utf-8")) <= 8_000
+
+
+def test_chat_session_active_artifact_is_removed_on_finish(tmp_path) -> None:
+    manager = ArtifactManager(tmp_path / "artifacts", ttl_hours=24)
+    session = ChatSession(ChatSessionState(session_id="session-1"), manager)
+    paths = session.start_analysis("analysis-1")
+    assert paths is not None
+    assert (paths.root / ".active").exists()
+    session.finish()
+    assert not (paths.root / ".active").exists()
