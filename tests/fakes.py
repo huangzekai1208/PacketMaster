@@ -3,7 +3,6 @@ from __future__ import annotations
 from packetmaster.domain import (
     AnalysisStatus,
     AnalyzeResponse,
-    Confidence,
     CoverageSummary,
     EvidenceRequest,
     EvidenceResponse,
@@ -87,14 +86,21 @@ class FakeDiagnosisModel:
             cause="开放式候选原因",
             hypothesis_type=HypothesisType.DATA_DISCOVERED,
             observability=Observability.INDIRECT,
-            confidence=Confidence.MEDIUM,
+            confidence=65,
             supporting_evidence=["聚合吞吐不足"],
             contradicting_evidence=[],
             missing_evidence=["更多局部证据"],
             affected_flows=["f-1"],
         )
+        second_hypothesis = hypothesis.model_copy(
+            update={
+                "cause": "次要候选原因",
+                "confidence": 45,
+                "supporting_evidence": ["存在次要异常指标"],
+            }
+        )
         return HypothesisBatch(
-            hypotheses=[hypothesis],
+            hypotheses=[hypothesis, second_hypothesis],
             requested_evidence=(
                 [self._request(context.analysis_id)] if self.initial_request else []
             ),
@@ -106,10 +112,9 @@ class FakeDiagnosisModel:
             [self._request(context.analysis_id)] if self.request_forever else []
         )
         return VerificationResult(
-            accepted_hypotheses=([] if self.request_forever else hypotheses.hypotheses),
+            candidate_hypotheses=hypotheses.hypotheses,
             requested_evidence=requests,
             ready_for_report=not self.request_forever,
-            confidence=Confidence.LOW if self.request_forever else Confidence.MEDIUM,
             limitations=(
                 ["证据不足，保持 unresolved"] if self.request_forever else []
             ),

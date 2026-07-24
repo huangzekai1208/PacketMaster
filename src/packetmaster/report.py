@@ -32,7 +32,7 @@ def render_terminal(report: DiagnosticReport) -> str:
             f"complete={coverage.complete}, truncated={coverage.truncated}"
         ),
         f"关键证据: {len(report.key_evidence)} 条",
-        f"置信度: {report.confidence.value}",
+        f"置信度: {report.confidence:.2f}%",
     ]
     if report.limitations:
         lines.append("限制: " + "；".join(report.limitations[:10]))

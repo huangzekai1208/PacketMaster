@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 
 import packetmaster.cli as cli
 from packetmaster.config import Settings
-from packetmaster.domain import Confidence, CoverageSummary, DiagnosticReport, Target
+from packetmaster.domain import CoverageSummary, DiagnosticReport, Target
 from packetmaster.errors import AppError
 from tests.fakes import FakeDiagnosisModel
 
@@ -32,7 +32,7 @@ def _report(target: Target) -> DiagnosticReport:
         target=target,
         primary_cause="unresolved",
         key_evidence=[{"metric": "retransmission_rate", "value": 0.12}],
-        confidence=Confidence.LOW,
+        confidence=0,
         coverage_summary=CoverageSummary(
             total_packets_seen=10,
             tcp_packets_seen=10,

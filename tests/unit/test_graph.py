@@ -8,7 +8,6 @@ import pytest
 
 import packetmaster.graph as graph_module
 from packetmaster.domain import (
-    Confidence,
     DiagnosticReport,
     EvidenceRequest,
     EvidenceResponse,
@@ -66,8 +65,8 @@ def test_graph_caps_evidence_loop_at_three_rounds(tmp_path: Path) -> None:
     assert model.verify_calls == 3
     assert len(mcp.evidence_calls) == 3
     assert all(1 <= request.limit <= 500 for request in mcp.evidence_calls)
-    assert result["report"].primary_cause == "unresolved"
-    assert result["report"].confidence.value == "low"
+    assert result["report"].primary_cause == "开放式候选原因"
+    assert result["report"].confidence == 65
     assert result["report"].evidence_quality["local_evidence_truncated"] is True
     assert [request.offset for request in mcp.evidence_calls] == [0, 100, 200]
 
@@ -102,7 +101,7 @@ def test_graph_rejects_cross_analysis_evidence_request(tmp_path: Path) -> None:
     assert result["error"]["code"] == "EVIDENCE_ANALYSIS_MISMATCH"
     assert mcp.evidence_calls == []
     assert result["report"].primary_cause == "unresolved"
-    assert result["report"].confidence.value == "low"
+    assert result["report"].confidence == 0
 
 
 def test_graph_degrades_analysis_error_to_unresolved_report(tmp_path: Path) -> None:
@@ -220,7 +219,7 @@ def test_ready_verification_still_validates_unsafe_request(tmp_path: Path) -> No
     assert result["report"].primary_cause == "unresolved"
 
 
-def test_incomplete_coverage_forces_unresolved_low_confidence(tmp_path: Path) -> None:
+def test_incomplete_coverage_keeps_supported_ranked_cause(tmp_path: Path) -> None:
     mcp = FakeMCPClient()
     original = mcp.analyze_speed_capture
 
@@ -236,33 +235,28 @@ def test_incomplete_coverage_forces_unresolved_low_confidence(tmp_path: Path) ->
 
     result = asyncio.run(graph.ainvoke(_input(tmp_path)))
 
-    assert result["report"].primary_cause == "unresolved"
-    assert result["report"].confidence is Confidence.LOW
-    assert all(
-        item.confidence is Confidence.LOW
-        for item in result["report"].candidate_causes
-    )
+    assert result["report"].primary_cause == "开放式候选原因"
+    assert result["report"].confidence == 65
+    assert [item.confidence for item in result["report"].candidate_causes] == [
+        65,
+        45,
+    ]
     assert result["report"].troubleshooting_steps == []
-    assert any("coverage" in item.lower() for item in result["report"].limitations)
+    assert any("覆盖" in item for item in result["report"].limitations)
 
 
-def test_outside_capture_only_forces_unresolved_low_confidence(tmp_path: Path) -> None:
+def test_outside_capture_supported_cause_can_be_primary(tmp_path: Path) -> None:
     class OutsideHighModel(FakeDiagnosisModel):
         async def generate_hypotheses(self, context):
             batch = await super().generate_hypotheses(context)
-            batch.hypotheses.append(
-                batch.hypotheses[0].model_copy(
-                    update={"cause": "rejected-direct-cause"}
-                )
-            )
+            for hypothesis in batch.hypotheses:
+                hypothesis.observability = Observability.OUTSIDE_CAPTURE
             return batch
 
         async def verify(self, context, hypotheses, evidence):
             result = await super().verify(context, hypotheses, evidence)
-            result.accepted_hypotheses = [result.accepted_hypotheses[0]]
-            result.accepted_hypotheses[0].observability = Observability.OUTSIDE_CAPTURE
-            result.confidence = Confidence.HIGH
-            result.accepted_hypotheses[0].suggestion = "UNVERIFIED_ACTION"
+            result.candidate_hypotheses[0].confidence = 90
+            result.candidate_hypotheses[0].suggestion = "UNVERIFIED_ACTION"
             return result
 
     graph = build_graph(
@@ -271,38 +265,33 @@ def test_outside_capture_only_forces_unresolved_low_confidence(tmp_path: Path) -
 
     result = asyncio.run(graph.ainvoke(_input(tmp_path)))
 
-    assert result["report"].primary_cause == "unresolved"
-    assert result["report"].confidence is Confidence.LOW
-    assert all(
-        item.confidence is Confidence.LOW
-        for item in result["report"].candidate_causes
-    )
+    assert result["report"].primary_cause == "开放式候选原因"
+    assert result["report"].confidence == 90
     assert [item.cause for item in result["report"].candidate_causes] == [
-        "开放式候选原因"
+        "开放式候选原因",
+        "次要候选原因",
     ]
-    assert result["report"].troubleshooting_steps == []
+    assert result["report"].troubleshooting_steps == ["UNVERIFIED_ACTION"]
     assert any(
-        "outside" in item.lower() for item in result["report"].limitations
+        "报文外" in item for item in result["report"].limitations
     )
 
 
-def test_low_confidence_report_keeps_only_accepted_candidates_and_steps(
+def test_report_sorts_candidates_and_selects_highest_supported_confidence(
     tmp_path: Path,
 ) -> None:
     class SelectiveLowModel(FakeDiagnosisModel):
         async def generate_hypotheses(self, context):
             batch = await super().generate_hypotheses(context)
-            rejected = batch.hypotheses[0].model_copy(
-                update={"cause": "rejected-cause", "suggestion": "REJECTED_STEP"}
-            )
             batch.hypotheses[0].suggestion = "ACCEPTED_STEP"
-            batch.hypotheses.append(rejected)
+            batch.hypotheses[0].confidence = 55
+            batch.hypotheses[1].suggestion = "TOP_STEP"
+            batch.hypotheses[1].confidence = 82
             return batch
 
         async def verify(self, context, hypotheses, evidence):
             result = await super().verify(context, hypotheses, evidence)
-            result.accepted_hypotheses = [hypotheses.hypotheses[0]]
-            result.confidence = Confidence.LOW
+            result.candidate_hypotheses = hypotheses.hypotheses
             return result
 
     graph = build_graph(
@@ -311,10 +300,32 @@ def test_low_confidence_report_keeps_only_accepted_candidates_and_steps(
     result = asyncio.run(graph.ainvoke(_input(tmp_path)))
 
     assert [item.cause for item in result["report"].candidate_causes] == [
+        "次要候选原因",
         "开放式候选原因"
     ]
-    assert result["report"].candidate_causes[0].confidence is Confidence.LOW
-    assert result["report"].troubleshooting_steps == ["ACCEPTED_STEP"]
+    assert result["report"].primary_cause == "次要候选原因"
+    assert result["report"].confidence == 82
+    assert result["report"].troubleshooting_steps == ["TOP_STEP", "ACCEPTED_STEP"]
+
+
+def test_report_is_unresolved_only_when_all_candidates_lack_support(
+    tmp_path: Path,
+) -> None:
+    class UnsupportedModel(FakeDiagnosisModel):
+        async def verify(self, context, hypotheses, evidence):
+            result = await super().verify(context, hypotheses, evidence)
+            for hypothesis in result.candidate_hypotheses:
+                hypothesis.supporting_evidence = []
+            return result
+
+    graph = build_graph(
+        mcp_client=FakeMCPClient(), diagnosis_model=UnsupportedModel()
+    )
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert len(result["report"].candidate_causes) == 2
+    assert result["report"].primary_cause == "unresolved"
+    assert result["report"].confidence == 0
 
 
 def test_report_key_evidence_contains_bounded_traceable_references(

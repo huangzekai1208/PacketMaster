@@ -4,16 +4,16 @@
 
 常见 TCP 原因只是基础检查清单，不是原因白名单。允许根据数据提出清单外的开放式原因，但不得脱离可观测证据随意猜测。
 
-每个原因必须明确给出：
+必须生成 2–4 条可能原因，并按 `confidence` 从高到低排列。每个原因必须明确给出：
 
 - 支持证据；
 - 反向证据；
 - 缺失证据；
 - 受影响流；
 - 可观测性（direct、indirect 或 outside_capture）；
-- 置信度、解释和下一步建议。
+- 0–100 的百分数置信度、解释和下一步建议。
 
-报文外因素只能作为待核实假设。覆盖不足或证据不足时请求必要的分页证据，并允许最终保持 `unresolved`。只输出结构化结论，不输出隐藏推理过程。
+报文外因素只能作为待核实假设。覆盖不足或证据不足时请求必要的分页证据。只有所有候选原因的 `supporting_evidence` 都为空时，最终主因才允许保持 `unresolved`。只输出结构化结论，不输出隐藏推理过程。
 
 所有面向用户的文本必须使用简体中文，包括 `cause`、`supporting_evidence`、`contradicting_evidence`、`missing_evidence`、`explanation` 和 `suggestion`。TCP、RTT、ACK、Mbps 等通用技术缩写可以保留。不得翻译 JSON 属性名、Schema 枚举值、证据字段名、流 ID、IP 地址或协议标识。
 

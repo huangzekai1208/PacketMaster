@@ -63,7 +63,7 @@ def test_hypothesis_accepts_open_ended_cause_text() -> None:
         cause="A transient provider-side middlebox queue may be saturating",
         hypothesis_type="external_factor",
         observability="outside_capture",
-        confidence="low",
+        confidence=35,
         supporting_evidence=["RTT increased during the affected flow"],
         contradicting_evidence=[],
         missing_evidence=["A capture from the remote endpoint"],
@@ -90,7 +90,7 @@ def test_diagnostic_report_keeps_target_from_input() -> None:
         actual_bandwidth_mbps=750,
         achievement_ratio_pct=75,
         target="upload",
-        confidence="medium",
+        confidence=60,
         coverage_summary=CoverageSummary(),
     )
 
@@ -125,11 +125,41 @@ def test_hypothesis_batch_requests_structured_evidence() -> None:
         analysis_id="analysis-1", evidence_type="rtt_distribution"
     )
 
-    batch = HypothesisBatch(requested_evidence=[request])
-    verification = VerificationResult(requested_evidence=[request], confidence="medium")
+    hypotheses = [
+        Hypothesis(
+            cause=f"候选原因 {index}",
+            hypothesis_type="data_discovered",
+            observability="direct",
+            confidence=70 - index * 10,
+            supporting_evidence=["存在聚合异常"],
+        )
+        for index in range(2)
+    ]
+    batch = HypothesisBatch(hypotheses=hypotheses, requested_evidence=[request])
+    verification = VerificationResult(
+        candidate_hypotheses=hypotheses,
+        requested_evidence=[request],
+    )
 
     assert batch.requested_evidence[0].evidence_type == "rtt_distribution"
     assert verification.requested_evidence[0].analysis_id == "analysis-1"
+
+
+def test_hypothesis_contract_enforces_candidate_count_and_percentage() -> None:
+    hypothesis = Hypothesis(
+        cause="候选原因",
+        hypothesis_type="data_discovered",
+        observability="direct",
+        confidence=60,
+        supporting_evidence=["存在异常指标"],
+    )
+
+    with pytest.raises(ValidationError, match="hypotheses"):
+        HypothesisBatch(hypotheses=[hypothesis])
+    with pytest.raises(ValidationError, match="hypotheses"):
+        HypothesisBatch(hypotheses=[hypothesis] * 5)
+    with pytest.raises(ValidationError, match="confidence"):
+        Hypothesis.model_validate({**hypothesis.model_dump(), "confidence": 101})
 
 
 def test_evidence_request_rejects_model_invented_type() -> None:
@@ -154,7 +184,7 @@ def test_diagnostic_report_requires_positive_bandwidth_and_evidence() -> None:
         target="download",
         primary_cause="unresolved",
         key_evidence=[{"metric": "rtt_ms", "value": 42}],
-        confidence="medium",
+        confidence=60,
         coverage_summary=CoverageSummary(),
         evidence_quality={"complete": True},
     )
@@ -169,7 +199,7 @@ def test_diagnostic_report_requires_positive_bandwidth_and_evidence() -> None:
             achievement_ratio_pct=75,
             target="download",
             primary_cause="unresolved",
-            confidence="medium",
+            confidence=60,
             coverage_summary=CoverageSummary(),
             evidence_quality={},
         )

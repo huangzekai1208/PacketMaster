@@ -80,12 +80,6 @@ class Observability(StrEnum):
     OUTSIDE_CAPTURE = "outside_capture"
 
 
-class Confidence(StrEnum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-
-
 class ContractModel(BaseModel):
     """Strict base class for all stable inter-component contracts."""
 
@@ -93,6 +87,7 @@ class ContractModel(BaseModel):
 
 
 BoundedQueryString = Annotated[str, Field(min_length=1, max_length=256)]
+ConfidencePercentage = Annotated[float, Field(ge=0, le=100)]
 
 
 class AnalyzeRequest(ContractModel):
@@ -201,7 +196,7 @@ class Hypothesis(ContractModel):
     cause: str
     hypothesis_type: HypothesisType
     observability: Observability
-    confidence: Confidence
+    confidence: ConfidencePercentage
     supporting_evidence: list[str] = Field(default_factory=list)
     contradicting_evidence: list[str] = Field(default_factory=list)
     missing_evidence: list[str] = Field(default_factory=list)
@@ -211,16 +206,15 @@ class Hypothesis(ContractModel):
 
 
 class HypothesisBatch(ContractModel):
-    hypotheses: list[Hypothesis] = Field(default_factory=list)
+    hypotheses: list[Hypothesis] = Field(min_length=2, max_length=4)
     requested_evidence: list[EvidenceRequest] = Field(default_factory=list)
 
 
 class VerificationResult(ContractModel):
-    accepted_hypotheses: list[Hypothesis] = Field(default_factory=list)
+    candidate_hypotheses: list[Hypothesis] = Field(min_length=2, max_length=4)
     rejected_causes: list[str] = Field(default_factory=list)
     requested_evidence: list[EvidenceRequest] = Field(default_factory=list)
     ready_for_report: bool = False
-    confidence: Confidence | None = None
     limitations: list[str] = Field(default_factory=list)
 
 
@@ -230,9 +224,9 @@ class DiagnosticReport(ContractModel):
     achievement_ratio_pct: float = Field(ge=0)
     target: Target = Target.DOWNLOAD
     primary_cause: str = "unresolved"
-    candidate_causes: list[Hypothesis] = Field(default_factory=list)
+    candidate_causes: list[Hypothesis] = Field(default_factory=list, max_length=4)
     key_evidence: list[dict[str, Any]] = Field(default_factory=list)
-    confidence: Confidence
+    confidence: ConfidencePercentage
     coverage_summary: CoverageSummary
     evidence_quality: dict[str, Any] = Field(default_factory=dict)
     limitations: list[str] = Field(default_factory=list)

@@ -15,7 +15,6 @@ from packetmaster.context import ContextBuilder, DiagnosisContext
 from packetmaster.domain import (
     AnalyzeRequest,
     AnalyzeResponse,
-    Confidence,
     CoverageSummary,
     DiagnosticReport,
     EvidenceRequest,
@@ -374,24 +373,17 @@ def build_graph(
 
     async def _report_impl(state: AgentState) -> dict[str, Any]:
         verification = state.get("verification")
-        hypotheses = state.get("hypotheses", HypothesisBatch())
+        hypotheses = state.get("hypotheses")
         error = state.get("error")
-        accepted = (
-            verification.accepted_hypotheses
-            if verification and verification.ready_for_report and not error
-            else []
-        )
         limitations = list(verification.limitations if verification else [])
         if error:
-            limitations.insert(0, f"{error['code']}: analysis workflow degraded")
-        if not accepted and not limitations:
-            limitations.append("Evidence is insufficient; result remains unresolved.")
+            limitations.insert(0, f"{error['code']}：分析流程已降级")
         if (
             verification
             and not verification.ready_for_report
             and state.get("round_count", 0) >= MAX_EVIDENCE_ROUNDS
         ):
-            limitations.append("Evidence round limit reached before verification.")
+            limitations.append("达到证据查询轮次上限，复核仍未完成。")
         analysis = state.get("analysis")
         coverage = (
             analysis.coverage_summary
@@ -403,65 +395,37 @@ def build_graph(
             and not coverage.truncated
             and coverage.speed_packets_analyzed > 0
         )
-        observable_accepted = [
-            hypothesis
-            for hypothesis in accepted
-            if hypothesis.observability is not Observability.OUTSIDE_CAPTURE
-        ]
         if not coverage_reliable:
-            observable_accepted = []
             limitations.append(
-                "Analysis coverage is incomplete or truncated; "
-                "conclusion is unresolved."
+                "分析覆盖不完整或已截断，置信度需谨慎解读。"
             )
-        elif accepted and not observable_accepted:
+        candidate_source = (
+            verification.candidate_hypotheses
+            if verification and not error
+            else (hypotheses.hypotheses if hypotheses else [])
+        )
+        report_candidates = sorted(
+            candidate_source,
+            key=lambda item: item.confidence,
+            reverse=True,
+        )[:4]
+        supported_candidates = [
+            item
+            for item in report_candidates
+            if any(evidence.strip() for evidence in item.supporting_evidence)
+        ]
+        if report_candidates and all(
+            item.observability is Observability.OUTSIDE_CAPTURE
+            for item in report_candidates
+        ):
             limitations.append(
-                "Accepted hypotheses are outside capture observability; "
-                "external validation is required."
+                "候选原因均属于报文外可观测范围，需要外部验证。"
             )
-        primary = (
-            observable_accepted[0].cause if observable_accepted else "unresolved"
+        primary_candidate = (
+            supported_candidates[0] if supported_candidates and not error else None
         )
-        report_confidence = (
-            verification.confidence
-            if (
-                verification
-                and verification.ready_for_report
-                and verification.confidence
-                and observable_accepted
-                and coverage_reliable
-                and not error
-            )
-            else Confidence.LOW
-        )
-        if observable_accepted:
-            report_candidates = [
-                item.model_copy(
-                    update={
-                        "confidence": (
-                            Confidence.LOW
-                            if report_confidence is Confidence.LOW
-                            else (
-                                Confidence.MEDIUM
-                                if item.confidence is Confidence.HIGH
-                                and report_confidence is Confidence.MEDIUM
-                                else item.confidence
-                            )
-                        )
-                    }
-                )
-                for item in observable_accepted
-            ]
-        else:
-            candidate_source = (
-                accepted
-                if verification and verification.ready_for_report and not error
-                else hypotheses.hypotheses
-            )
-            report_candidates = [
-                item.model_copy(update={"confidence": Confidence.LOW})
-                for item in candidate_source
-            ]
+        primary = primary_candidate.cause if primary_candidate else "unresolved"
+        report_confidence = primary_candidate.confidence if primary_candidate else 0.0
         standard = _positive_float(state.get("standard_bandwidth_mbps"))
         actual = _positive_float(state.get("actual_bandwidth_mbps"))
         try:
@@ -531,9 +495,9 @@ def build_graph(
                 ),
                 target=fallback_target,
                 primary_cause="unresolved",
-                confidence=Confidence.LOW,
+                confidence=0.0,
                 coverage_summary=CoverageSummary(),
-                limitations=["REPORT_FAILED: minimal fallback generated"],
+                limitations=["REPORT_FAILED：已生成最小降级报告"],
                 analysis_metadata={"error_code": error["code"]},
             )
             return {

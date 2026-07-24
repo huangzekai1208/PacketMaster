@@ -12,7 +12,6 @@ from packetmaster.context import ContextBuilder, DiagnosisContext
 from packetmaster.domain import (
     AnalysisStatus,
     AnalyzeResponse,
-    Confidence,
     CoverageSummary,
     EvidenceResponse,
     HypothesisBatch,
@@ -374,23 +373,59 @@ class FakeStructuredModel:
                         "cause": "应用层自适应限速策略",
                         "hypothesis_type": "data_discovered",
                         "observability": "indirect",
-                        "confidence": "medium",
+                        "confidence": 65,
                         "supporting_evidence": ["吞吐低于标准带宽"],
                         "contradicting_evidence": ["未观察到持续零窗口"],
                         "missing_evidence": ["服务端应用指标"],
                         "affected_flows": ["f-1"],
                         "explanation": "该原因不属于固定 TCP 原因枚举。",
                         "suggestion": "核对服务端限速策略。",
-                    }
+                    },
+                    {
+                        "cause": "测速持续时间不足",
+                        "hypothesis_type": "known_pattern",
+                        "observability": "indirect",
+                        "confidence": 45,
+                        "supporting_evidence": ["捕获持续时间较短"],
+                        "contradicting_evidence": [],
+                        "missing_evidence": ["更长时间的报文"],
+                        "affected_flows": ["f-1"],
+                        "explanation": "短时样本可能未覆盖稳定阶段。",
+                        "suggestion": "延长测速和抓包时间。",
+                    },
                 ],
                 "requested_evidence": [],
             }
         return {
-            "accepted_hypotheses": [],
+            "candidate_hypotheses": [
+                {
+                    "cause": "应用层自适应限速策略",
+                    "hypothesis_type": "data_discovered",
+                    "observability": "indirect",
+                    "confidence": 40,
+                    "supporting_evidence": ["吞吐低于标准带宽"],
+                    "contradicting_evidence": ["未观察到持续零窗口"],
+                    "missing_evidence": ["服务端应用指标"],
+                    "affected_flows": ["f-1"],
+                    "explanation": "仍需外部指标核实。",
+                    "suggestion": "核对服务端限速策略。",
+                },
+                {
+                    "cause": "测速持续时间不足",
+                    "hypothesis_type": "known_pattern",
+                    "observability": "indirect",
+                    "confidence": 25,
+                    "supporting_evidence": ["捕获持续时间较短"],
+                    "contradicting_evidence": [],
+                    "missing_evidence": ["更长时间的报文"],
+                    "affected_flows": ["f-1"],
+                    "explanation": "短时样本可能未覆盖稳定阶段。",
+                    "suggestion": "延长测速和抓包时间。",
+                },
+            ],
             "rejected_causes": [],
             "requested_evidence": [],
             "ready_for_report": False,
-            "confidence": "low",
             "limitations": ["报文外因素未被报文直接证实，保持 unresolved"],
         }
 
@@ -445,7 +480,7 @@ def test_diagnosis_model_uses_open_structured_output_without_network() -> None:
     assert hypotheses.hypotheses[0].cause == "应用层自适应限速策略"
     assert isinstance(verification, VerificationResult)
     assert verification.ready_for_report is False
-    assert verification.confidence is Confidence.LOW
+    assert verification.candidate_hypotheses[0].confidence == 40
     serialized_messages = json.dumps(fake.messages, ensure_ascii=False, default=str)
     assert "RAW_SECRET" not in serialized_messages
     assert "MODEL_LOG_SECRET" not in serialized_messages
@@ -580,4 +615,8 @@ def test_prompts_require_open_hypotheses_and_outside_capture_limits() -> None:
     assert "不得翻译 JSON 属性名、Schema 枚举值" in hypothesis
     assert "rejected_causes" in verification
     assert "limitations" in verification
+    assert "2–4 条可能原因" in hypothesis
+    assert "0–100 的百分数置信度" in hypothesis
+    assert "candidate_hypotheses" in verification
+    assert "所有候选原因的 `supporting_evidence` 都为空" in verification
     assert DiagnosisModel._prompt("hypothesis.md") == hypothesis
