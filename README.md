@@ -18,6 +18,12 @@ packetmaster diagnose "C:\captures\test.pcapng" --standard 1000 --actual 600 --t
 ```
 
 可用 `--keep-artifacts` 保留本次本地产物。结构化结果写入 `report.json`。
+packetmaster diagnose \
+  artifacts/synthetic-model-test/capture.pcapng \
+  --standard 1000 \
+  --actual 600 \
+  --output-dir artifacts/my-first-report \
+  --keep-artifacts
 
 ## Windows
 
@@ -67,6 +73,25 @@ export MODEL_STRUCTURED_OUTPUT_METHOD="auto"
 `auto` 会对模型名或接口地址中包含 `deepseek` 的服务使用 `json_mode`，
 其他模型默认使用 `json_schema`。兼容服务也可以显式设置为
 `json_mode`、`json_schema` 或 `function_calling`。
+
+## CLI 对话模式
+
+```bash
+conda activate agent
+packetmaster chat
+```
+
+首次输入自然语言任务，例如：
+
+```text
+请分析 /Users/me/captures/test.pcapng，标准带宽 1Gbps，实际 600M
+```
+
+PacketMaster 会抽取参数、补问缺失项并等待确认；未明确方向时默认分析下载。
+确认完成后进入 `PacketMaster>` 提示符，可继续询问当前报告和证据。
+
+内置命令：`/new` 新建任务，`/report` 查看完整中文报告，`/evidence` 查看有界证据，
+`/save` 查看 JSON 报告路径，`/help` 查看帮助，`/quit` 退出。
 
 ## 开发与测试
 

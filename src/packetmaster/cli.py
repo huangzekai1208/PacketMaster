@@ -305,7 +305,10 @@ def chat() -> None:
     """启动 PacketMaster 持续对话诊断。"""
 
     settings = Settings.load()
-    session = ChatSession(ChatSessionState(session_id=create_request_id()))
+    session = ChatSession(
+        ChatSessionState(session_id=create_request_id()),
+        ArtifactManager(settings.artifact_root, settings.artifact_ttl_hours),
+    )
     path_registry = None
     typer.echo("PacketMaster 对话模式。输入 /help 查看命令，/quit 退出。")
     try:

@@ -2,6 +2,10 @@
 # Runtime dependencies are maintained in pyproject.toml.
 -e .
 
+# FastMCP currently leaves fakeredis without a lower bound; pin a current
+# compatible release so pip does not backtrack into broken legacy packages.
+fakeredis[lua]==2.34.1
+
 # Development and verification tools.
 pytest>=8
 pytest-asyncio>=0.23
