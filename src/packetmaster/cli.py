@@ -463,6 +463,7 @@ def chat() -> None:
                 continue
 
             answer, _ = asyncio.run(_answer_chat_question(session, settings, raw))
+            session.append_turn(raw, answer)
             typer.echo(answer)
     finally:
         session.finish()
