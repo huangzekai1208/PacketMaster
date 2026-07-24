@@ -203,6 +203,38 @@ def test_cli_accepts_windows_drive_path_without_shell_rewriting(
     assert calls == [windows_path]
 
 
+def test_cli_resolves_relative_capture_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    capture = tmp_path / "captures" / "test.pcapng"
+    capture.parent.mkdir()
+    capture.write_bytes(b"capture")
+    calls: list[str] = []
+
+    async def fake_run(**kwargs):
+        calls.append(kwargs["pcap_path"])
+        return _report(Target.DOWNLOAD)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "run_diagnosis", fake_run)
+    result = runner.invoke(
+        cli.app,
+        [
+            "diagnose",
+            "captures/test.pcapng",
+            "--standard",
+            "1000",
+            "--actual",
+            "600",
+            "--output-dir",
+            str(tmp_path / "out"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [str(capture.resolve())]
+
+
 def test_cli_maps_app_error_to_nonzero_exit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -22,6 +22,7 @@ from packetmaster.graph import build_graph
 from packetmaster.mcp.client import SpeedMCPClient
 from packetmaster.mcp.server import create_server
 from packetmaster.model import DiagnosisModel
+from packetmaster.platform import is_absolute_path
 from packetmaster.report import render_terminal, write_report
 
 app = typer.Typer(help="PacketMaster TCP 测速不达标诊断")
@@ -85,6 +86,13 @@ def _localize_progress_message(message: str) -> str:
 class DiagnosisOutcome:
     report: DiagnosticReport
     error: AppError | None = None
+
+
+def _normalize_capture_path(value: str) -> str:
+    expanded = str(Path(value).expanduser())
+    if is_absolute_path(expanded):
+        return expanded
+    return str(Path(expanded).resolve())
 
 
 @app.callback()
@@ -166,7 +174,7 @@ async def run_diagnosis(
 
 @app.command()
 def diagnose(
-    pcap_path: Annotated[str, typer.Argument(help="pcap/pcapng 绝对路径")],
+    pcap_path: Annotated[str, typer.Argument(help="pcap/pcapng 路径")],
     standard: Annotated[float, typer.Option("--standard", min=0.000001)],
     actual: Annotated[float, typer.Option("--actual", min=0.000001)],
     target: Annotated[Target, typer.Option("--target")] = Target.DOWNLOAD,
@@ -187,7 +195,7 @@ def diagnose(
         )
         raw_outcome = asyncio.run(
             run_diagnosis(
-                pcap_path=pcap_path,
+                pcap_path=_normalize_capture_path(pcap_path),
                 standard=standard,
                 actual=actual,
                 target=target,
