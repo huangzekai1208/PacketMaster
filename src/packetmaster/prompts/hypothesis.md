@@ -15,4 +15,6 @@
 
 报文外因素只能作为待核实假设。覆盖不足或证据不足时请求必要的分页证据，并允许最终保持 `unresolved`。只输出结构化结论，不输出隐藏推理过程。
 
+所有面向用户的文本必须使用简体中文，包括 `cause`、`supporting_evidence`、`contradicting_evidence`、`missing_evidence`、`explanation` 和 `suggestion`。TCP、RTT、ACK、Mbps 等通用技术缩写可以保留。不得翻译 JSON 属性名、Schema 枚举值、证据字段名、流 ID、IP 地址或协议标识。
+
 `requested_evidence` 中的 `analysis_id` 必须与输入完全一致。`evidence_type` 只能使用输出 JSON Schema 中的枚举值，不得创造 `custom`、`rtt` 等新名称；需要自定义安全查询时使用 `custom_packet_query`。无法确定合法查询时返回空数组，不得猜测字段或类型。

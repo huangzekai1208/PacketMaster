@@ -575,4 +575,9 @@ def test_prompts_require_open_hypotheses_and_outside_capture_limits() -> None:
     assert "custom_packet_query" in hypothesis
     assert "不得创造" in hypothesis
     assert "custom_packet_query" in verification
+    assert "所有面向用户的文本必须使用简体中文" in hypothesis
+    assert "所有面向用户的文本必须使用简体中文" in verification
+    assert "不得翻译 JSON 属性名、Schema 枚举值" in hypothesis
+    assert "rejected_causes" in verification
+    assert "limitations" in verification
     assert DiagnosisModel._prompt("hypothesis.md") == hypothesis
