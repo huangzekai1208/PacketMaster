@@ -615,8 +615,10 @@ def test_prompts_require_open_hypotheses_and_outside_capture_limits() -> None:
     assert "不得翻译 JSON 属性名、Schema 枚举值" in hypothesis
     assert "rejected_causes" in verification
     assert "limitations" in verification
-    assert "2–4 条可能原因" in hypothesis
+    assert "尽可能覆盖全部合理原因" in hypothesis
+    assert "不得设置固定数量目标" in hypothesis
     assert "0–100 的百分数置信度" in hypothesis
     assert "candidate_hypotheses" in verification
+    assert "不设固定数量" in verification
     assert "所有候选原因的 `supporting_evidence` 都为空" in verification
     assert DiagnosisModel._prompt("hypothesis.md") == hypothesis

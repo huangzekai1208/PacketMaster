@@ -145,7 +145,7 @@ def test_hypothesis_batch_requests_structured_evidence() -> None:
     assert verification.requested_evidence[0].analysis_id == "analysis-1"
 
 
-def test_hypothesis_contract_enforces_candidate_count_and_percentage() -> None:
+def test_hypothesis_allows_open_count_and_checks_percentage() -> None:
     hypothesis = Hypothesis(
         cause="候选原因",
         hypothesis_type="data_discovered",
@@ -154,10 +154,8 @@ def test_hypothesis_contract_enforces_candidate_count_and_percentage() -> None:
         supporting_evidence=["存在异常指标"],
     )
 
-    with pytest.raises(ValidationError, match="hypotheses"):
-        HypothesisBatch(hypotheses=[hypothesis])
-    with pytest.raises(ValidationError, match="hypotheses"):
-        HypothesisBatch(hypotheses=[hypothesis] * 5)
+    assert HypothesisBatch().hypotheses == []
+    assert len(HypothesisBatch(hypotheses=[hypothesis] * 5).hypotheses) == 5
     with pytest.raises(ValidationError, match="confidence"):
         Hypothesis.model_validate({**hypothesis.model_dump(), "confidence": 101})
 

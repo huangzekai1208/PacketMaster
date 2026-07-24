@@ -328,6 +328,34 @@ def test_report_is_unresolved_only_when_all_candidates_lack_support(
     assert result["report"].confidence == 0
 
 
+def test_report_preserves_more_than_four_supported_candidates(
+    tmp_path: Path,
+) -> None:
+    class BroadCandidateModel(FakeDiagnosisModel):
+        async def generate_hypotheses(self, context):
+            batch = await super().generate_hypotheses(context)
+            for index, confidence in enumerate((35, 25, 15), start=3):
+                batch.hypotheses.append(
+                    batch.hypotheses[0].model_copy(
+                        update={
+                            "cause": f"候选原因 {index}",
+                            "confidence": confidence,
+                        }
+                    )
+                )
+            return batch
+
+    graph = build_graph(
+        mcp_client=FakeMCPClient(), diagnosis_model=BroadCandidateModel()
+    )
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert len(result["report"].candidate_causes) == 5
+    assert [
+        item.confidence for item in result["report"].candidate_causes
+    ] == [65, 45, 35, 25, 15]
+
+
 def test_report_key_evidence_contains_bounded_traceable_references(
     tmp_path: Path,
 ) -> None:

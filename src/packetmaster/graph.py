@@ -408,7 +408,7 @@ def build_graph(
             candidate_source,
             key=lambda item: item.confidence,
             reverse=True,
-        )[:4]
+        )
         supported_candidates = [
             item
             for item in report_candidates

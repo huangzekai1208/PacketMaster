@@ -206,12 +206,12 @@ class Hypothesis(ContractModel):
 
 
 class HypothesisBatch(ContractModel):
-    hypotheses: list[Hypothesis] = Field(min_length=2, max_length=4)
+    hypotheses: list[Hypothesis] = Field(default_factory=list)
     requested_evidence: list[EvidenceRequest] = Field(default_factory=list)
 
 
 class VerificationResult(ContractModel):
-    candidate_hypotheses: list[Hypothesis] = Field(min_length=2, max_length=4)
+    candidate_hypotheses: list[Hypothesis] = Field(default_factory=list)
     rejected_causes: list[str] = Field(default_factory=list)
     requested_evidence: list[EvidenceRequest] = Field(default_factory=list)
     ready_for_report: bool = False
@@ -224,7 +224,7 @@ class DiagnosticReport(ContractModel):
     achievement_ratio_pct: float = Field(ge=0)
     target: Target = Target.DOWNLOAD
     primary_cause: str = "unresolved"
-    candidate_causes: list[Hypothesis] = Field(default_factory=list, max_length=4)
+    candidate_causes: list[Hypothesis] = Field(default_factory=list)
     key_evidence: list[dict[str, Any]] = Field(default_factory=list)
     confidence: ConfidencePercentage
     coverage_summary: CoverageSummary
