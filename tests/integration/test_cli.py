@@ -98,6 +98,8 @@ def test_chat_runs_diagnosis_after_confirmation_and_renders_report(
     assert len(calls) == 1
     assert calls[0]["target"] is Target.DOWNLOAD
     assert result.output.count("PacketMaster 诊断报告") == 2
+    assert "报文文件：capture.pcapng" in result.output
+    assert "capture_" not in result.output
     assert (tmp_path / "artifacts" / "chat-analysis" / "report.json").is_file()
 
 

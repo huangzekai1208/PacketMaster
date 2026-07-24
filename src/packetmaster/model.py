@@ -24,6 +24,7 @@ from packetmaster.errors import AppError
 from packetmaster.intent import (
     PathExtraction,
     extract_capture_paths,
+    extract_contextual_values,
     extract_explicit_bandwidth,
     merge_intent,
 )
@@ -200,17 +201,16 @@ class DiagnosisModel:
 
         extraction = extract_capture_paths(user_text)
         explicit = extract_explicit_bandwidth(user_text)
+        contextual = extract_contextual_values(user_text, previous)
         local_values: dict[str, Any] = {}
         if extraction.references:
             local_values["capture"] = extraction.references[0]
         local_values.update(explicit)
-        # Complete, explicit requests do not need a fragile model round trip.
-        if extraction.references and {
-            "standard_bandwidth_value",
-            "standard_bandwidth_unit",
-            "actual_bandwidth_value",
-            "actual_bandwidth_unit",
-        } <= set(local_values):
+        for key, value in contextual.items():
+            local_values.setdefault(key, value)
+        # Explicit values and short contextual replies do not need a fragile
+        # model round trip, even when another field still needs clarification.
+        if extraction.references or explicit or contextual:
             intent = DiagnosisIntent(**local_values)
         else:
             try:

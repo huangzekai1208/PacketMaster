@@ -2,6 +2,7 @@ from packetmaster.domain import DiagnosisIntent, Target
 from packetmaster.intent import (
     PathRegistry,
     extract_capture_paths,
+    extract_contextual_values,
     merge_intent,
     normalize_bandwidth,
 )
@@ -96,3 +97,14 @@ def test_path_registry_keeps_prior_turn_references() -> None:
     first.registry.extend(correction.registry)
 
     assert first.registry.resolve(first.references[0]).endswith("test.pcapng")
+
+
+def test_short_bandwidth_reply_fills_next_missing_field() -> None:
+    previous = DiagnosisIntent(standard_bandwidth_mbps=1000)
+
+    values = extract_contextual_values("20", previous)
+
+    assert values == {
+        "actual_bandwidth_value": 20.0,
+        "actual_bandwidth_unit": "Mbps",
+    }

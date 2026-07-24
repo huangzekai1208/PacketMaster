@@ -15,7 +15,13 @@ import typer
 
 from packetmaster.analyzer.real import RealAnalyzerAdapter
 from packetmaster.artifacts import ArtifactManager, create_request_id
-from packetmaster.chat import ChatCommand, ChatSession, parse_command
+from packetmaster.chat import (
+    ChatCommand,
+    ChatSession,
+    ConversationRoute,
+    parse_command,
+    route_conversation,
+)
 from packetmaster.chat_graph import build_chat_graph
 from packetmaster.config import Settings
 from packetmaster.context import ContextBuilder, DiagnosisContext
@@ -284,30 +290,46 @@ async def _answer_chat_question(
     return answer.answer, None
 
 
-def _chat_confirmation(intent) -> str:
+def _chat_confirmation(intent, path_registry) -> str:
     target = intent.target.value if intent.target else Target.DOWNLOAD.value
+    target_label = {
+        "download": "下载",
+        "upload": "上行",
+        "both": "上行和下载",
+    }[target]
+    capture_name = "缺失"
+    if intent.capture is not None and path_registry is not None:
+        try:
+            capture_name = Path(path_registry.resolve(intent.capture)).name
+        except ValueError:
+            capture_name = "无法解析"
     return (
         "已识别参数：\n"
-        f"- 报文引用：{intent.capture.placeholder if intent.capture else '缺失'}\n"
+        f"- 报文文件：{capture_name}\n"
         f"- 标准带宽：{intent.standard_bandwidth_mbps or '缺失'} Mbps\n"
         f"- 实际带宽：{intent.actual_bandwidth_mbps or '缺失'} Mbps\n"
-        f"- 分析方向：{target}\n"
+        f"- 分析方向：{target_label}\n"
+        "提示：未填写带宽单位时默认按 Mbps 解释。\n"
         "请确认是否启动分析？(Y/N)"
     )
 
 
-def _intent_clarifications(intent) -> list[str]:
-    return [*intent.missing_fields, *intent.ambiguities]
-
-
-def _looks_like_diagnosis_request(text: str) -> bool:
-    """Keep ordinary conversation out of the diagnosis parameter extractor."""
-    keywords = (
-        "pcap", "pcapng", "报文", "抓包", "带宽", "速率", "测速", "tcp",
-        "不达标", "诊断", "吞吐", "下载", "上行", "上传",
-    )
-    lowered = text.casefold()
-    return any(keyword in lowered for keyword in keywords)
+def _intent_clarification(intent) -> str | None:
+    if intent.ambiguities:
+        return "我发现信息存在歧义：" + "；".join(intent.ambiguities) + "。请更正。"
+    prompts = {
+        "capture": "请提供要分析的 pcap 或 pcapng 报文文件路径。",
+        "standard_bandwidth_mbps": (
+            "请告诉我标准带宽，例如 1000 Mbps；不写单位时默认按 Mbps。"
+        ),
+        "actual_bandwidth_mbps": (
+            "请告诉我实际测速带宽，例如 600 Mbps；不写单位时默认按 Mbps。"
+        ),
+    }
+    for field in intent.missing_fields:
+        if field in prompts:
+            return prompts[field]
+    return None
 
 
 def _answer_general_chat(
@@ -392,13 +414,19 @@ def chat() -> None:
                     typer.echo(json.dumps(evidence[:20], ensure_ascii=False, indent=2))
                     continue
 
+            route = route_conversation(
+                raw,
+                has_analysis=session.state.analysis_id is not None,
+                has_pending_intent=session.state.pending_intent is not None,
+            )
+            if route is ConversationRoute.GENERAL:
+                try:
+                    typer.echo(_answer_general_chat(session, settings, raw))
+                except Exception as exc:
+                    typer.echo(f"对话暂时失败，请稍后重试：{exc}")
+                continue
+
             if session.state.analysis_id is None:
-                if not _looks_like_diagnosis_request(raw):
-                    try:
-                        typer.echo(_answer_general_chat(session, settings, raw))
-                    except Exception as exc:
-                        typer.echo(f"对话暂时失败，请稍后重试：{exc}")
-                    continue
                 try:
                     model = DiagnosisModel(settings=settings)
                     intent, extraction = asyncio.run(
@@ -412,11 +440,11 @@ def chat() -> None:
                 except Exception as exc:
                     typer.echo(f"参数抽取失败，请补充完整参数后重试：{exc}")
                     continue
-                clarifications = _intent_clarifications(intent)
-                if clarifications:
-                    typer.echo("缺少或存在歧义的参数：" + "、".join(clarifications))
+                clarification = _intent_clarification(intent)
+                if clarification:
+                    typer.echo(clarification)
                     continue
-                typer.echo(_chat_confirmation(intent))
+                typer.echo(_chat_confirmation(intent, path_registry))
                 confirmed = builtins.input("确认> ").strip().casefold()
                 if confirmed not in {"y", "yes", "是", "确认"}:
                     typer.echo("已取消启动，可继续修正参数。")

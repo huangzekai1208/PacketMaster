@@ -48,6 +48,10 @@ _ACTUAL_BANDWIDTH = re.compile(
     rf"(?:实际|实测|当前)(?:带宽|速率)?\s*[:：=]?\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>{_BANDWIDTH_UNIT})?",
     re.IGNORECASE,
 )
+_SHORT_BANDWIDTH = re.compile(
+    rf"^\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>{_BANDWIDTH_UNIT})?\s*$",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -103,6 +107,34 @@ def extract_explicit_bandwidth(text: str) -> dict[str, float | str]:
         if match:
             values[f"{key}_bandwidth_value"] = float(match.group("value"))
             values[f"{key}_bandwidth_unit"] = match.group("unit") or "Mbps"
+    return values
+
+
+def extract_contextual_values(
+    text: str, previous: DiagnosisIntent | None
+) -> dict[str, float | str | Target]:
+    """Interpret a short reply using the next missing intent field."""
+
+    values: dict[str, float | str | Target] = {}
+    lowered = text.casefold()
+    if "上行+下载" in lowered or "上传+下载" in lowered or "双向" in lowered:
+        values["target"] = Target.BOTH
+    elif "上行" in lowered or "上传" in lowered:
+        values["target"] = Target.UPLOAD
+    elif "下载" in lowered:
+        values["target"] = Target.DOWNLOAD
+
+    match = _SHORT_BANDWIDTH.fullmatch(text)
+    if match is None or previous is None:
+        return values
+    if previous.standard_bandwidth_mbps is None:
+        prefix = "standard"
+    elif previous.actual_bandwidth_mbps is None:
+        prefix = "actual"
+    else:
+        return values
+    values[f"{prefix}_bandwidth_value"] = float(match.group("value"))
+    values[f"{prefix}_bandwidth_unit"] = match.group("unit") or "Mbps"
     return values
 
 

@@ -60,6 +60,70 @@ class ChatCommand(StrEnum):
     EMPTY = "empty"
 
 
+class ConversationRoute(StrEnum):
+    GENERAL = "general"
+    DIAGNOSIS = "diagnosis"
+    ANALYSIS_QUESTION = "analysis_question"
+
+
+def route_conversation(
+    value: str, *, has_analysis: bool, has_pending_intent: bool
+) -> ConversationRoute:
+    """Route a natural-language turn without exposing it to a model first."""
+
+    text = value.strip().casefold()
+    has_capture = ".pcap" in text or ".pcapng" in text
+    has_parameter = any(
+        marker in text
+        for marker in (
+            "标准带宽",
+            "标准速率",
+            "实际带宽",
+            "实际速率",
+            "实测带宽",
+            "上行",
+            "上传",
+            "下载",
+        )
+    )
+    asks_diagnosis = any(
+        marker in text for marker in ("分析", "诊断", "不达标", "测速异常")
+    )
+    asks_about_result = any(
+        marker in text
+        for marker in (
+            "原因",
+            "为什么",
+            "主因",
+            "证据",
+            "报告",
+            "结果",
+            "建议",
+            "重传",
+            "窗口",
+            "rtt",
+            "流",
+        )
+    )
+    short_parameter = bool(
+        re.fullmatch(
+            r"\s*\d+(?:\.\d+)?\s*(?:g|m|k|gbps?|mbps?|kbps?|兆|千兆)?\s*",
+            text,
+        )
+    )
+    if has_analysis:
+        return (
+            ConversationRoute.ANALYSIS_QUESTION
+            if asks_about_result
+            else ConversationRoute.GENERAL
+        )
+    if has_capture or has_parameter or asks_diagnosis:
+        return ConversationRoute.DIAGNOSIS
+    if has_pending_intent and short_parameter:
+        return ConversationRoute.DIAGNOSIS
+    return ConversationRoute.GENERAL
+
+
 @dataclass(frozen=True)
 class ParsedCommand:
     command: ChatCommand

@@ -79,7 +79,7 @@ def test_general_chat_does_not_require_analysis_context() -> None:
 
 def test_parse_intent_rejects_model_invented_capture_reference() -> None:
     intent, extraction = asyncio.run(
-        DiagnosisModel(client=_IntentClient()).parse_intent("标准 1G，实际 600M")
+        DiagnosisModel(client=_IntentClient()).parse_intent("请帮我提取诊断参数")
     )
 
     assert extraction.references == ()

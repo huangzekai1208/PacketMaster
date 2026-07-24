@@ -5,8 +5,10 @@ from packetmaster.artifacts import ArtifactManager
 from packetmaster.chat import (
     ChatCommand,
     ChatSession,
+    ConversationRoute,
     build_model_context,
     parse_command,
+    route_conversation,
     validate_question,
 )
 from packetmaster.domain import (
@@ -91,6 +93,24 @@ def test_slash_commands_are_deterministic_and_case_insensitive() -> None:
     assert parse_command("/unknown").command is ChatCommand.UNKNOWN
     assert parse_command("  ").command is ChatCommand.EMPTY
     assert parse_command("主因是什么？") is None
+
+
+def test_conversation_router_separates_general_and_diagnosis_turns() -> None:
+    assert route_conversation(
+        "TCP 是什么？", has_analysis=False, has_pending_intent=False
+    ) is ConversationRoute.GENERAL
+    assert route_conversation(
+        "帮我分析测速不达标原因", has_analysis=False, has_pending_intent=False
+    ) is ConversationRoute.DIAGNOSIS
+    assert route_conversation(
+        "1000", has_analysis=False, has_pending_intent=True
+    ) is ConversationRoute.DIAGNOSIS
+    assert route_conversation(
+        "主要原因是什么？", has_analysis=True, has_pending_intent=False
+    ) is ConversationRoute.ANALYSIS_QUESTION
+    assert route_conversation(
+        "你好", has_analysis=True, has_pending_intent=False
+    ) is ConversationRoute.GENERAL
 
 
 def test_chat_session_archives_old_turns_with_byte_bound() -> None:
