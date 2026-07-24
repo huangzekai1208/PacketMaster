@@ -259,6 +259,10 @@ class DiagnosisIntent(ContractModel):
     """Structured diagnosis parameters extracted before analysis starts."""
 
     capture: PathReference | None = None
+    standard_bandwidth_value: float | None = Field(default=None, gt=0)
+    standard_bandwidth_unit: str | None = Field(default=None, max_length=16)
+    actual_bandwidth_value: float | None = Field(default=None, gt=0)
+    actual_bandwidth_unit: str | None = Field(default=None, max_length=16)
     standard_bandwidth_mbps: float | None = Field(default=None, gt=0)
     actual_bandwidth_mbps: float | None = Field(default=None, gt=0)
     target: Target | None = None

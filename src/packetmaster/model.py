@@ -11,8 +11,14 @@ from pydantic import BaseModel, ValidationError
 
 from packetmaster.config import Settings
 from packetmaster.context import DiagnosisContext, bounded_evidence
-from packetmaster.domain import EvidenceResponse, HypothesisBatch, VerificationResult
+from packetmaster.domain import (
+    DiagnosisIntent,
+    EvidenceResponse,
+    HypothesisBatch,
+    VerificationResult,
+)
 from packetmaster.errors import AppError
+from packetmaster.intent import PathExtraction, extract_capture_paths, merge_intent
 
 
 class DiagnosisModel:
@@ -176,6 +182,32 @@ class DiagnosisModel:
             {"diagnosis_context": context.model_dump(mode="json")},
         )
         return HypothesisBatch.model_validate(result)
+
+    async def parse_intent(
+        self,
+        user_text: str,
+        previous: DiagnosisIntent | None = None,
+    ) -> tuple[DiagnosisIntent, PathExtraction]:
+        """Extract intent from sanitized text while keeping paths local."""
+
+        extraction = extract_capture_paths(user_text)
+        result = await self._invoke(
+            DiagnosisIntent,
+            "diagnosis_intent.md",
+            {
+                "user_message": extraction.sanitized_text,
+                "previous_intent": previous.model_dump(mode="json")
+                if previous is not None
+                else None,
+            },
+        )
+        intent = DiagnosisIntent.model_validate(result)
+        if len(extraction.references) == 1:
+            intent.capture = extraction.references[0]
+        elif len(extraction.references) > 1:
+            intent.capture = None
+            intent.ambiguities.append("检测到多个报文路径")
+        return merge_intent(previous, intent), extraction
 
     async def verify(
         self,
