@@ -15,7 +15,12 @@ from typer.testing import CliRunner
 
 import packetmaster.cli as cli
 from packetmaster.config import Settings
-from packetmaster.domain import CoverageSummary, DiagnosticReport, Target
+from packetmaster.domain import (
+    CoverageSummary,
+    DiagnosisIntent,
+    DiagnosticReport,
+    Target,
+)
 from packetmaster.errors import AppError
 from tests.fakes import FakeDiagnosisModel
 
@@ -42,6 +47,84 @@ def _report(target: Target) -> DiagnosticReport:
         ),
         limitations=["证据不足"],
     )
+
+
+class _ChatIntentModel:
+    async def parse_intent(self, user_text, previous):
+        from packetmaster.intent import extract_capture_paths
+
+        extraction = extract_capture_paths(user_text)
+        return (
+            DiagnosisIntent(
+                capture=extraction.references[0],
+                standard_bandwidth_mbps=1000,
+                actual_bandwidth_mbps=600,
+                target=Target.DOWNLOAD,
+            ),
+            extraction,
+        )
+
+
+def test_chat_runs_diagnosis_after_confirmation_and_renders_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+    inputs = iter(
+        [
+            "分析 samples/capture.pcapng，标准千兆，实际 600M",
+            "y",
+            "/report",
+            "/quit",
+        ]
+    )
+
+    async def fake_run(**kwargs):
+        calls.append(kwargs)
+        return cli.DiagnosisOutcome(report=_report(Target.DOWNLOAD))
+
+    monkeypatch.setattr(
+        cli.Settings,
+        "load",
+        lambda: Settings(artifact_root=tmp_path / "artifacts"),
+    )
+    monkeypatch.setattr(cli, "DiagnosisModel", lambda **kwargs: _ChatIntentModel())
+    monkeypatch.setattr(cli, "run_diagnosis", fake_run)
+    monkeypatch.setattr(cli, "create_request_id", lambda: "chat-analysis")
+    monkeypatch.setattr(cli.builtins, "input", lambda prompt: next(inputs))
+
+    result = runner.invoke(cli.app, ["chat"])
+
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0]["target"] is Target.DOWNLOAD
+    assert result.output.count("PacketMaster 诊断报告") == 2
+    assert (tmp_path / "artifacts" / "chat-analysis" / "report.json").is_file()
+
+
+def test_chat_does_not_analyze_when_confirmation_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+    inputs = iter(["分析 samples/capture.pcapng，标准千兆，实际 600M", "n", "/quit"])
+
+    async def fake_run(**kwargs):
+        calls.append(kwargs)
+        return cli.DiagnosisOutcome(report=_report(Target.DOWNLOAD))
+
+    monkeypatch.setattr(
+        cli.Settings,
+        "load",
+        lambda: Settings(artifact_root=tmp_path / "artifacts"),
+    )
+    monkeypatch.setattr(cli, "DiagnosisModel", lambda **kwargs: _ChatIntentModel())
+    monkeypatch.setattr(cli, "run_diagnosis", fake_run)
+    monkeypatch.setattr(cli.builtins, "input", lambda prompt: next(inputs))
+
+    result = runner.invoke(cli.app, ["chat"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == []
+    assert "已取消启动" in result.output
 
 
 @pytest.mark.parametrize(

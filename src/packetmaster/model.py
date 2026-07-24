@@ -204,6 +204,17 @@ class DiagnosisModel:
             },
         )
         intent = DiagnosisIntent.model_validate(result)
+        allowed_references = {
+            reference.placeholder for reference in extraction.references
+        }
+        if previous is not None and previous.capture is not None:
+            allowed_references.add(previous.capture.placeholder)
+        if (
+            intent.capture is not None
+            and intent.capture.placeholder not in allowed_references
+        ):
+            intent.capture = None
+            intent.ambiguities.append("报文路径引用无效")
         if len(extraction.references) == 1:
             intent.capture = extraction.references[0]
         elif len(extraction.references) > 1:

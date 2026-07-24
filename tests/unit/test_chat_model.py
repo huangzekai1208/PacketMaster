@@ -1,6 +1,12 @@
 import asyncio
 
-from packetmaster.domain import ChatAnswer, ChatModelContext, Target
+from packetmaster.domain import (
+    ChatAnswer,
+    ChatModelContext,
+    DiagnosisIntent,
+    PathReference,
+    Target,
+)
 from packetmaster.model import DiagnosisModel
 
 
@@ -20,6 +26,17 @@ class _FakeClient:
     def with_structured_output(self, schema, method):
         assert method in {"json_mode", "json_schema"}
         return _Structured(schema)
+
+
+class _IntentStructured:
+    async def ainvoke(self, messages):
+        return DiagnosisIntent(capture=PathReference(placeholder="capture_deadbeef"))
+
+
+class _IntentClient:
+    def with_structured_output(self, schema, method):
+        assert schema is DiagnosisIntent
+        return _IntentStructured()
 
 
 def _context() -> ChatModelContext:
@@ -47,3 +64,13 @@ def test_verify_chat_answer_returns_structured_answer() -> None:
     )
 
     assert answer.ready is True
+
+
+def test_parse_intent_rejects_model_invented_capture_reference() -> None:
+    intent, extraction = asyncio.run(
+        DiagnosisModel(client=_IntentClient()).parse_intent("标准 1G，实际 600M")
+    )
+
+    assert extraction.references == ()
+    assert intent.capture is None
+    assert "报文路径引用无效" in intent.ambiguities
