@@ -39,7 +39,14 @@ packetmaster diagnose "/Users/me/captures/test capture.pcapng" --standard 1000 -
 
 诊断需要兼容 OpenAI API 的模型配置。Payload、完整逐包字段、完整日志和 API Key 不进入模型上下文。
 
-模型配置通过环境变量提供。Windows PowerShell：
+推荐复制本地配置模板并填写模型配置：
+
+```powershell
+Copy-Item src\packetmaster\config_local.example.py src\packetmaster\config_local.py
+```
+
+`config_local.py` 会被 Git 忽略，PacketMaster 启动时自动读取，无需每次设置
+环境变量。环境变量的优先级更高，仍可用于临时覆盖。Windows PowerShell：
 
 ```powershell
 $env:MODEL_API_KEY = "..."
