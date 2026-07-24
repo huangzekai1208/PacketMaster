@@ -233,3 +233,160 @@ class DiagnosticReport(ContractModel):
     troubleshooting_steps: list[str] = Field(default_factory=list)
     optimization_suggestions: list[str] = Field(default_factory=list)
     analysis_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class IntentFieldStatus(StrEnum):
+    """Deterministic status for one natural-language intent field."""
+
+    MISSING = "missing"
+    PARSED = "parsed"
+    AMBIGUOUS = "ambiguous"
+
+
+class PathReference(ContractModel):
+    """Opaque path token safe to include in model messages."""
+
+    placeholder: str = Field(pattern=r"^capture_[0-9a-f]{8}$")
+
+
+class IntentField(ContractModel):
+    status: IntentFieldStatus = IntentFieldStatus.MISSING
+    value: str | float | Target | None = None
+    detail: str = Field(default="", max_length=512)
+
+
+class DiagnosisIntent(ContractModel):
+    """Structured diagnosis parameters extracted before analysis starts."""
+
+    capture: PathReference | None = None
+    standard_bandwidth_mbps: float | None = Field(default=None, gt=0)
+    actual_bandwidth_mbps: float | None = Field(default=None, gt=0)
+    target: Target | None = None
+    fields: dict[str, IntentField] = Field(default_factory=dict, max_length=8)
+    missing_fields: list[str] = Field(default_factory=list, max_length=8)
+    ambiguities: list[str] = Field(default_factory=list, max_length=8)
+    confirmed: bool = False
+
+
+class ChatEvidenceCitation(ContractModel):
+    """A bounded, local evidence reference shown in a chat answer."""
+
+    analysis_id: str = Field(min_length=1, max_length=128)
+    evidence_type: str = Field(min_length=1, max_length=64)
+    evidence_id: str | None = Field(default=None, max_length=128)
+    frame_number: int | None = Field(default=None, ge=0)
+    relative_time_seconds: float | None = Field(default=None, ge=0)
+    flow_id: str | None = Field(default=None, max_length=128)
+    detail: str = Field(default="", max_length=512)
+
+
+class ChatQuestion(ContractModel):
+    question: str = Field(min_length=1, max_length=2_000)
+    analysis_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ChatAnswer(ContractModel):
+    """Structured answer contract for the bounded evidence chat graph."""
+
+    answer: str = Field(min_length=1, max_length=8_000)
+    evidence_basis: list[ChatEvidenceCitation] = Field(
+        default_factory=list, max_length=32
+    )
+    limitations: list[str] = Field(default_factory=list, max_length=32)
+    follow_up_suggestions: list[str] = Field(default_factory=list, max_length=32)
+    requested_evidence: list[EvidenceRequest] = Field(
+        default_factory=list, max_length=5
+    )
+    ready: bool = False
+
+
+class ConversationTurn(ContractModel):
+    question: str = Field(min_length=1, max_length=2_000)
+    answer: str = Field(min_length=1, max_length=8_000)
+
+
+class ChatModelContext(ContractModel):
+    """The only session projection allowed to cross into a model call."""
+
+    analysis_id: str = Field(min_length=1, max_length=128)
+    target: Target
+    report: dict[str, Any] = Field(default_factory=dict)
+    conversation_summary: str = Field(default="", max_length=8_000)
+    conversation_turns: list[ConversationTurn] = Field(
+        default_factory=list, max_length=8
+    )
+    question: str = Field(min_length=1, max_length=2_000)
+    collected_evidence: list[dict[str, Any]] = Field(
+        default_factory=list, max_length=32
+    )
+
+
+class ChatSessionState(ContractModel):
+    """CLI-owned state; use ``model_context`` for model serialization."""
+
+    session_id: str = Field(min_length=1, max_length=128)
+    pending_intent: DiagnosisIntent | None = None
+    analysis_id: str | None = Field(default=None, min_length=1, max_length=128)
+    target: Target = Target.DOWNLOAD
+    standard_bandwidth_mbps: float | None = Field(default=None, gt=0)
+    actual_bandwidth_mbps: float | None = Field(default=None, gt=0)
+    report: DiagnosticReport | dict[str, Any] | None = None
+    report_path: str | None = None
+    local_capture_paths: dict[str, str] = Field(default_factory=dict, max_length=8)
+    diagnosis_context: dict[str, Any] = Field(default_factory=dict)
+    conversation_turns: list[ConversationTurn] = Field(
+        default_factory=list, max_length=8
+    )
+    conversation_summary: str = Field(default="", max_length=8_000)
+    question: str | None = Field(default=None, max_length=2_000)
+    requested_evidence: list[EvidenceRequest] = Field(
+        default_factory=list, max_length=5
+    )
+    collected_evidence: list[dict[str, Any]] = Field(
+        default_factory=list, max_length=32
+    )
+    answer: ChatAnswer | None = None
+    inspection_count: int = Field(default=0, ge=0, le=2)
+    error: dict[str, Any] | None = None
+
+    def model_context(self) -> ChatModelContext:
+        if not self.analysis_id or not self.question:
+            raise ValueError("analysis_id and question are required for model context")
+        if isinstance(self.report, DiagnosticReport):
+            report = self.report.model_dump(mode="json")
+        else:
+            report = self.report or {}
+        return ChatModelContext(
+            analysis_id=self.analysis_id,
+            target=self.target,
+            report=_strip_sensitive(report),
+            conversation_summary=self.conversation_summary,
+            conversation_turns=self.conversation_turns,
+            question=self.question,
+            collected_evidence=_strip_sensitive(self.collected_evidence),
+        )
+
+
+def _strip_sensitive(value: Any) -> Any:
+    """Remove sensitive model fields from a session projection."""
+
+    import re
+
+    sensitive = re.compile(
+        r"(?:api[_-]?key|authorization|token|password|payload|raw[_-]?packet|"
+        r"per[_-]?packet|full[_-]?log|absolute[_-]?path|pcap[_-]?path)",
+        re.IGNORECASE,
+    )
+    path_value = re.compile(r"^(?:[A-Za-z]:[\\/]|/|\\\\|~[/\\])")
+
+    if isinstance(value, dict):
+        return {
+            str(key): _strip_sensitive(item)
+            for key, item in value.items()
+            if not sensitive.search(str(key))
+        }
+    if isinstance(value, list):
+        return [_strip_sensitive(item) for item in value[:32]]
+    if isinstance(value, str) and path_value.match(value):
+        return "<本地路径已隐藏>"
+    return value
