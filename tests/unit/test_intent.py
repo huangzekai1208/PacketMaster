@@ -87,3 +87,12 @@ def test_path_registry_rejects_unknown_reference() -> None:
         assert "unknown" in str(exc)
     else:
         raise AssertionError("unknown path reference should be rejected")
+
+
+def test_path_registry_keeps_prior_turn_references() -> None:
+    first = extract_capture_paths("分析 ./captures/test.pcapng")
+    correction = extract_capture_paths("实际带宽改为 580M")
+
+    first.registry.extend(correction.registry)
+
+    assert first.registry.resolve(first.references[0]).endswith("test.pcapng")

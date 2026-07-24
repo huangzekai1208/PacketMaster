@@ -9,7 +9,7 @@ from pathlib import Path
 
 from packetmaster.domain import DiagnosisIntent, PathReference, Target
 
-_CAPTURE_SUFFIX = r"(?:pcap|pcapng)"
+_CAPTURE_SUFFIX = r"(?:pcapng|pcap)"
 _QUOTED_PATH = re.compile(
     rf"(?P<quote>['\"])(?P<path>.*?\.{_CAPTURE_SUFFIX})(?P=quote)", re.IGNORECASE
 )
@@ -62,6 +62,11 @@ class PathRegistry:
 
     def values(self) -> dict[str, str]:
         return dict(self._paths)
+
+    def extend(self, other: PathRegistry) -> None:
+        """Retain path references found in earlier natural-language turns."""
+
+        self._paths.update(other.values())
 
 
 @dataclass(frozen=True)

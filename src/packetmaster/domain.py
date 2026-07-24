@@ -315,6 +315,7 @@ class ChatModelContext(ContractModel):
     analysis_id: str = Field(min_length=1, max_length=128)
     target: Target
     report: dict[str, Any] = Field(default_factory=dict)
+    diagnosis_context: dict[str, Any] = Field(default_factory=dict)
     conversation_summary: str = Field(default="", max_length=8_000)
     conversation_turns: list[ConversationTurn] = Field(
         default_factory=list, max_length=8
@@ -364,6 +365,7 @@ class ChatSessionState(ContractModel):
             analysis_id=self.analysis_id,
             target=self.target,
             report=_strip_sensitive(report),
+            diagnosis_context=_strip_sensitive(self.diagnosis_context),
             conversation_summary=self.conversation_summary,
             conversation_turns=self.conversation_turns,
             question=self.question,

@@ -17,6 +17,7 @@ from packetmaster.domain import (
     PathReference,
     Target,
 )
+from packetmaster.report import render_chat_report
 
 
 def test_chat_answer_rejects_empty_question_like_answer() -> None:
@@ -109,3 +110,42 @@ def test_chat_session_active_artifact_is_removed_on_finish(tmp_path) -> None:
     assert (paths.root / ".active").exists()
     session.finish()
     assert not (paths.root / ".active").exists()
+
+
+def test_chat_report_renders_all_candidates_without_model_call() -> None:
+    from packetmaster.domain import CoverageSummary, DiagnosticReport, Hypothesis
+
+    report = DiagnosticReport(
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+        achievement_ratio_pct=60,
+        confidence=70,
+        coverage_summary=CoverageSummary(complete=True),
+        candidate_causes=[
+            Hypothesis(
+                cause="重传",
+                hypothesis_type="known_pattern",
+                observability="direct",
+                confidence=70,
+                supporting_evidence=["ev-1"],
+                suggestion="检查链路丢包",
+            )
+        ],
+        key_evidence=[
+            {
+                "evidence_type": "retransmission",
+                "total": 1,
+                "references": [{"frame.number": 42, "flow_id": "flow-1"}],
+            }
+        ],
+        limitations=["抓包时长较短"],
+        troubleshooting_steps=["检查链路丢包"],
+        optimization_suggestions=["延长测速时间"],
+    )
+    output = render_chat_report(report)
+    assert "候选原因" in output
+    assert "重传" in output
+    assert "70.00%" in output
+    assert "frame.number=42" in output
+    assert "抓包时长较短" in output
+    assert "延长测速时间" in output
