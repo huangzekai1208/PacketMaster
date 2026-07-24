@@ -6,6 +6,7 @@ import json
 from importlib.resources import files
 from typing import Any
 
+from langchain_core.exceptions import OutputParserException
 from pydantic import BaseModel, ValidationError
 
 from packetmaster.config import Settings
@@ -20,6 +21,18 @@ class DiagnosisModel:
     ) -> None:
         self.settings = settings
         self._client = client
+
+    def _structured_output_method(self) -> str:
+        settings = self.settings or Settings.load()
+        configured = settings.model_structured_output_method
+        if configured != "auto":
+            return configured
+        provider_identity = " ".join(
+            value
+            for value in (settings.model_name, settings.model_base_url)
+            if value
+        ).lower()
+        return "json_mode" if "deepseek" in provider_identity else "json_schema"
 
     def _client_or_error(self) -> Any:
         if self._client is not None:
@@ -76,35 +89,69 @@ class DiagnosisModel:
                 recoverable=True,
                 suggested_action="Reduce evidence pages or hypothesis count.",
             )
+        method = self._structured_output_method()
+        system_prompt = self._prompt(prompt_name)
+        if method == "json_mode":
+            serialized_schema = json.dumps(
+                schema.model_json_schema(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            system_prompt += (
+                "\n\n只返回一个符合以下 JSON Schema 的 JSON 对象，不要使用 Markdown "
+                f"代码块或输出额外文本。JSON Schema：{serialized_schema}"
+            )
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": self._prompt(prompt_name)},
+            {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": serialized_payload,
             },
         ]
+        structured = client.with_structured_output(schema, method=method)
         try:
-            structured = client.with_structured_output(schema)
-            result = await structured.ainvoke(messages)
-            return (
-                result
-                if isinstance(result, schema)
-                else schema.model_validate(result)
-            )
+            for attempt in range(2):
+                try:
+                    result = await structured.ainvoke(messages)
+                    return (
+                        result
+                        if isinstance(result, schema)
+                        else schema.model_validate(result)
+                    )
+                except (OutputParserException, ValidationError) as exc:
+                    if attempt == 1:
+                        raise AppError(
+                            code="INVALID_MODEL_OUTPUT",
+                            message=(
+                                "Diagnosis model returned invalid structured output"
+                            ),
+                            recoverable=True,
+                            suggested_action=(
+                                "Retry with the PacketMaster structured schema."
+                            ),
+                            details={
+                                "attempts": 2,
+                                "exception_type": exc.__class__.__name__,
+                            },
+                        ) from exc
+                    messages = [
+                        *messages,
+                        {
+                            "role": "user",
+                            "content": (
+                                "上一次响应未通过结构化校验。请保持原分析结论，"
+                                "仅修复输出结构，使其严格符合系统消息中的 JSON "
+                                "Schema；只返回 JSON 对象，不要输出解释、Markdown "
+                                "或代码块。"
+                            ),
+                        },
+                    ]
         except TimeoutError as exc:
             raise AppError(
                 code="MODEL_TIMEOUT",
                 message="Diagnosis model timed out",
                 recoverable=True,
                 suggested_action="Retry or increase the model timeout.",
-            ) from exc
-        except ValidationError as exc:
-            raise AppError(
-                code="INVALID_MODEL_OUTPUT",
-                message="Diagnosis model returned invalid structured output",
-                recoverable=True,
-                suggested_action="Retry with the PacketMaster structured schema.",
-                details={"validation_count": len(exc.errors(include_input=False))},
             ) from exc
         except AppError:
             raise
@@ -114,7 +161,10 @@ class DiagnosisModel:
                 message="Diagnosis model call failed",
                 recoverable=True,
                 suggested_action="Check model configuration and retry.",
-                details={"exception_type": exc.__class__.__name__},
+                details={
+                    "exception_type": exc.__class__.__name__,
+                    "structured_output_method": method,
+                },
             ) from exc
 
     async def generate_hypotheses(

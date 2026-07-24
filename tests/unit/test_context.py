@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 
 import pytest
+from langchain_core.exceptions import OutputParserException
 
+from packetmaster.config import Settings
 from packetmaster.context import ContextBuilder, DiagnosisContext
 from packetmaster.domain import (
     AnalysisStatus,
@@ -16,6 +18,7 @@ from packetmaster.domain import (
     HypothesisBatch,
     VerificationResult,
 )
+from packetmaster.errors import AppError
 from packetmaster.model import DiagnosisModel
 
 
@@ -352,10 +355,14 @@ def test_context_detects_rtt_or_window_shift_without_tcp_events(anomaly: str) ->
 class FakeStructuredModel:
     def __init__(self) -> None:
         self.schema: type | None = None
+        self.method: str | None = None
         self.messages: list[object] = []
 
-    def with_structured_output(self, schema: type) -> FakeStructuredModel:
+    def with_structured_output(
+        self, schema: type, *, method: str
+    ) -> FakeStructuredModel:
         self.schema = schema
+        self.method = method
         return self
 
     async def ainvoke(self, messages: list[object]) -> object:
@@ -388,9 +395,31 @@ class FakeStructuredModel:
         }
 
 
+class RepairingStructuredModel(FakeStructuredModel):
+    def __init__(self, *, always_fail: bool = False) -> None:
+        super().__init__()
+        self.always_fail = always_fail
+        self.calls = 0
+        self.all_messages: list[list[object]] = []
+
+    async def ainvoke(self, messages: list[object]) -> object:
+        self.calls += 1
+        self.all_messages.append(messages)
+        if self.calls == 1 or self.always_fail:
+            raise OutputParserException("invalid structured output")
+        return await super().ainvoke(messages)
+
+
 def test_diagnosis_model_uses_open_structured_output_without_network() -> None:
     fake = FakeStructuredModel()
-    model = DiagnosisModel(client=fake)
+    model = DiagnosisModel(
+        client=fake,
+        settings=Settings(
+            model_name="gpt-4.1-mini",
+            model_base_url="https://api.openai.com/v1",
+            model_structured_output_method="auto",
+        ),
+    )
     context = ContextBuilder().build(
         _analysis([]),
         [_evidence([])],
@@ -421,6 +450,114 @@ def test_diagnosis_model_uses_open_structured_output_without_network() -> None:
     assert "RAW_SECRET" not in serialized_messages
     assert "MODEL_LOG_SECRET" not in serialized_messages
     assert "MODEL_TOKEN_SECRET" not in serialized_messages
+    assert fake.method == "json_schema"
+
+
+@pytest.mark.parametrize(
+    ("settings", "expected_method"),
+    [
+        (
+            Settings(
+                model_name="deepseek-v4-flash",
+                model_base_url="https://api.deepseek.com",
+            ),
+            "json_mode",
+        ),
+        (
+            Settings(
+                model_name="provider/deepseek-r1",
+                model_base_url="https://compatible.example/v1",
+            ),
+            "json_mode",
+        ),
+        (
+            Settings(
+                model_name="gpt-4.1-mini",
+                model_base_url="https://api.openai.com/v1",
+            ),
+            "json_schema",
+        ),
+        (
+            Settings(
+                model_name="deepseek-v4-flash",
+                model_base_url="https://api.deepseek.com",
+                model_structured_output_method="function_calling",
+            ),
+            "function_calling",
+        ),
+    ],
+)
+def test_diagnosis_model_selects_compatible_structured_output_method(
+    settings: Settings, expected_method: str
+) -> None:
+    fake = FakeStructuredModel()
+    model = DiagnosisModel(client=fake, settings=settings)
+    context = ContextBuilder().build(
+        _analysis([]),
+        [],
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+    )
+
+    asyncio.run(model.generate_hypotheses(context))
+
+    assert fake.method == expected_method
+    system_message = fake.messages[0]
+    if expected_method == "json_mode":
+        assert "只返回一个符合以下 JSON Schema" in system_message["content"]
+        assert '"hypotheses"' in system_message["content"]
+    else:
+        assert "只返回一个符合以下 JSON Schema" not in system_message["content"]
+
+
+def test_diagnosis_model_repairs_invalid_structured_output_once() -> None:
+    fake = RepairingStructuredModel()
+    model = DiagnosisModel(
+        client=fake,
+        settings=Settings(
+            model_name="deepseek-v4-flash",
+            model_base_url="https://api.deepseek.com",
+        ),
+    )
+    context = ContextBuilder().build(
+        _analysis([]),
+        [],
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+    )
+
+    result = asyncio.run(model.generate_hypotheses(context))
+
+    assert result.hypotheses
+    assert fake.calls == 2
+    assert "上一次响应未通过结构化校验" in fake.all_messages[1][-1]["content"]
+
+
+def test_diagnosis_model_stops_after_one_failed_schema_repair() -> None:
+    fake = RepairingStructuredModel(always_fail=True)
+    model = DiagnosisModel(
+        client=fake,
+        settings=Settings(
+            model_name="deepseek-v4-flash",
+            model_base_url="https://api.deepseek.com",
+        ),
+    )
+    context = ContextBuilder().build(
+        _analysis([]),
+        [],
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+    )
+
+    with pytest.raises(AppError) as raised:
+        asyncio.run(model.generate_hypotheses(context))
+
+    assert raised.value.code == "INVALID_MODEL_OUTPUT"
+    assert raised.value.details == {
+        "attempts": 2,
+        "exception_type": "OutputParserException",
+    }
+    assert fake.calls == 2
 
 
 def test_prompts_require_open_hypotheses_and_outside_capture_limits() -> None:
@@ -435,4 +572,7 @@ def test_prompts_require_open_hypotheses_and_outside_capture_limits() -> None:
     assert "outside_capture" in verification
     assert "不能描述为已由报文证实" in verification
     assert "unresolved" in verification
+    assert "custom_packet_query" in hypothesis
+    assert "不得创造" in hypothesis
+    assert "custom_packet_query" in verification
     assert DiagnosisModel._prompt("hypothesis.md") == hypothesis

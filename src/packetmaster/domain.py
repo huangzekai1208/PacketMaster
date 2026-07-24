@@ -33,6 +33,41 @@ class EvidenceOperator(StrEnum):
     EXISTS = "exists"
 
 
+class EvidenceType(StrEnum):
+    EVENTS = "events"
+    RETRANSMISSION = "retransmission"
+    RETRANSMISSIONS = "retransmissions"
+    FAST_RETRANSMISSION = "fast_retransmission"
+    DUPLICATE_ACK = "duplicate_ack"
+    DUPLICATE_ACKS = "duplicate_acks"
+    OUT_OF_ORDER = "out_of_order"
+    WINDOW_CHANGES = "window_changes"
+    ZERO_WINDOW = "zero_window"
+    WINDOW_FULL = "window_full"
+    SUMMARY = "summary"
+    FLOW_SUMMARY = "flow_summary"
+    IO_TIMELINE = "io_timeline"
+    RTT_DISTRIBUTION = "rtt_distribution"
+    THROUGHPUT_DISTRIBUTION = "throughput_distribution"
+    SYN_OPTIONS = "syn_options"
+    PACKET_FIELDS = "packet_fields"
+    CUSTOM_PACKET_QUERY = "custom_packet_query"
+
+
+class EvidenceField(StrEnum):
+    EVIDENCE_ID = "evidence_id"
+    EVENT_TYPE = "event_type"
+    FRAME_NUMBER = "frame.number"
+    FRAME_TIME_RELATIVE = "frame.time_relative"
+    FLOW_ID = "flow_id"
+    DIRECTION = "direction"
+    TCP_SEQ = "tcp.seq"
+    TCP_ACK = "tcp.ack"
+    TCP_WINDOW_SIZE = "tcp.window_size"
+    TCP_LENGTH = "tcp.len"
+    TCP_ACK_RTT = "tcp.analysis.ack_rtt"
+
+
 class HypothesisType(StrEnum):
     KNOWN_PATTERN = "known_pattern"
     DATA_DISCOVERED = "data_discovered"
@@ -111,7 +146,7 @@ class AnalyzeResponse(ContractModel):
 
 
 class EvidencePredicate(ContractModel):
-    field: BoundedQueryString
+    field: EvidenceField
     operator: EvidenceOperator
     value: Any = None
 
@@ -133,16 +168,16 @@ class CustomEvidenceQuery(ContractModel):
     time_start: float | None = Field(default=None, ge=0)
     time_end: float | None = Field(default=None, ge=0)
     predicates: list[EvidencePredicate] = Field(default_factory=list, max_length=16)
-    fields: list[BoundedQueryString] = Field(default_factory=list, max_length=16)
+    fields: list[EvidenceField] = Field(default_factory=list, max_length=16)
 
 
 class EvidenceRequest(ContractModel):
     analysis_id: str
-    evidence_type: str
+    evidence_type: EvidenceType
     flow_id: BoundedQueryString | None = None
     time_start: float | None = Field(default=None, ge=0)
     time_end: float | None = Field(default=None, ge=0)
-    fields: list[BoundedQueryString] = Field(default_factory=list, max_length=16)
+    fields: list[EvidenceField] = Field(default_factory=list, max_length=16)
     query: CustomEvidenceQuery | None = None
     offset: int = Field(default=0, ge=0)
     limit: int = Field(default=100, ge=1, le=500)

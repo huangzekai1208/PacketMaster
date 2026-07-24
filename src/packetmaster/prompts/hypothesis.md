@@ -14,3 +14,5 @@
 - 置信度、解释和下一步建议。
 
 报文外因素只能作为待核实假设。覆盖不足或证据不足时请求必要的分页证据，并允许最终保持 `unresolved`。只输出结构化结论，不输出隐藏推理过程。
+
+`requested_evidence` 中的 `analysis_id` 必须与输入完全一致。`evidence_type` 只能使用输出 JSON Schema 中的枚举值，不得创造 `custom`、`rtt` 等新名称；需要自定义安全查询时使用 `custom_packet_query`。无法确定合法查询时返回空数组，不得猜测字段或类型。

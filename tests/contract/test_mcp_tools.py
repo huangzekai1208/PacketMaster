@@ -96,16 +96,13 @@ def test_evidence_is_structured_and_paginated() -> None:
 
 def test_unsafe_evidence_query_is_rejected() -> None:
     adapter = MockAnalyzerAdapter(FIXTURE)
+    request = EvidenceRequest(
+        analysis_id="mock-contract",
+        evidence_type="events",
+        fields=["evidence_id"],
+    ).model_copy(update={"fields": ["events; DROP TABLE events"]})
     with pytest.raises(AppError) as error:
-        asyncio.run(
-            adapter.get_evidence(
-                EvidenceRequest(
-                    analysis_id="mock-contract",
-                    evidence_type="events",
-                    fields=["events; DROP TABLE events"],
-                )
-            )
-        )
+        asyncio.run(adapter.get_evidence(request))
     assert error.value.code == "UNSAFE_EVIDENCE_QUERY"
 
 
@@ -542,13 +539,16 @@ def test_real_custom_query_detects_page_after_limit_500(tmp_path: Path) -> None:
     assert len(response.items) == 500
     assert response.next_offset == 500
     assert response.truncated is True
+    unsafe_query = CustomEvidenceQuery(fields=["evidence_id"]).model_copy(
+        update={"fields": ["events; DROP TABLE events"]}
+    )
     with pytest.raises(AppError) as error:
         asyncio.run(
             adapter.get_evidence(
                 EvidenceRequest(
                     analysis_id="page-500",
                     evidence_type="events",
-                    query=CustomEvidenceQuery(fields=["events; DROP TABLE events"]),
+                    query=unsafe_query,
                 )
             )
         )

@@ -7,3 +7,5 @@
 如果证据冲突、覆盖不完整或关键证据缺失，保留 `unresolved`，设置较低置信度并列出限制。不得为了生成结论而强行接受原因。
 
 只返回结构化复核结果、证据引用和限制，不输出隐藏推理过程。
+
+`requested_evidence` 中的 `analysis_id` 必须与输入完全一致。`evidence_type` 只能使用输出 JSON Schema 中的枚举值，不得创造新名称；需要自定义安全查询时使用 `custom_packet_query`。无法确定合法查询时返回空数组。

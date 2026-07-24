@@ -8,6 +8,7 @@ from packetmaster.domain import (
     CoverageSummary,
     CustomEvidenceQuery,
     DiagnosticReport,
+    EvidenceField,
     EvidencePredicate,
     EvidenceRequest,
     EvidenceResponse,
@@ -120,13 +121,29 @@ def test_evidence_response_summary_is_structured() -> None:
 
 
 def test_hypothesis_batch_requests_structured_evidence() -> None:
-    request = EvidenceRequest(analysis_id="analysis-1", evidence_type="rtt")
+    request = EvidenceRequest(
+        analysis_id="analysis-1", evidence_type="rtt_distribution"
+    )
 
     batch = HypothesisBatch(requested_evidence=[request])
     verification = VerificationResult(requested_evidence=[request], confidence="medium")
 
-    assert batch.requested_evidence[0].evidence_type == "rtt"
+    assert batch.requested_evidence[0].evidence_type == "rtt_distribution"
     assert verification.requested_evidence[0].analysis_id == "analysis-1"
+
+
+def test_evidence_request_rejects_model_invented_type() -> None:
+    with pytest.raises(ValidationError, match="evidence_type"):
+        EvidenceRequest(analysis_id="analysis-1", evidence_type="custom")
+
+
+def test_evidence_request_rejects_model_invented_field() -> None:
+    with pytest.raises(ValidationError, match="fields"):
+        EvidenceRequest(
+            analysis_id="analysis-1",
+            evidence_type="events",
+            fields=["payload_bytes"],
+        )
 
 
 def test_diagnostic_report_requires_positive_bandwidth_and_evidence() -> None:
@@ -180,7 +197,7 @@ def test_coverage_and_query_reject_negative_values() -> None:
     "query",
     [
         CustomEvidenceQuery.model_construct(flow_ids=["f"] * 33),
-        CustomEvidenceQuery.model_construct(fields=["tcp.len"] * 17),
+        CustomEvidenceQuery.model_construct(fields=[EvidenceField.TCP_LENGTH] * 17),
         CustomEvidenceQuery.model_construct(
             predicates=[
                 EvidencePredicate(field="tcp.len", operator="gt", value=0)

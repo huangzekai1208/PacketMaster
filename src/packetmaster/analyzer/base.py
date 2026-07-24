@@ -9,24 +9,14 @@ from typing import Protocol
 from packetmaster.domain import (
     AnalyzeRequest,
     AnalyzeResponse,
+    EvidenceField,
     EvidenceRequest,
     EvidenceResponse,
+    EvidenceType,
 )
 from packetmaster.errors import AppError
 
-EVIDENCE_FIELDS = {
-    "evidence_id",
-    "event_type",
-    "frame.number",
-    "frame.time_relative",
-    "flow_id",
-    "direction",
-    "tcp.seq",
-    "tcp.ack",
-    "tcp.window_size",
-    "tcp.len",
-    "tcp.analysis.ack_rtt",
-}
+EVIDENCE_FIELDS = {field.value for field in EvidenceField}
 
 EVENT_EVIDENCE_TYPES: dict[str, tuple[str, ...] | None] = {
     "events": None,
@@ -49,9 +39,7 @@ INDEXED_EVIDENCE_TYPES = {
     "syn_options",
 }
 PACKET_EVIDENCE_TYPES = {"packet_fields", "custom_packet_query"}
-SUPPORTED_EVIDENCE_TYPES = (
-    set(EVENT_EVIDENCE_TYPES) | INDEXED_EVIDENCE_TYPES | PACKET_EVIDENCE_TYPES
-)
+SUPPORTED_EVIDENCE_TYPES = {evidence_type.value for evidence_type in EvidenceType}
 MAX_EVIDENCE_REQUEST_BYTES = 32 * 1024
 
 
@@ -92,7 +80,7 @@ def normalized_evidence_filters(request: EvidenceRequest) -> EvidenceFilters:
 def validate_evidence_request(request: EvidenceRequest) -> None:
     request_size = len(
         json.dumps(
-            request.model_dump(mode="json"),
+            request.model_dump(mode="json", warnings=False),
             ensure_ascii=False,
             separators=(",", ":"),
         ).encode("utf-8")

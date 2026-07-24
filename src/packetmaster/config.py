@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,6 +17,9 @@ class Settings(BaseSettings):
     model_base_url: str | None = None
     model_api_key: SecretStr | None = Field(default=None, repr=False)
     model_name: str = "gpt-4.1-mini"
+    model_structured_output_method: Literal[
+        "auto", "json_schema", "function_calling", "json_mode"
+    ] = "auto"
     model_timeout_seconds: int = Field(default=120, gt=0)
     evidence_timeout_seconds: int = Field(default=120, gt=0, le=600)
     speed_analyzer_mode: str = "real"

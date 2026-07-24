@@ -39,6 +39,28 @@ packetmaster diagnose "/Users/me/captures/test capture.pcapng" --standard 1000 -
 
 诊断需要兼容 OpenAI API 的模型配置。Payload、完整逐包字段、完整日志和 API Key 不进入模型上下文。
 
+模型配置通过环境变量提供。Windows PowerShell：
+
+```powershell
+$env:MODEL_API_KEY = "..."
+$env:MODEL_BASE_URL = "https://api.deepseek.com"
+$env:MODEL_NAME = "deepseek-v4-flash"
+$env:MODEL_STRUCTURED_OUTPUT_METHOD = "auto"
+```
+
+macOS/Linux：
+
+```bash
+export MODEL_API_KEY="..."
+export MODEL_BASE_URL="https://api.deepseek.com"
+export MODEL_NAME="deepseek-v4-flash"
+export MODEL_STRUCTURED_OUTPUT_METHOD="auto"
+```
+
+`auto` 会对模型名或接口地址中包含 `deepseek` 的服务使用 `json_mode`，
+其他模型默认使用 `json_schema`。兼容服务也可以显式设置为
+`json_mode`、`json_schema` 或 `function_calling`。
+
 ## 开发与测试
 
 ```bash
