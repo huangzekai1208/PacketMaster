@@ -304,6 +304,13 @@ class ChatAnswer(ContractModel):
     ready: bool = False
 
 
+class GeneralChatAnswer(ContractModel):
+    """Response contract for conversation before an analysis is active."""
+
+    answer: str = Field(min_length=1, max_length=8_000)
+    follow_up_suggestions: list[str] = Field(default_factory=list, max_length=8)
+
+
 class ConversationTurn(ContractModel):
     question: str = Field(min_length=1, max_length=2_000)
     answer: str = Field(min_length=1, max_length=8_000)

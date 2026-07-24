@@ -300,6 +300,32 @@ def _intent_clarifications(intent) -> list[str]:
     return [*intent.missing_fields, *intent.ambiguities]
 
 
+def _looks_like_diagnosis_request(text: str) -> bool:
+    """Keep ordinary conversation out of the diagnosis parameter extractor."""
+    keywords = (
+        "pcap", "pcapng", "报文", "抓包", "带宽", "速率", "测速", "tcp",
+        "不达标", "诊断", "吞吐", "下载", "上行", "上传",
+    )
+    lowered = text.casefold()
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _answer_general_chat(
+    session: ChatSession, settings: Settings, question: str
+) -> str:
+    session.state.question = question
+    model = DiagnosisModel(settings=settings)
+    answer = asyncio.run(
+        model.general_chat(
+            question,
+            session.state.conversation_summary,
+            session.state.conversation_turns,
+        )
+    )
+    session.append_turn(question, answer.answer)
+    return answer.answer
+
+
 @app.command()
 def chat() -> None:
     """启动 PacketMaster 持续对话诊断。"""
@@ -367,6 +393,12 @@ def chat() -> None:
                     continue
 
             if session.state.analysis_id is None:
+                if not _looks_like_diagnosis_request(raw):
+                    try:
+                        typer.echo(_answer_general_chat(session, settings, raw))
+                    except Exception as exc:
+                        typer.echo(f"对话暂时失败，请稍后重试：{exc}")
+                    continue
                 try:
                     model = DiagnosisModel(settings=settings)
                     intent, extraction = asyncio.run(

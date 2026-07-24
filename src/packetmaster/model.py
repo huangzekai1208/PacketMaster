@@ -16,6 +16,7 @@ from packetmaster.domain import (
     ChatModelContext,
     DiagnosisIntent,
     EvidenceResponse,
+    GeneralChatAnswer,
     HypothesisBatch,
     VerificationResult,
 )
@@ -246,6 +247,24 @@ class DiagnosisModel:
             {"chat_context": context.model_dump(mode="json")},
         )
         return ChatAnswer.model_validate(result)
+
+    async def general_chat(
+        self,
+        user_text: str,
+        conversation_summary: str = "",
+        turns: list[Any] | None = None,
+    ) -> GeneralChatAnswer:
+        """Answer ordinary conversation without requiring an active analysis."""
+        payload = {
+            "user_message": user_text,
+            "conversation_summary": conversation_summary,
+            "conversation_turns": [
+                turn.model_dump(mode="json") if hasattr(turn, "model_dump") else turn
+                for turn in (turns or [])[-8:]
+            ],
+        }
+        result = await self._invoke(GeneralChatAnswer, "general_chat.md", payload)
+        return GeneralChatAnswer.model_validate(result)
 
     async def verify_chat_answer(
         self,
