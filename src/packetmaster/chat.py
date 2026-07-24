@@ -99,7 +99,9 @@ class ChatSession:
         self._artifact_manager = artifact_manager
         self._active_paths: ArtifactPaths | None = None
 
-    def start_analysis(self, request_id: str) -> ArtifactPaths | None:
+    def attach_analysis(self, request_id: str) -> ArtifactPaths | None:
+        """Mark an analysis active after the analyzer has created its artifacts."""
+
         if self._artifact_manager is None:
             return None
         self._active_paths = self._artifact_manager.create(request_id)

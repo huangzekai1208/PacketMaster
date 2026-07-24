@@ -59,6 +59,24 @@ def test_merge_defaults_to_download_and_tracks_missing_fields() -> None:
     assert intent.confirmed is False
 
 
+def test_complete_intent_still_requires_explicit_confirmation() -> None:
+    extracted = extract_capture_paths("分析 ./captures/test.pcapng")
+    intent = merge_intent(
+        None,
+        DiagnosisIntent(
+            capture=extracted.references[0],
+            standard_bandwidth_value=1,
+            standard_bandwidth_unit="G",
+            actual_bandwidth_value=600,
+            actual_bandwidth_unit="M",
+        ),
+    )
+
+    assert intent.missing_fields == []
+    assert intent.ambiguities == []
+    assert intent.confirmed is False
+
+
 def test_path_registry_rejects_unknown_reference() -> None:
     registry = PathRegistry()
     extracted = extract_capture_paths("test.pcap")

@@ -156,5 +156,8 @@ def merge_intent(
     if merged.actual_bandwidth_mbps is None:
         missing.append("actual_bandwidth_mbps")
     merged.missing_fields = missing
-    merged.confirmed = not missing and not merged.ambiguities
+    # A complete intent is only ready for confirmation. The CLI sets this to
+    # true after an explicit user acknowledgement, never as a side effect of
+    # model extraction or a natural-language correction.
+    merged.confirmed = False
     return merged

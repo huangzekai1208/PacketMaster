@@ -104,7 +104,7 @@ def test_chat_session_archives_old_turns_with_byte_bound() -> None:
 def test_chat_session_active_artifact_is_removed_on_finish(tmp_path) -> None:
     manager = ArtifactManager(tmp_path / "artifacts", ttl_hours=24)
     session = ChatSession(ChatSessionState(session_id="session-1"), manager)
-    paths = session.start_analysis("analysis-1")
+    paths = session.attach_analysis("analysis-1")
     assert paths is not None
     assert (paths.root / ".active").exists()
     session.finish()

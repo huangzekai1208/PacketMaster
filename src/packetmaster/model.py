@@ -12,6 +12,8 @@ from pydantic import BaseModel, ValidationError
 from packetmaster.config import Settings
 from packetmaster.context import DiagnosisContext, bounded_evidence
 from packetmaster.domain import (
+    ChatAnswer,
+    ChatModelContext,
     DiagnosisIntent,
     EvidenceResponse,
     HypothesisBatch,
@@ -225,3 +227,28 @@ class DiagnosisModel:
             },
         )
         return VerificationResult.model_validate(result)
+
+    async def answer_question(self, context: ChatModelContext) -> ChatAnswer:
+        result = await self._invoke(
+            ChatAnswer,
+            "chat_answer.md",
+            {"chat_context": context.model_dump(mode="json")},
+        )
+        return ChatAnswer.model_validate(result)
+
+    async def verify_chat_answer(
+        self,
+        context: ChatModelContext,
+        answer: ChatAnswer,
+        evidence: list[EvidenceResponse],
+    ) -> ChatAnswer:
+        result = await self._invoke(
+            ChatAnswer,
+            "chat_verify.md",
+            {
+                "chat_context": context.model_dump(mode="json"),
+                "draft_answer": answer.model_dump(mode="json"),
+                "additional_evidence": bounded_evidence(evidence),
+            },
+        )
+        return ChatAnswer.model_validate(result)
