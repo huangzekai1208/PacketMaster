@@ -39,6 +39,15 @@ _UNIT_MULTIPLIERS = {
     "kb/s": 0.001,
     "k": 0.001,
 }
+_BANDWIDTH_UNIT = r"(?:gbps?|gb/s|g|mbps?|mb/s|m|kbps?|kb/s|k|千兆|兆)"
+_STANDARD_BANDWIDTH = re.compile(
+    rf"标准(?:带宽|速率)?\s*[:：=]?\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>{_BANDWIDTH_UNIT})",
+    re.IGNORECASE,
+)
+_ACTUAL_BANDWIDTH = re.compile(
+    rf"(?:实际|实测|当前)(?:带宽|速率)?\s*[:：=]?\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>{_BANDWIDTH_UNIT})",
+    re.IGNORECASE,
+)
 
 
 @dataclass
@@ -74,6 +83,20 @@ class PathExtraction:
     sanitized_text: str
     references: tuple[PathReference, ...]
     registry: PathRegistry
+
+
+def extract_explicit_bandwidth(text: str) -> dict[str, float | str]:
+    """Extract unambiguous standard/actual bandwidth values locally."""
+    values: dict[str, float | str] = {}
+    for key, pattern in (
+        ("standard", _STANDARD_BANDWIDTH),
+        ("actual", _ACTUAL_BANDWIDTH),
+    ):
+        match = pattern.search(text)
+        if match:
+            values[f"{key}_bandwidth_value"] = float(match.group("value"))
+            values[f"{key}_bandwidth_unit"] = match.group("unit")
+    return values
 
 
 def _clean_path(value: str) -> str:

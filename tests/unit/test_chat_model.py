@@ -85,3 +85,14 @@ def test_parse_intent_rejects_model_invented_capture_reference() -> None:
     assert extraction.references == ()
     assert intent.capture is None
     assert "报文路径引用无效" in intent.ambiguities
+
+
+def test_parse_intent_uses_local_complete_parameters_without_model() -> None:
+    text = (
+        "报文路径:/tmp/sample.pcapng，标准带宽1G，实际带宽20M，分析速度不达标原因"
+    )
+    intent, _ = asyncio.run(DiagnosisModel(client=object()).parse_intent(text))
+
+    assert intent.standard_bandwidth_mbps == 1000
+    assert intent.actual_bandwidth_mbps == 20
+    assert intent.missing_fields == []

@@ -21,7 +21,12 @@ from packetmaster.domain import (
     VerificationResult,
 )
 from packetmaster.errors import AppError
-from packetmaster.intent import PathExtraction, extract_capture_paths, merge_intent
+from packetmaster.intent import (
+    PathExtraction,
+    extract_capture_paths,
+    extract_explicit_bandwidth,
+    merge_intent,
+)
 
 
 class DiagnosisModel:
@@ -194,17 +199,38 @@ class DiagnosisModel:
         """Extract intent from sanitized text while keeping paths local."""
 
         extraction = extract_capture_paths(user_text)
-        result = await self._invoke(
-            DiagnosisIntent,
-            "diagnosis_intent.md",
-            {
-                "user_message": extraction.sanitized_text,
-                "previous_intent": previous.model_dump(mode="json")
-                if previous is not None
-                else None,
-            },
-        )
-        intent = DiagnosisIntent.model_validate(result)
+        explicit = extract_explicit_bandwidth(user_text)
+        local_values: dict[str, Any] = {}
+        if extraction.references:
+            local_values["capture"] = extraction.references[0]
+        local_values.update(explicit)
+        # Complete, explicit requests do not need a fragile model round trip.
+        if extraction.references and {
+            "standard_bandwidth_value",
+            "standard_bandwidth_unit",
+            "actual_bandwidth_value",
+            "actual_bandwidth_unit",
+        } <= set(local_values):
+            intent = DiagnosisIntent(**local_values)
+        else:
+            try:
+                result = await self._invoke(
+                    DiagnosisIntent,
+                    "diagnosis_intent.md",
+                    {
+                        "user_message": extraction.sanitized_text,
+                        "previous_intent": previous.model_dump(mode="json")
+                        if previous is not None
+                        else None,
+                    },
+                )
+                intent = DiagnosisIntent.model_validate(result)
+            except AppError:
+                if not local_values:
+                    raise
+                intent = DiagnosisIntent(**local_values)
+        for key, value in local_values.items():
+            setattr(intent, key, value)
         allowed_references = {
             reference.placeholder for reference in extraction.references
         }
