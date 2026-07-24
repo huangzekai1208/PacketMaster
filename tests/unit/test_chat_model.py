@@ -96,3 +96,12 @@ def test_parse_intent_uses_local_complete_parameters_without_model() -> None:
     assert intent.standard_bandwidth_mbps == 1000
     assert intent.actual_bandwidth_mbps == 20
     assert intent.missing_fields == []
+
+
+def test_parse_intent_defaults_unitless_bandwidth_to_mbps() -> None:
+    text = "报文 test.pcapng，标准带宽 1000，实际带宽 20"
+    intent, _ = asyncio.run(DiagnosisModel(client=object()).parse_intent(text))
+
+    assert intent.standard_bandwidth_unit == "Mbps"
+    assert intent.actual_bandwidth_unit == "Mbps"
+    assert intent.standard_bandwidth_mbps == 1000

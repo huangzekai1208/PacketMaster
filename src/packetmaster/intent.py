@@ -41,11 +41,11 @@ _UNIT_MULTIPLIERS = {
 }
 _BANDWIDTH_UNIT = r"(?:gbps?|gb/s|g|mbps?|mb/s|m|kbps?|kb/s|k|千兆|兆)"
 _STANDARD_BANDWIDTH = re.compile(
-    rf"标准(?:带宽|速率)?\s*[:：=]?\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>{_BANDWIDTH_UNIT})",
+    rf"标准(?:带宽|速率)?\s*[:：=]?\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>{_BANDWIDTH_UNIT})?",
     re.IGNORECASE,
 )
 _ACTUAL_BANDWIDTH = re.compile(
-    rf"(?:实际|实测|当前)(?:带宽|速率)?\s*[:：=]?\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>{_BANDWIDTH_UNIT})",
+    rf"(?:实际|实测|当前)(?:带宽|速率)?\s*[:：=]?\s*(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>{_BANDWIDTH_UNIT})?",
     re.IGNORECASE,
 )
 
@@ -57,7 +57,14 @@ class PathRegistry:
     _paths: dict[str, str] = field(default_factory=dict)
 
     def register(self, value: str) -> PathReference:
-        normalized = str(Path(value).expanduser())
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            local = Path.cwd() / candidate
+            sample = Path.cwd() / "samples" / candidate.name
+            candidate = next(
+                (item for item in (local, sample) if item.is_file()), local
+            )
+        normalized = str(candidate.resolve())
         digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:8]
         placeholder = f"capture_{digest}"
         self._paths[placeholder] = normalized
@@ -95,7 +102,7 @@ def extract_explicit_bandwidth(text: str) -> dict[str, float | str]:
         match = pattern.search(text)
         if match:
             values[f"{key}_bandwidth_value"] = float(match.group("value"))
-            values[f"{key}_bandwidth_unit"] = match.group("unit")
+            values[f"{key}_bandwidth_unit"] = match.group("unit") or "Mbps"
     return values
 
 
