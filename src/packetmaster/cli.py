@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import json
 import re
 import time
@@ -14,16 +15,23 @@ import typer
 
 from packetmaster.analyzer.real import RealAnalyzerAdapter
 from packetmaster.artifacts import ArtifactManager, create_request_id
+from packetmaster.chat import ChatCommand, ChatSession, parse_command
+from packetmaster.chat_graph import build_chat_graph
 from packetmaster.config import Settings
-from packetmaster.context import ContextBuilder
-from packetmaster.domain import DiagnosticReport, Target
+from packetmaster.context import ContextBuilder, DiagnosisContext
+from packetmaster.domain import (
+    AnalyzeResponse,
+    ChatSessionState,
+    DiagnosticReport,
+    Target,
+)
 from packetmaster.errors import AppError
 from packetmaster.graph import build_graph
 from packetmaster.mcp.client import SpeedMCPClient
 from packetmaster.mcp.server import create_server
 from packetmaster.model import DiagnosisModel
 from packetmaster.platform import is_absolute_path
-from packetmaster.report import render_terminal, write_report
+from packetmaster.report import render_chat_report, render_terminal, write_report
 
 app = typer.Typer(help="PacketMaster TCP 测速不达标诊断")
 
@@ -86,6 +94,8 @@ def _localize_progress_message(message: str) -> str:
 class DiagnosisOutcome:
     report: DiagnosticReport
     error: AppError | None = None
+    analysis: AnalyzeResponse | None = None
+    context: DiagnosisContext | None = None
 
 
 def _normalize_capture_path(value: str) -> str:
@@ -145,6 +155,18 @@ async def run_diagnosis(
     for event in result.get("trace", []):
         artifact_manager.append_trace(trace_paths, event)
     report = DiagnosticReport.model_validate(result["report"])
+    raw_analysis = result.get("analysis")
+    analysis = (
+        AnalyzeResponse.model_validate(raw_analysis)
+        if raw_analysis is not None
+        else None
+    )
+    raw_context = result.get("context")
+    context = (
+        DiagnosisContext.model_validate(raw_context)
+        if raw_context is not None
+        else None
+    )
     graph_error = result.get("error")
     if graph_error is not None:
         if not isinstance(graph_error, dict):
@@ -167,9 +189,14 @@ async def run_diagnosis(
             details=details if isinstance(details, dict) else {},
         )
         if result.get("analysis") is not None:
-            return DiagnosisOutcome(report=report, error=error)
+            return DiagnosisOutcome(
+                report=report,
+                error=error,
+                analysis=analysis,
+                context=context,
+            )
         raise error
-    return DiagnosisOutcome(report=report)
+    return DiagnosisOutcome(report=report, analysis=analysis, context=context)
 
 
 @app.command()
@@ -229,6 +256,181 @@ def diagnose(
         )
         typer.echo(json.dumps(error.to_dict(), ensure_ascii=False), err=True)
         raise typer.Exit(code=1) from exc
+
+
+async def _answer_chat_question(
+    session: ChatSession, settings: Settings, question: str
+) -> tuple[str, dict[str, object] | None]:
+    session.state.question = question
+    adapter = RealAnalyzerAdapter(
+        artifact_root=settings.artifact_root,
+        pipeline_script=settings.speed_analyzer_script,
+        tshark_path=settings.tshark_path,
+        evidence_timeout_seconds=settings.evidence_timeout_seconds,
+    )
+    server = create_server(adapter)
+    async with SpeedMCPClient(server) as client:
+        graph = build_chat_graph(
+            mcp_client=client,
+            diagnosis_model=DiagnosisModel(settings=settings),
+        )
+        result = await graph.ainvoke({"session": session.state})
+    error = result.get("error")
+    if error:
+        return "问答暂时失败：" + str(error.get("message", "未知错误")), error
+    answer = result.get("answer")
+    if answer is None:
+        return "问答未生成有效回答。", {"code": "CHAT_EMPTY_ANSWER"}
+    return answer.answer, None
+
+
+def _chat_confirmation(intent) -> str:
+    target = intent.target.value if intent.target else Target.DOWNLOAD.value
+    return (
+        "已识别参数：\n"
+        f"- 报文引用：{intent.capture.placeholder if intent.capture else '缺失'}\n"
+        f"- 标准带宽：{intent.standard_bandwidth_mbps or '缺失'} Mbps\n"
+        f"- 实际带宽：{intent.actual_bandwidth_mbps or '缺失'} Mbps\n"
+        f"- 分析方向：{target}\n"
+        "请确认是否启动分析？(Y/N)"
+    )
+
+
+def _intent_clarifications(intent) -> list[str]:
+    return [*intent.missing_fields, *intent.ambiguities]
+
+
+@app.command()
+def chat() -> None:
+    """启动 PacketMaster 持续对话诊断。"""
+
+    settings = Settings.load()
+    session = ChatSession(ChatSessionState(session_id=create_request_id()))
+    path_registry = None
+    typer.echo("PacketMaster 对话模式。输入 /help 查看命令，/quit 退出。")
+    try:
+        while True:
+            prompt = "PacketMaster> " if session.state.analysis_id else "你> "
+            try:
+                raw = builtins.input(prompt)
+            except (EOFError, KeyboardInterrupt):
+                typer.echo("\n已退出 PacketMaster。")
+                return
+            command = parse_command(raw)
+            if command is not None:
+                if command.command in {ChatCommand.EMPTY}:
+                    continue
+                if command.command is ChatCommand.QUIT:
+                    typer.echo("已退出 PacketMaster。")
+                    return
+                if command.command is ChatCommand.HELP:
+                    typer.echo(
+                        "/new 新建任务  /report 查看报告  /evidence 查看关键证据\n"
+                        "/save 查看报告路径  /quit 退出"
+                    )
+                    continue
+                if command.command is ChatCommand.UNKNOWN:
+                    typer.echo("未知命令，请输入 /help。")
+                    continue
+                if command.command is ChatCommand.NEW:
+                    session.reset()
+                    path_registry = None
+                    typer.echo("已新建会话，请描述新的报文诊断任务。")
+                    continue
+                if command.command is ChatCommand.REPORT:
+                    if session.state.report is None:
+                        typer.echo("当前还没有诊断报告。")
+                    else:
+                        report_path = (
+                            Path(session.state.report_path)
+                            if session.state.report_path
+                            else None
+                        )
+                        typer.echo(
+                            render_chat_report(session.state.report, report_path)
+                        )
+                    continue
+                if command.command is ChatCommand.SAVE:
+                    report_location = session.state.report_path or "当前还没有报告"
+                    typer.echo(f"JSON 报告：{report_location}")
+                    continue
+                if command.command is ChatCommand.EVIDENCE:
+                    evidence = (
+                        session.state.report.key_evidence
+                        if session.state.report
+                        else []
+                    )
+                    typer.echo(json.dumps(evidence[:20], ensure_ascii=False, indent=2))
+                    continue
+
+            if session.state.analysis_id is None:
+                try:
+                    model = DiagnosisModel(settings=settings)
+                    intent, extraction = asyncio.run(
+                        model.parse_intent(raw, session.state.pending_intent)
+                    )
+                    if path_registry is None:
+                        path_registry = extraction.registry
+                    else:
+                        path_registry.extend(extraction.registry)
+                    session.state.pending_intent = intent
+                except Exception as exc:
+                    typer.echo(f"参数抽取失败，请补充完整参数后重试：{exc}")
+                    continue
+                clarifications = _intent_clarifications(intent)
+                if clarifications:
+                    typer.echo("缺少或存在歧义的参数：" + "、".join(clarifications))
+                    continue
+                typer.echo(_chat_confirmation(intent))
+                confirmed = builtins.input("确认> ").strip().casefold()
+                if confirmed not in {"y", "yes", "是", "确认"}:
+                    typer.echo("已取消启动，可继续修正参数。")
+                    continue
+                if path_registry is None or intent.capture is None:
+                    typer.echo("报文路径无效，请重新输入。")
+                    continue
+                request_id = create_request_id()
+                try:
+                    intent.confirmed = True
+                    outcome = asyncio.run(
+                        run_diagnosis(
+                            pcap_path=path_registry.resolve(intent.capture),
+                            standard=intent.standard_bandwidth_mbps,
+                            actual=intent.actual_bandwidth_mbps,
+                            target=intent.target or Target.DOWNLOAD,
+                            request_id=request_id,
+                            settings=settings,
+                        )
+                    )
+                    destination = (settings.artifact_root / request_id).resolve()
+                    report_path = write_report(
+                        outcome.report, destination / "report.json"
+                    )
+                    session.state.analysis_id = request_id
+                    session.state.target = intent.target or Target.DOWNLOAD
+                    session.state.standard_bandwidth_mbps = (
+                        intent.standard_bandwidth_mbps
+                    )
+                    session.state.actual_bandwidth_mbps = intent.actual_bandwidth_mbps
+                    session.state.report = outcome.report
+                    session.state.report_path = str(report_path)
+                    session.state.diagnosis_context = (
+                        outcome.context.model_dump(mode="json")
+                        if outcome.context is not None
+                        else {}
+                    )
+                    session.attach_analysis(request_id)
+                    typer.echo(render_chat_report(outcome.report, report_path))
+                    if outcome.error:
+                        typer.echo("诊断已降级完成，请注意报告限制。")
+                except Exception as exc:
+                    typer.echo(f"诊断失败：{exc}")
+                continue
+
+            answer, _ = asyncio.run(_answer_chat_question(session, settings, raw))
+            typer.echo(answer)
+    finally:
+        session.finish()
 
 
 if __name__ == "__main__":
