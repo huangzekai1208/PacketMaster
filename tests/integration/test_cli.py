@@ -45,6 +45,88 @@ def _report(target: Target) -> DiagnosticReport:
 
 
 @pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        ("Starting speed analysis", "正在启动测速分析"),
+        ("Inputs validated", "输入参数校验完成"),
+        ("Normalizing capture", "正在规范化报文文件"),
+        ("Capture normalized", "报文文件规范化完成"),
+        ("Fingerprinting capture", "正在计算报文指纹"),
+        ("Scanning capture flows", "正在扫描报文流"),
+        ("Scanned 200000 packets", "已扫描 200000 个报文"),
+        ("Fingerprint completed", "报文指纹计算完成"),
+        ("Capture scan completed", "报文扫描完成"),
+        ("Writing filtered captures", "正在写入筛选后的报文"),
+        ("Filtering completed", "报文筛选完成"),
+        (
+            "Extracting all download TCP packets",
+            "正在提取全部下载方向 TCP 报文",
+        ),
+        (
+            "Extracted 100000 upload TCP packets",
+            "已提取 100000 个上行方向 TCP 报文",
+        ),
+        (
+            "Completed download TCP extraction",
+            "下载方向 TCP 报文提取完成",
+        ),
+        ("Analysis completed", "分析完成"),
+        ("Analysis partial", "分析部分完成"),
+        ("Speed analysis process completed", "测速分析进程完成"),
+        ("未知阶段", "未知阶段"),
+        ("Future pipeline stage", "分析处理中"),
+    ],
+)
+def test_cli_localizes_progress_messages(message: str, expected: str) -> None:
+    assert cli._localize_progress_message(message) == expected
+
+
+def test_run_diagnosis_prints_localized_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class FakeClient:
+        def __init__(self, server, progress_callback) -> None:
+            self.progress_callback = progress_callback
+
+        async def __aenter__(self):
+            self.progress_callback(0.0, "Starting speed analysis")
+            self.progress_callback(0.5, "Extracted 100000 download TCP packets")
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            pass
+
+    class FakeGraph:
+        async def ainvoke(self, state):
+            return {"report": _report(Target.DOWNLOAD), "trace": []}
+
+    monkeypatch.setattr(cli, "RealAnalyzerAdapter", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "create_server", lambda adapter: object())
+    monkeypatch.setattr(cli, "SpeedMCPClient", FakeClient)
+    monkeypatch.setattr(cli, "DiagnosisModel", lambda **kwargs: object())
+    monkeypatch.setattr(cli, "ContextBuilder", lambda: object())
+    monkeypatch.setattr(cli, "build_graph", lambda **kwargs: FakeGraph())
+
+    asyncio.run(
+        cli.run_diagnosis(
+            pcap_path=str((tmp_path / "capture.pcapng").resolve()),
+            standard=1000,
+            actual=600,
+            target=Target.DOWNLOAD,
+            request_id="localized-progress",
+            settings=Settings(artifact_root=tmp_path / "artifacts"),
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert "[进度] 正在启动测速分析" in output
+    assert "[进度] 已提取 100000 个下载方向 TCP 报文" in output
+    assert "Starting speed analysis" not in output
+
+
+@pytest.mark.parametrize(
     ("extra", "expected"),
     [
         ([], "download"),
