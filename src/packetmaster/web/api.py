@@ -8,26 +8,49 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
 from packetmaster.config import Settings
 from packetmaster.errors import AppError
+from packetmaster.model import DiagnosisModel
+from packetmaster.web.captures import CaptureRegistry, CaptureRepository
 from packetmaster.web.contracts import (
+    AnalysisSummary,
     ApiError,
+    CaptureSummary,
+    ConfirmAnalysisRequest,
+    ConversationResult,
+    CreateSessionRequest,
+    DeleteResult,
     ErrorEnvelope,
     HealthStatus,
+    Page,
+    RegisterCaptureRequest,
+    SessionDetail,
+    SessionSummary,
+    SubmitMessageRequest,
     SuccessEnvelope,
 )
-from packetmaster.web.database import WebDatabase
+from packetmaster.web.conversation import WebConversationService
+from packetmaster.web.database import (
+    MessageRepository,
+    PendingIntentRepository,
+    SessionRepository,
+    WebDatabase,
+)
+from packetmaster.web.tasks import AnalysisTaskRepository
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
 
 
 def create_app(
-    settings: Settings | None = None, *, testing: bool = False
+    settings: Settings | None = None,
+    *,
+    testing: bool = False,
+    conversation_model=None,
 ) -> FastAPI:
     runtime = settings or Settings.load()
     database = WebDatabase(runtime.web_database_path)
@@ -40,6 +63,18 @@ def create_app(
     )
     app.state.settings = runtime
     app.state.database = database
+    conversation = WebConversationService(
+        sessions=SessionRepository(database),
+        messages=MessageRepository(database),
+        intents=PendingIntentRepository(database),
+        captures=CaptureRegistry(
+            CaptureRepository(database),
+            allowed_roots=runtime.web_allowed_capture_roots,
+        ),
+        tasks=AnalysisTaskRepository(database),
+        model=conversation_model or DiagnosisModel(settings=runtime),
+    )
+    app.state.conversation = conversation
     allowed_hosts = {*_LOOPBACK_HOSTS, *( ["testserver"] if testing else [])}
 
     @app.middleware("http")
@@ -156,6 +191,144 @@ def create_app(
             request_id=request.state.request_id,
         )
 
+    @app.post(
+        "/api/sessions",
+        response_model=SuccessEnvelope[SessionSummary],
+        tags=["sessions"],
+    )
+    async def create_session(
+        request: Request, body: CreateSessionRequest
+    ) -> SuccessEnvelope[SessionSummary]:
+        return SuccessEnvelope(
+            data=conversation.create_session(title=body.title),
+            request_id=request.state.request_id,
+        )
+
+    @app.get(
+        "/api/sessions",
+        response_model=SuccessEnvelope[Page[SessionSummary]],
+        tags=["sessions"],
+    )
+    async def list_sessions(
+        request: Request,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> SuccessEnvelope[Page[SessionSummary]]:
+        return SuccessEnvelope(
+            data=conversation.list_sessions(offset=offset, limit=limit),
+            request_id=request.state.request_id,
+        )
+
+    @app.get(
+        "/api/sessions/{session_id}",
+        response_model=SuccessEnvelope[SessionDetail],
+        tags=["sessions"],
+    )
+    async def session_detail(
+        session_id: str,
+        request: Request,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=100, ge=1, le=100),
+    ) -> SuccessEnvelope[SessionDetail]:
+        return SuccessEnvelope(
+            data=conversation.session_detail(
+                session_id, offset=offset, limit=limit
+            ),
+            request_id=request.state.request_id,
+        )
+
+    @app.delete(
+        "/api/sessions/{session_id}",
+        response_model=SuccessEnvelope[DeleteResult],
+        tags=["sessions"],
+    )
+    async def delete_session(
+        session_id: str, request: Request
+    ) -> SuccessEnvelope[DeleteResult]:
+        return SuccessEnvelope(
+            data=DeleteResult(deleted=conversation.delete_session(session_id)),
+            request_id=request.state.request_id,
+        )
+
+    @app.post(
+        "/api/sessions/{session_id}/messages",
+        response_model=SuccessEnvelope[ConversationResult],
+        tags=["messages"],
+    )
+    async def submit_message(
+        session_id: str,
+        body: SubmitMessageRequest,
+        request: Request,
+    ) -> SuccessEnvelope[ConversationResult]:
+        result = await conversation.submit_message(
+            session_id, content=body.content, capture_id=body.capture_id
+        )
+        return SuccessEnvelope(data=result, request_id=request.state.request_id)
+
+    @app.post(
+        "/api/sessions/{session_id}/confirm",
+        response_model=SuccessEnvelope[AnalysisSummary],
+        tags=["analyses"],
+    )
+    async def confirm_analysis(
+        session_id: str,
+        body: ConfirmAnalysisRequest,
+        request: Request,
+    ) -> SuccessEnvelope[AnalysisSummary]:
+        del body
+        return SuccessEnvelope(
+            data=conversation.confirm(session_id),
+            request_id=request.state.request_id,
+        )
+
+    @app.post(
+        "/api/captures/register",
+        response_model=SuccessEnvelope[CaptureSummary],
+        tags=["captures"],
+    )
+    async def register_capture(
+        body: RegisterCaptureRequest, request: Request
+    ) -> SuccessEnvelope[CaptureSummary]:
+        return SuccessEnvelope(
+            data=conversation.register_capture(body.path),
+            request_id=request.state.request_id,
+        )
+
+    @app.get(
+        "/api/captures/recent",
+        response_model=SuccessEnvelope[list[CaptureSummary]],
+        tags=["captures"],
+    )
+    async def recent_captures(
+        request: Request,
+        limit: int = Query(default=20, ge=1, le=100),
+    ) -> SuccessEnvelope[list[CaptureSummary]]:
+        return SuccessEnvelope(
+            data=conversation.captures.recent(limit=limit),
+            request_id=request.state.request_id,
+        )
+
+    @app.delete(
+        "/api/captures/{capture_id}",
+        response_model=SuccessEnvelope[DeleteResult],
+        tags=["captures"],
+    )
+    async def delete_capture(
+        capture_id: str, request: Request
+    ) -> SuccessEnvelope[DeleteResult]:
+        deleted = conversation.captures.delete(capture_id)
+        if not deleted:
+            raise AppError(
+                code="CAPTURE_REFERENCE_NOT_FOUND",
+                message="报文引用不存在",
+                recoverable=True,
+                suggested_action="请刷新最近报文列表。",
+            )
+        return SuccessEnvelope(
+            data=DeleteResult(deleted=True),
+            request_id=request.state.request_id,
+        )
+
     return app
 
 
@@ -182,7 +355,7 @@ def _error_response(
 def _app_error_status(code: str) -> int:
     if code.endswith("_NOT_FOUND"):
         return 404
-    if code in {"ANALYSIS_ALREADY_ACTIVE", "CAPTURE_IN_USE"}:
+    if code in {"ANALYSIS_ALREADY_ACTIVE", "CAPTURE_IN_USE", "SESSION_IN_USE"}:
         return 409
     if code in {"INVALID_TASK_TRANSITION", "ANALYSIS_NOT_RETRYABLE"}:
         return 409

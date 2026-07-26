@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from packetmaster.domain import Target
+from packetmaster.errors import AppError
 from packetmaster.web.contracts import (
     MessageType,
     SessionSummary,
@@ -16,7 +20,7 @@ from packetmaster.web.contracts import (
     WebMessage,
 )
 
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _MIGRATIONS = {
     1: """
         CREATE TABLE sessions (
@@ -126,6 +130,20 @@ _MIGRATIONS = {
         ALTER TABLE analyses ADD COLUMN worker_id TEXT;
         CREATE INDEX analyses_worker_idx
             ON analyses(worker_id, status, worker_heartbeat_at);
+    """,
+    4: """
+        CREATE TABLE session_intents (
+            session_id TEXT PRIMARY KEY REFERENCES sessions(session_id)
+                ON DELETE CASCADE,
+            capture_id TEXT REFERENCES captures(capture_id) ON DELETE SET NULL,
+            standard_bandwidth_mbps REAL,
+            actual_bandwidth_mbps REAL,
+            target TEXT NOT NULL DEFAULT 'download',
+            assumptions_json TEXT NOT NULL DEFAULT '[]',
+            ambiguities_json TEXT NOT NULL DEFAULT '[]',
+            confirmed_analysis_id TEXT REFERENCES analyses(analysis_id),
+            updated_at TEXT NOT NULL
+        );
     """,
 }
 
@@ -252,11 +270,43 @@ class SessionRepository:
         return [_session(row) for row in rows], total
 
     def delete(self, session_id: str) -> bool:
+        try:
+            with self.database.transaction(immediate=True) as connection:
+                cursor = connection.execute(
+                    "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+                )
+        except sqlite3.IntegrityError as exc:
+            raise AppError(
+                code="SESSION_IN_USE",
+                message="会话仍有关联的分析任务",
+                recoverable=True,
+                suggested_action="请保留该会话，已完成任务的清理将在后续版本提供。",
+            ) from exc
+        return cursor.rowcount > 0
+
+    def set_status(
+        self,
+        session_id: str,
+        status: TaskStatus,
+        *,
+        current_analysis_id: str | None = None,
+    ) -> SessionSummary:
+        timestamp = _timestamp(_now())
         with self.database.transaction(immediate=True) as connection:
             cursor = connection.execute(
-                "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+                """
+                UPDATE sessions
+                SET status = ?, current_analysis_id = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (status.value, current_analysis_id, timestamp, session_id),
             )
-        return cursor.rowcount > 0
+        if cursor.rowcount == 0:
+            raise _session_not_found()
+        result = self.get(session_id)
+        if result is None:
+            raise _session_not_found()
+        return result
 
 
 class MessageRepository:
@@ -334,6 +384,94 @@ class MessageRepository:
         return [_message(row) for row in rows], total
 
 
+@dataclass(frozen=True)
+class PendingIntentRecord:
+    session_id: str
+    capture_id: str | None
+    standard_bandwidth_mbps: float | None
+    actual_bandwidth_mbps: float | None
+    target: Target
+    assumptions: list[str]
+    ambiguities: list[str]
+    confirmed_analysis_id: str | None
+    updated_at: datetime
+
+
+class PendingIntentRepository:
+    def __init__(self, database: WebDatabase) -> None:
+        self.database = database
+
+    def get(self, session_id: str) -> PendingIntentRecord | None:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM session_intents WHERE session_id = ?", (session_id,)
+            ).fetchone()
+        return _pending_intent(row) if row is not None else None
+
+    def upsert(
+        self,
+        *,
+        session_id: str,
+        capture_id: str | None,
+        standard_bandwidth_mbps: float | None,
+        actual_bandwidth_mbps: float | None,
+        target: Target = Target.DOWNLOAD,
+        assumptions: list[str] | None = None,
+        ambiguities: list[str] | None = None,
+    ) -> PendingIntentRecord:
+        current = _now()
+        timestamp = _timestamp(current)
+        with self.database.transaction(immediate=True) as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO session_intents (
+                        session_id, capture_id, standard_bandwidth_mbps,
+                        actual_bandwidth_mbps, target, assumptions_json,
+                        ambiguities_json, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        capture_id = excluded.capture_id,
+                        standard_bandwidth_mbps = excluded.standard_bandwidth_mbps,
+                        actual_bandwidth_mbps = excluded.actual_bandwidth_mbps,
+                        target = excluded.target,
+                        assumptions_json = excluded.assumptions_json,
+                        ambiguities_json = excluded.ambiguities_json,
+                        confirmed_analysis_id = NULL,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        session_id,
+                        capture_id,
+                        standard_bandwidth_mbps,
+                        actual_bandwidth_mbps,
+                        target.value,
+                        json.dumps(assumptions or [], ensure_ascii=False),
+                        json.dumps(ambiguities or [], ensure_ascii=False),
+                        timestamp,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise _session_not_found() from exc
+        result = self.get(session_id)
+        if result is None:
+            raise RuntimeError("saved pending intent is unavailable")
+        return result
+
+    def mark_confirmed(self, session_id: str, analysis_id: str) -> None:
+        with self.database.transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE session_intents
+                SET confirmed_analysis_id = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (analysis_id, _timestamp(_now()), session_id),
+            )
+        if cursor.rowcount == 0:
+            raise _session_not_found()
+
+
 def _session(row: sqlite3.Row) -> SessionSummary:
     return SessionSummary(
         session_id=row["session_id"],
@@ -354,4 +492,27 @@ def _message(row: sqlite3.Row) -> WebMessage:
         created_at=_datetime(row["created_at"]),
         analysis_id=row["analysis_id"],
         evidence_count=row["evidence_count"],
+    )
+
+
+def _pending_intent(row: sqlite3.Row) -> PendingIntentRecord:
+    return PendingIntentRecord(
+        session_id=row["session_id"],
+        capture_id=row["capture_id"],
+        standard_bandwidth_mbps=row["standard_bandwidth_mbps"],
+        actual_bandwidth_mbps=row["actual_bandwidth_mbps"],
+        target=Target(row["target"]),
+        assumptions=list(json.loads(row["assumptions_json"])),
+        ambiguities=list(json.loads(row["ambiguities_json"])),
+        confirmed_analysis_id=row["confirmed_analysis_id"],
+        updated_at=_datetime(row["updated_at"]),
+    )
+
+
+def _session_not_found() -> AppError:
+    return AppError(
+        code="SESSION_NOT_FOUND",
+        message="会话不存在",
+        recoverable=True,
+        suggested_action="请刷新会话列表或新建会话。",
     )

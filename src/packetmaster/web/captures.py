@@ -210,6 +210,16 @@ class CaptureRegistry:
     def recent(self, *, limit: int = 20) -> list[CaptureSummary]:
         return [record.public() for record in self.repository.recent(limit=limit)]
 
+    def summary(self, capture_id: str) -> CaptureSummary:
+        record = self.repository.get(capture_id)
+        if record is None:
+            raise _capture_error(
+                "CAPTURE_REFERENCE_NOT_FOUND",
+                "报文引用不存在",
+                "请重新注册报文文件。",
+            )
+        return record.public()
+
     def resolve(self, capture_id: str) -> Path:
         record = self.repository.get(capture_id)
         if record is None:

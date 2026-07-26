@@ -187,6 +187,15 @@ class AnalysisTaskRepository:
             ).fetchone()
         return _analysis(row) if row is not None else None
 
+    def count_for_session(self, session_id: str) -> int:
+        with self.database.connect() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM analyses WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()[0]
+            )
+
     def transition(
         self,
         analysis_id: str,

@@ -173,6 +173,40 @@ class HealthStatus(WebContract):
     tshark_configured: bool
 
 
+class CreateSessionRequest(WebContract):
+    title: str = Field(default="新诊断", min_length=1, max_length=120)
+
+
+class RegisterCaptureRequest(WebContract):
+    path: str = Field(min_length=1, max_length=4_096)
+
+
+class SubmitMessageRequest(WebContract):
+    content: str = Field(min_length=1, max_length=2_000)
+    capture_id: PublicId | None = None
+
+
+class ConfirmAnalysisRequest(WebContract):
+    pass
+
+
+class DeleteResult(WebContract):
+    deleted: bool
+
+
+class ConversationResult(WebContract):
+    route: Literal["general", "diagnosis", "analysis_question"]
+    assistant_message: WebMessage
+    parameters: DiagnosisParameters | None = None
+    analysis: AnalysisSummary | None = None
+
+
+class SessionDetail(WebContract):
+    session: SessionSummary
+    messages: Page[WebMessage]
+    parameters: DiagnosisParameters | None = None
+
+
 def public_json(value: WebContract) -> dict[str, Any]:
     """Return the JSON-mode projection used by API adapters."""
 

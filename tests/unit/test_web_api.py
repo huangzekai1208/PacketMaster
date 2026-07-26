@@ -11,6 +11,7 @@ def _client(tmp_path: Path) -> TestClient:
         web_database_path=tmp_path / "web.sqlite",
         model_api_key="test-key",
         tshark_path="definitely-not-installed-tshark",
+        web_allowed_capture_roots=[tmp_path],
     )
     return TestClient(create_app(settings, testing=True))
 
@@ -52,3 +53,57 @@ def test_unknown_api_uses_stable_error_envelope(tmp_path: Path) -> None:
     assert response.json()["ok"] is False
     assert response.json()["error"]["code"] == "API_NOT_FOUND"
     assert "traceback" not in response.text.casefold()
+
+
+def test_session_capture_message_and_confirmation_api(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    capture_path = tmp_path / "capture.pcapng"
+    capture_path.write_bytes(b"capture")
+    session = client.post("/api/sessions", json={"title": "测速诊断"}).json()["data"]
+    capture = client.post(
+        "/api/captures/register", json={"path": str(capture_path)}
+    ).json()["data"]
+
+    message = client.post(
+        f"/api/sessions/{session['session_id']}/messages",
+        json={
+            "content": "标准带宽1G，实际带宽20M",
+            "capture_id": capture["capture_id"],
+        },
+    )
+    confirmed = client.post(
+        f"/api/sessions/{session['session_id']}/confirm", json={}
+    )
+    repeated = client.post(
+        f"/api/sessions/{session['session_id']}/confirm", json={}
+    )
+    detail = client.get(f"/api/sessions/{session['session_id']}")
+
+    assert message.status_code == 200
+    assert message.json()["data"]["parameters"]["ready_for_confirmation"] is True
+    assert message.json()["data"]["parameters"]["target"] == "download"
+    assert confirmed.status_code == 200
+    assert (
+        repeated.json()["data"]["analysis_id"]
+        == confirmed.json()["data"]["analysis_id"]
+    )
+    assert detail.json()["data"]["messages"]["total"] == 3
+    combined = message.text + confirmed.text + detail.text
+    assert str(capture_path) not in combined
+    assert "test-key" not in combined
+
+
+def test_session_and_capture_listing_and_deletion_api(tmp_path: Path) -> None:
+    client = _client(tmp_path)
+    capture_path = tmp_path / "capture.pcap"
+    capture_path.write_bytes(b"capture")
+    session = client.post("/api/sessions", json={}).json()["data"]
+    capture = client.post(
+        "/api/captures/register", json={"path": str(capture_path)}
+    ).json()["data"]
+
+    assert client.get("/api/sessions").json()["data"]["total"] == 1
+    assert client.get("/api/captures/recent").json()["data"][0] == capture
+    assert client.delete(f"/api/captures/{capture['capture_id']}").status_code == 200
+    assert capture_path.is_file()
+    assert client.delete(f"/api/sessions/{session['session_id']}").status_code == 200

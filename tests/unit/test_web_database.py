@@ -2,8 +2,15 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from packetmaster.domain import Target
+from packetmaster.web.captures import CaptureRegistry, CaptureRepository
 from packetmaster.web.contracts import MessageType
-from packetmaster.web.database import MessageRepository, SessionRepository, WebDatabase
+from packetmaster.web.database import (
+    MessageRepository,
+    PendingIntentRepository,
+    SessionRepository,
+    WebDatabase,
+)
 
 
 def _database(tmp_path: Path) -> WebDatabase:
@@ -28,7 +35,7 @@ def test_database_initialization_is_versioned_idempotent_and_uses_wal(
             )
         }
 
-    assert version == 3
+    assert version == 4
     assert journal_mode == "wal"
     assert {
         "sessions",
@@ -37,7 +44,35 @@ def test_database_initialization_is_versioned_idempotent_and_uses_wal(
         "analyses",
         "analysis_events",
         "chat_turns",
+        "session_intents",
     } <= tables
+
+
+def test_pending_intent_survives_repository_recreation(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    SessionRepository(database).create(session_id="session-1")
+    intents = PendingIntentRepository(database)
+    capture_path = tmp_path / "capture.pcapng"
+    capture_path.write_bytes(b"capture")
+    capture = CaptureRegistry(
+        CaptureRepository(database), allowed_roots=[tmp_path]
+    ).register(str(capture_path))
+
+    intents.upsert(
+        session_id="session-1",
+        capture_id=capture.capture_id,
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=20,
+        target=Target.DOWNLOAD,
+        assumptions=["未填写单位时按 Mbps 解释"],
+    )
+
+    restored = PendingIntentRepository(WebDatabase(database.path)).get("session-1")
+    assert restored is not None
+    assert restored.capture_id == capture.capture_id
+    assert restored.standard_bandwidth_mbps == 1000
+    assert restored.actual_bandwidth_mbps == 20
+    assert restored.target is Target.DOWNLOAD
 
 
 def test_sessions_and_messages_persist_with_stable_pagination(tmp_path: Path) -> None:
