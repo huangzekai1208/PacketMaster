@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     artifact_ttl_hours: int = Field(default=24, gt=0)
     tshark_path: str = "tshark"
     max_inspection_rounds: int = Field(default=3, ge=1, le=3)
+    web_database_path: Path = Path("artifacts/packetmaster-web.sqlite")
+    web_allowed_capture_roots: list[Path] = Field(
+        default_factory=lambda: [Path.cwd()]
+    )
+    web_host: Literal["127.0.0.1"] = "127.0.0.1"
+    web_port: int = Field(default=8765, ge=1024, le=65535)
 
     @classmethod
     def load(cls) -> Settings:
