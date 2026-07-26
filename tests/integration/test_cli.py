@@ -13,7 +13,9 @@ import psutil
 import pytest
 from typer.testing import CliRunner
 
+import packetmaster.application.diagnosis as diagnosis_app
 import packetmaster.cli as cli
+from packetmaster.application import DiagnosisProgress, DiagnosisService
 from packetmaster.config import Settings
 from packetmaster.domain import (
     CoverageSummary,
@@ -171,28 +173,21 @@ def test_run_diagnosis_prints_localized_progress(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    class FakeClient:
-        def __init__(self, server, progress_callback) -> None:
-            self.progress_callback = progress_callback
-
-        async def __aenter__(self):
-            self.progress_callback(0.0, "Starting speed analysis")
-            self.progress_callback(0.5, "Extracted 100000 download TCP packets")
-            return self
-
-        async def __aexit__(self, exc_type, exc, traceback) -> None:
+    class FakeService:
+        def __init__(self, settings) -> None:
             pass
 
-    class FakeGraph:
-        async def ainvoke(self, state):
-            return {"report": _report(Target.DOWNLOAD), "trace": []}
+        async def run(self, **kwargs):
+            progress_handler = kwargs["progress_handler"]
+            progress_handler(DiagnosisProgress(0.0, "Starting speed analysis"))
+            progress_handler(
+                DiagnosisProgress(
+                    0.5, "Extracted 100000 download TCP packets"
+                )
+            )
+            return cli.DiagnosisOutcome(report=_report(Target.DOWNLOAD))
 
-    monkeypatch.setattr(cli, "RealAnalyzerAdapter", lambda **kwargs: object())
-    monkeypatch.setattr(cli, "create_server", lambda adapter: object())
-    monkeypatch.setattr(cli, "SpeedMCPClient", FakeClient)
-    monkeypatch.setattr(cli, "DiagnosisModel", lambda **kwargs: object())
-    monkeypatch.setattr(cli, "ContextBuilder", lambda: object())
-    monkeypatch.setattr(cli, "build_graph", lambda **kwargs: FakeGraph())
+    monkeypatch.setattr(cli, "DiagnosisService", FakeService)
 
     asyncio.run(
         cli.run_diagnosis(
@@ -419,22 +414,22 @@ def test_run_diagnosis_raises_error_returned_by_graph(
                 },
             }
 
-    monkeypatch.setattr(cli, "RealAnalyzerAdapter", lambda **kwargs: object())
-    monkeypatch.setattr(cli, "create_server", lambda adapter: object())
-    monkeypatch.setattr(cli, "SpeedMCPClient", FakeClient)
-    monkeypatch.setattr(cli, "DiagnosisModel", lambda **kwargs: object())
-    monkeypatch.setattr(cli, "ContextBuilder", lambda: object())
-    monkeypatch.setattr(cli, "build_graph", lambda **kwargs: FakeGraph())
-
     with pytest.raises(AppError) as raised:
         asyncio.run(
-            cli.run_diagnosis(
+            DiagnosisService(
+                Settings(artifact_root=tmp_path / "artifacts"),
+                adapter=object(),
+                diagnosis_model=object(),
+                context_builder=object(),
+                server_factory=lambda adapter: object(),
+                client_factory=FakeClient,
+                graph_factory=lambda **kwargs: FakeGraph(),
+            ).run(
                 pcap_path=str((tmp_path / "capture.pcapng").resolve()),
                 standard=1000,
                 actual=600,
                 target=Target.DOWNLOAD,
                 request_id="graph-error",
-                settings=Settings(artifact_root=tmp_path / "artifacts"),
             )
         )
 
@@ -651,7 +646,7 @@ def test_cli_real_agent_smoke_preserves_target_and_writes_evidence_report(
         assert configured.get_secret_value() == api_key
         return model
 
-    monkeypatch.setattr(cli, "DiagnosisModel", build_model)
+    monkeypatch.setattr(diagnosis_app, "DiagnosisModel", build_model)
     output = tmp_path / f"report-{expected}"
 
     result = runner.invoke(

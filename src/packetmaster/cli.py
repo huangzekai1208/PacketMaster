@@ -7,13 +7,17 @@ import builtins
 import json
 import re
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
 from packetmaster.analyzer.real import RealAnalyzerAdapter
+from packetmaster.application import (
+    DiagnosisOutcome,
+    DiagnosisProgress,
+    DiagnosisService,
+)
 from packetmaster.artifacts import ArtifactManager, create_request_id
 from packetmaster.chat import (
     ChatCommand,
@@ -24,15 +28,11 @@ from packetmaster.chat import (
 )
 from packetmaster.chat_graph import build_chat_graph
 from packetmaster.config import Settings
-from packetmaster.context import ContextBuilder, DiagnosisContext
 from packetmaster.domain import (
-    AnalyzeResponse,
     ChatSessionState,
-    DiagnosticReport,
     Target,
 )
 from packetmaster.errors import AppError
-from packetmaster.graph import build_graph
 from packetmaster.mcp.client import SpeedMCPClient
 from packetmaster.mcp.server import create_server
 from packetmaster.model import DiagnosisModel
@@ -96,14 +96,6 @@ def _localize_progress_message(message: str) -> str:
     return "分析处理中"
 
 
-@dataclass(frozen=True)
-class DiagnosisOutcome:
-    report: DiagnosticReport
-    error: AppError | None = None
-    analysis: AnalyzeResponse | None = None
-    context: DiagnosisContext | None = None
-
-
 def _normalize_capture_path(value: str) -> str:
     expanded = str(Path(value).expanduser())
     if is_absolute_path(expanded):
@@ -125,84 +117,18 @@ async def run_diagnosis(
     request_id: str,
     settings: Settings,
 ) -> DiagnosisOutcome:
-    adapter = RealAnalyzerAdapter(
-        artifact_root=settings.artifact_root,
-        pipeline_script=settings.speed_analyzer_script,
-        tshark_path=settings.tshark_path,
-        evidence_timeout_seconds=settings.evidence_timeout_seconds,
-    )
-    server = create_server(adapter)
+    def progress(event: DiagnosisProgress) -> None:
+        if event.message:
+            typer.echo(f"[进度] {_localize_progress_message(event.message)}")
 
-    def progress(value: float | None, message: str | None) -> None:
-        if message:
-            typer.echo(f"[进度] {_localize_progress_message(message)}")
-
-    async with SpeedMCPClient(server, progress_callback=progress) as client:
-        graph = build_graph(
-            mcp_client=client,
-            diagnosis_model=DiagnosisModel(settings=settings),
-            context_builder=ContextBuilder(),
-        )
-        result = await graph.ainvoke(
-            {
-                "request": {
-                    "request_id": request_id,
-                    "pcap_path": pcap_path,
-                    "target": target.value,
-                },
-                "standard_bandwidth_mbps": standard,
-                "actual_bandwidth_mbps": actual,
-            }
-        )
-    artifact_manager = ArtifactManager(
-        settings.artifact_root, settings.artifact_ttl_hours
+    return await DiagnosisService(settings).run(
+        pcap_path=pcap_path,
+        standard=standard,
+        actual=actual,
+        target=target,
+        request_id=request_id,
+        progress_handler=progress,
     )
-    trace_paths = artifact_manager.create(request_id)
-    for event in result.get("trace", []):
-        artifact_manager.append_trace(trace_paths, event)
-    report = DiagnosticReport.model_validate(result["report"])
-    raw_analysis = result.get("analysis")
-    analysis = (
-        AnalyzeResponse.model_validate(raw_analysis)
-        if raw_analysis is not None
-        else None
-    )
-    raw_context = result.get("context")
-    context = (
-        DiagnosisContext.model_validate(raw_context)
-        if raw_context is not None
-        else None
-    )
-    graph_error = result.get("error")
-    if graph_error is not None:
-        if not isinstance(graph_error, dict):
-            raise AppError(
-                code="INVALID_GRAPH_OUTPUT",
-                message="PacketMaster graph returned an invalid error",
-                recoverable=False,
-                suggested_action="Check the PacketMaster graph version.",
-            )
-        details = graph_error.get("details")
-        error = AppError(
-            code=str(graph_error.get("code", "DIAGNOSIS_FAILED")),
-            message=str(graph_error.get("message", "Diagnosis failed")),
-            recoverable=bool(graph_error.get("recoverable", False)),
-            suggested_action=str(
-                graph_error.get(
-                    "suggested_action", "Inspect local artifacts and retry."
-                )
-            ),
-            details=details if isinstance(details, dict) else {},
-        )
-        if result.get("analysis") is not None:
-            return DiagnosisOutcome(
-                report=report,
-                error=error,
-                analysis=analysis,
-                context=context,
-            )
-        raise error
-    return DiagnosisOutcome(report=report, analysis=analysis, context=context)
 
 
 @app.command()
