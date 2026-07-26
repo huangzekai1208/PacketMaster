@@ -8,7 +8,7 @@ from typing import Annotated, Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from packetmaster.domain import Target
+from packetmaster.domain import ChatEvidenceCitation, DiagnosticReport, Target
 
 PublicId = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[\w.-]+$")]
 
@@ -205,6 +205,63 @@ class SessionDetail(WebContract):
     session: SessionSummary
     messages: Page[WebMessage]
     parameters: DiagnosisParameters | None = None
+
+
+class CreateAnalysisRequest(WebContract):
+    session_id: PublicId
+
+
+class AnalysisDetail(WebContract):
+    analysis: AnalysisSummary
+    report_available: bool = False
+    recoverable: bool = False
+    suggested_action: str = Field(default="", max_length=1_000)
+
+
+class ReportResult(WebContract):
+    analysis_id: PublicId
+    report: DiagnosticReport
+
+
+class MetricSeries(WebContract):
+    tcp_summary: dict[str, Any] = Field(default_factory=dict)
+    coverage_summary: dict[str, Any] = Field(default_factory=dict)
+    intervals: list[dict[str, Any]] = Field(default_factory=list, max_length=5_000)
+    rtt_histogram: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    top_flows: list[dict[str, Any]] = Field(default_factory=list, max_length=256)
+    point_limit: int = Field(default=5_000, ge=1, le=5_000)
+    downsampled: bool = False
+
+
+class FlowSummary(WebContract):
+    flow_id: str = Field(min_length=1, max_length=512)
+    direction: Target
+    packet_count: int = Field(default=0, ge=0)
+    payload_bytes: int = Field(default=0, ge=0)
+    throughput_mbps: float = Field(default=0, ge=0)
+    duration_seconds: float = Field(default=0, ge=0)
+    retransmission_count: int = Field(default=0, ge=0)
+    duplicate_ack_count: int = Field(default=0, ge=0)
+    out_of_order_count: int = Field(default=0, ge=0)
+    zero_window_count: int = Field(default=0, ge=0)
+    window_full_count: int = Field(default=0, ge=0)
+    window_min: int | None = Field(default=None, ge=0)
+    window_max: int | None = Field(default=None, ge=0)
+
+
+class ChatRequest(WebContract):
+    question: str = Field(min_length=1, max_length=2_000)
+
+
+class ChatTurnResult(WebContract):
+    turn_id: PublicId
+    analysis_id: PublicId
+    question: str = Field(min_length=1, max_length=2_000)
+    answer: str = Field(min_length=1, max_length=8_000)
+    citations: list[ChatEvidenceCitation] = Field(default_factory=list, max_length=32)
+    limitations: list[str] = Field(default_factory=list, max_length=32)
+    suggestions: list[str] = Field(default_factory=list, max_length=32)
+    created_at: datetime
 
 
 def public_json(value: WebContract) -> dict[str, Any]:

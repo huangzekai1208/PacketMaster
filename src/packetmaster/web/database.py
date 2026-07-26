@@ -14,6 +14,7 @@ from pathlib import Path
 from packetmaster.domain import Target
 from packetmaster.errors import AppError
 from packetmaster.web.contracts import (
+    ChatTurnResult,
     MessageType,
     SessionSummary,
     TaskStatus,
@@ -472,6 +473,84 @@ class PendingIntentRepository:
             raise _session_not_found()
 
 
+class ChatTurnRepository:
+    def __init__(self, database: WebDatabase) -> None:
+        self.database = database
+
+    def append(
+        self,
+        *,
+        session_id: str,
+        analysis_id: str,
+        question: str,
+        answer: str,
+        citations: list[dict[str, object]],
+        limitations: list[str],
+        suggestions: list[str],
+        turn_id: str | None = None,
+    ) -> ChatTurnResult:
+        identifier = turn_id or uuid.uuid4().hex
+        current = _now()
+        with self.database.transaction(immediate=True) as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO chat_turns (
+                        turn_id, session_id, analysis_id, question, answer,
+                        citations_json, limitations_json, suggestions_json,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        identifier,
+                        session_id,
+                        analysis_id,
+                        question,
+                        answer,
+                        json.dumps(citations, ensure_ascii=False),
+                        json.dumps(limitations, ensure_ascii=False),
+                        json.dumps(suggestions, ensure_ascii=False),
+                        _timestamp(current),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise AppError(
+                    code="INVALID_CHAT_REFERENCE",
+                    message="问答关联的会话或任务不存在",
+                    recoverable=True,
+                    suggested_action="请刷新页面后重新选择分析任务。",
+                ) from exc
+        return ChatTurnResult(
+            turn_id=identifier,
+            analysis_id=analysis_id,
+            question=question,
+            answer=answer,
+            citations=citations,
+            limitations=limitations,
+            suggestions=suggestions,
+            created_at=current,
+        )
+
+    def list(
+        self, analysis_id: str, *, offset: int = 0, limit: int = 50
+    ) -> tuple[list[ChatTurnResult], int]:
+        with self.database.connect() as connection:
+            total = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM chat_turns WHERE analysis_id = ?",
+                    (analysis_id,),
+                ).fetchone()[0]
+            )
+            rows = connection.execute(
+                """
+                SELECT * FROM chat_turns WHERE analysis_id = ?
+                ORDER BY created_at, turn_id LIMIT ? OFFSET ?
+                """,
+                (analysis_id, limit, offset),
+            ).fetchall()
+        return [_chat_turn(row) for row in rows], total
+
+
 def _session(row: sqlite3.Row) -> SessionSummary:
     return SessionSummary(
         session_id=row["session_id"],
@@ -506,6 +585,19 @@ def _pending_intent(row: sqlite3.Row) -> PendingIntentRecord:
         ambiguities=list(json.loads(row["ambiguities_json"])),
         confirmed_analysis_id=row["confirmed_analysis_id"],
         updated_at=_datetime(row["updated_at"]),
+    )
+
+
+def _chat_turn(row: sqlite3.Row) -> ChatTurnResult:
+    return ChatTurnResult(
+        turn_id=row["turn_id"],
+        analysis_id=row["analysis_id"],
+        question=row["question"],
+        answer=row["answer"],
+        citations=json.loads(row["citations_json"]),
+        limitations=json.loads(row["limitations_json"]),
+        suggestions=json.loads(row["suggestions_json"]),
+        created_at=_datetime(row["created_at"]),
     )
 
 

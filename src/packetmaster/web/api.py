@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import shutil
 import uuid
 from importlib.metadata import PackageNotFoundError, version
@@ -10,25 +12,34 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.exceptions import HTTPException
 
 from packetmaster.config import Settings
+from packetmaster.domain import EvidenceRequest, EvidenceResponse, EvidenceType, Target
 from packetmaster.errors import AppError
 from packetmaster.model import DiagnosisModel
+from packetmaster.web.analysis import AnalysisReadService
 from packetmaster.web.captures import CaptureRegistry, CaptureRepository
+from packetmaster.web.chat_service import AnalysisChatService
 from packetmaster.web.contracts import (
+    AnalysisDetail,
     AnalysisSummary,
     ApiError,
     CaptureSummary,
+    ChatRequest,
+    ChatTurnResult,
     ConfirmAnalysisRequest,
     ConversationResult,
     CreateSessionRequest,
     DeleteResult,
     ErrorEnvelope,
+    FlowSummary,
     HealthStatus,
+    MetricSeries,
     Page,
     RegisterCaptureRequest,
+    ReportResult,
     SessionDetail,
     SessionSummary,
     SubmitMessageRequest,
@@ -36,6 +47,7 @@ from packetmaster.web.contracts import (
 )
 from packetmaster.web.conversation import WebConversationService
 from packetmaster.web.database import (
+    ChatTurnRepository,
     MessageRepository,
     PendingIntentRepository,
     SessionRepository,
@@ -75,6 +87,15 @@ def create_app(
         model=conversation_model or DiagnosisModel(settings=runtime),
     )
     app.state.conversation = conversation
+    tasks = AnalysisTaskRepository(database)
+    analysis_reads = AnalysisReadService(runtime, tasks)
+    analysis_chat = AnalysisChatService(
+        reads=analysis_reads,
+        turns=ChatTurnRepository(database),
+        model=conversation.model,
+    )
+    app.state.analysis_reads = analysis_reads
+    app.state.analysis_chat = analysis_chat
     allowed_hosts = {*_LOOPBACK_HOSTS, *( ["testserver"] if testing else [])}
 
     @app.middleware("http")
@@ -329,7 +350,194 @@ def create_app(
             request_id=request.state.request_id,
         )
 
+    @app.get(
+        "/api/analyses/{analysis_id}",
+        response_model=SuccessEnvelope[AnalysisDetail],
+        tags=["analyses"],
+    )
+    async def analysis_detail(
+        analysis_id: str, request: Request
+    ) -> SuccessEnvelope[AnalysisDetail]:
+        return SuccessEnvelope(
+            data=analysis_reads.detail(analysis_id),
+            request_id=request.state.request_id,
+        )
+
+    @app.post(
+        "/api/analyses/{analysis_id}/cancel",
+        response_model=SuccessEnvelope[AnalysisSummary],
+        tags=["analyses"],
+    )
+    async def cancel_analysis(
+        analysis_id: str, request: Request
+    ) -> SuccessEnvelope[AnalysisSummary]:
+        return SuccessEnvelope(
+            data=tasks.request_cancel(analysis_id),
+            request_id=request.state.request_id,
+        )
+
+    @app.post(
+        "/api/analyses/{analysis_id}/retry",
+        response_model=SuccessEnvelope[AnalysisSummary],
+        tags=["analyses"],
+    )
+    async def retry_analysis(
+        analysis_id: str, request: Request
+    ) -> SuccessEnvelope[AnalysisSummary]:
+        return SuccessEnvelope(
+            data=tasks.retry(analysis_id),
+            request_id=request.state.request_id,
+        )
+
+    @app.get(
+        "/api/analyses/{analysis_id}/report",
+        response_model=SuccessEnvelope[ReportResult],
+        tags=["reports"],
+    )
+    async def analysis_report(
+        analysis_id: str, request: Request
+    ) -> SuccessEnvelope[ReportResult]:
+        return SuccessEnvelope(
+            data=analysis_reads.report(analysis_id),
+            request_id=request.state.request_id,
+        )
+
+    @app.get(
+        "/api/analyses/{analysis_id}/metrics",
+        response_model=SuccessEnvelope[MetricSeries],
+        tags=["reports"],
+    )
+    async def analysis_metrics(
+        analysis_id: str, request: Request
+    ) -> SuccessEnvelope[MetricSeries]:
+        return SuccessEnvelope(
+            data=analysis_reads.metrics(analysis_id),
+            request_id=request.state.request_id,
+        )
+
+    @app.get(
+        "/api/analyses/{analysis_id}/flows",
+        response_model=SuccessEnvelope[Page[FlowSummary]],
+        tags=["reports"],
+    )
+    async def analysis_flows(
+        analysis_id: str,
+        request: Request,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=100),
+        direction: Target | None = None,
+        sort_by: str = "throughput_mbps",
+        descending: bool = True,
+    ) -> SuccessEnvelope[Page[FlowSummary]]:
+        return SuccessEnvelope(
+            data=analysis_reads.flows(
+                analysis_id,
+                offset=offset,
+                limit=limit,
+                direction=direction,
+                sort_by=sort_by,
+                descending=descending,
+            ),
+            request_id=request.state.request_id,
+        )
+
+    @app.get(
+        "/api/analyses/{analysis_id}/evidence",
+        response_model=SuccessEnvelope[EvidenceResponse],
+        tags=["evidence"],
+    )
+    async def analysis_evidence(
+        analysis_id: str,
+        request: Request,
+        evidence_type: EvidenceType = EvidenceType.SUMMARY,
+        flow_id: str | None = None,
+        time_start: float | None = Query(default=None, ge=0),
+        time_end: float | None = Query(default=None, ge=0),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> SuccessEnvelope[EvidenceResponse]:
+        result = await analysis_reads.evidence(
+            EvidenceRequest(
+                analysis_id=analysis_id,
+                evidence_type=evidence_type,
+                flow_id=flow_id,
+                time_start=time_start,
+                time_end=time_end,
+                offset=offset,
+                limit=limit,
+            )
+        )
+        return SuccessEnvelope(data=result, request_id=request.state.request_id)
+
+    @app.get("/api/analyses/{analysis_id}/events", tags=["events"])
+    async def analysis_events(
+        analysis_id: str,
+        request: Request,
+        after_event_id: int = Query(default=0, ge=0),
+    ) -> StreamingResponse:
+        analysis_reads.detail(analysis_id)
+        header = request.headers.get("last-event-id")
+        cursor = max(after_event_id, int(header) if header and header.isdigit() else 0)
+        return StreamingResponse(
+            _event_stream(request, tasks, analysis_id, cursor),
+            media_type="text/event-stream",
+            headers={"X-Accel-Buffering": "no"},
+        )
+
+    @app.post(
+        "/api/analyses/{analysis_id}/chat",
+        response_model=SuccessEnvelope[ChatTurnResult],
+        tags=["chat"],
+    )
+    async def analysis_question(
+        analysis_id: str, body: ChatRequest, request: Request
+    ) -> SuccessEnvelope[ChatTurnResult]:
+        return SuccessEnvelope(
+            data=await analysis_chat.ask(analysis_id, body.question),
+            request_id=request.state.request_id,
+        )
+
+    @app.get(
+        "/api/analyses/{analysis_id}/chat",
+        response_model=SuccessEnvelope[Page[ChatTurnResult]],
+        tags=["chat"],
+    )
+    async def analysis_chat_history(
+        analysis_id: str,
+        request: Request,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> SuccessEnvelope[Page[ChatTurnResult]]:
+        return SuccessEnvelope(
+            data=analysis_chat.history(analysis_id, offset=offset, limit=limit),
+            request_id=request.state.request_id,
+        )
+
     return app
+
+
+async def _event_stream(request, tasks, analysis_id: str, cursor: int):
+    terminal = {
+        "completed",
+        "partial",
+        "failed",
+        "cancelled",
+        "interrupted",
+    }
+    idle_ticks = 0
+    while not await request.is_disconnected():
+        events = tasks.events(analysis_id, after_event_id=cursor, limit=100)
+        for event in events:
+            cursor = event.event_id
+            payload = json.dumps(event.model_dump(mode="json"), ensure_ascii=False)
+            yield f"id: {cursor}\nevent: {event.event_type.value}\ndata: {payload}\n\n"
+        current = tasks.get(analysis_id)
+        if current is None or current.status.value in terminal:
+            return
+        idle_ticks += 1
+        if idle_ticks % 30 == 0:
+            yield ": heartbeat\n\n"
+        await asyncio.sleep(0.5)
 
 
 def _allowed_origin(value: str, *, testing: bool) -> bool:

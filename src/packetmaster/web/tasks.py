@@ -187,6 +187,19 @@ class AnalysisTaskRepository:
             ).fetchone()
         return _analysis(row) if row is not None else None
 
+    def private_details(self, analysis_id: str) -> dict[str, object] | None:
+        """Return backend-only task metadata for trusted application services."""
+
+        with self.database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT report_path, recoverable, suggested_action, error_message
+                FROM analyses WHERE analysis_id = ?
+                """,
+                (analysis_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
     def count_for_session(self, session_id: str) -> int:
         with self.database.connect() as connection:
             return int(

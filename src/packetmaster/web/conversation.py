@@ -387,6 +387,9 @@ def _redact(value: str) -> str:
     return _ABSOLUTE_PATH.sub("<本地路径已隐藏>", without_secrets)
 
 
+redact_message = _redact
+
+
 def _not_ready(message: str) -> AppError:
     return AppError(
         code="ANALYSIS_NOT_READY",
