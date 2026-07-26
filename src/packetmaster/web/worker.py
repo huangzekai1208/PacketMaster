@@ -35,15 +35,38 @@ class AnalysisWorker:
         task = self.repository.claim_next(self.worker_id)
         if task is None:
             return False
-        heartbeat = asyncio.create_task(self._heartbeat(task.analysis_id))
+        execution = asyncio.create_task(self._run_claimed(task))
         try:
-            await self._run_claimed(task)
-        finally:
-            heartbeat.cancel()
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
+            while not execution.done():
+                await asyncio.wait(
+                    {execution}, timeout=self.heartbeat_interval_seconds
+                )
+                if execution.done():
+                    break
+                self.repository.heartbeat(task.analysis_id, self.worker_id)
+                if self.repository.cancel_requested(task.analysis_id):
+                    execution.cancel()
+                    try:
+                        await execution
+                    except asyncio.CancelledError:
+                        current = self.repository.get(task.analysis_id)
+                        if current is not None and current.status not in {
+                            TaskStatus.COMPLETED,
+                            TaskStatus.PARTIAL,
+                            TaskStatus.FAILED,
+                            TaskStatus.CANCELLED,
+                            TaskStatus.INTERRUPTED,
+                        }:
+                            self.repository.transition(
+                                task.analysis_id,
+                                TaskStatus.CANCELLED,
+                                stage_message="任务已取消",
+                            )
+                    return True
+            await execution
+        except asyncio.CancelledError:
+            execution.cancel()
+            raise
         return True
 
     async def run_forever(
@@ -138,13 +161,6 @@ class AnalysisWorker:
                 recoverable=True,
                 suggested_action="请重试该分析任务。",
             )
-
-    async def _heartbeat(self, analysis_id: str) -> None:
-        while True:
-            await asyncio.sleep(self.heartbeat_interval_seconds)
-            if not self.repository.heartbeat(analysis_id, self.worker_id):
-                return
-
 
 def run_worker_process(
     database_path: str, settings: Settings, stop_event: Any

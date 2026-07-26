@@ -278,7 +278,7 @@ class AnalysisTaskRepository:
                 SELECT a.*, c.local_path
                 FROM analyses AS a
                 JOIN captures AS c ON c.capture_id = a.capture_id
-                WHERE a.status = ?
+                WHERE a.status = ? AND a.cancel_requested = 0
                 ORDER BY a.created_at, a.analysis_id
                 LIMIT 1
                 """,
@@ -349,6 +349,121 @@ class AnalysisTaskRepository:
                 ),
             )
         return cursor.rowcount > 0
+
+    def request_cancel(
+        self, analysis_id: str, *, now: datetime | None = None
+    ) -> AnalysisSummary:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        timestamp = current.isoformat()
+        with self.database.transaction(immediate=True) as connection:
+            row = connection.execute(
+                "SELECT * FROM analyses WHERE analysis_id = ?", (analysis_id,)
+            ).fetchone()
+            if row is None:
+                raise _task_not_found()
+            status = TaskStatus(row["status"])
+            if status in _TERMINAL_STATUSES:
+                return self._analysis_in_connection(connection, analysis_id)
+            if status is TaskStatus.QUEUED:
+                connection.execute(
+                    """
+                    UPDATE analyses
+                    SET status = ?, stage_message = ?, updated_at = ?,
+                        finished_at = ?, cancel_requested = 1
+                    WHERE analysis_id = ?
+                    """,
+                    (
+                        TaskStatus.CANCELLED.value,
+                        "任务已取消",
+                        timestamp,
+                        timestamp,
+                        analysis_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE sessions SET status = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (
+                        TaskStatus.CANCELLED.value,
+                        timestamp,
+                        row["session_id"],
+                    ),
+                )
+                _insert_event(
+                    connection,
+                    analysis_id=analysis_id,
+                    event_type=EventType.ANALYSIS_CANCELLED,
+                    status=TaskStatus.CANCELLED,
+                    now=current,
+                    stage_message="任务已取消",
+                )
+            elif not row["cancel_requested"]:
+                connection.execute(
+                    """
+                    UPDATE analyses
+                    SET cancel_requested = 1, stage_message = ?, updated_at = ?
+                    WHERE analysis_id = ?
+                    """,
+                    ("正在取消分析", timestamp, analysis_id),
+                )
+                _insert_event(
+                    connection,
+                    analysis_id=analysis_id,
+                    event_type=EventType.ANALYSIS_STATUS,
+                    status=status,
+                    now=current,
+                    stage_message="正在取消分析",
+                )
+            return self._analysis_in_connection(connection, analysis_id)
+
+    def cancel_requested(self, analysis_id: str) -> bool:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT cancel_requested FROM analyses WHERE analysis_id = ?",
+                (analysis_id,),
+            ).fetchone()
+        if row is None:
+            raise _task_not_found()
+        return bool(row["cancel_requested"])
+
+    def retry(
+        self,
+        analysis_id: str,
+        *,
+        new_analysis_id: str | None = None,
+        now: datetime | None = None,
+    ) -> AnalysisSummary:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM analyses WHERE analysis_id = ?", (analysis_id,)
+            ).fetchone()
+        if row is None:
+            raise _task_not_found()
+        status = TaskStatus(row["status"])
+        if status not in {
+            TaskStatus.PARTIAL,
+            TaskStatus.FAILED,
+            TaskStatus.CANCELLED,
+            TaskStatus.INTERRUPTED,
+        }:
+            raise AppError(
+                code="ANALYSIS_NOT_RETRYABLE",
+                message="当前分析任务不能重试",
+                recoverable=False,
+                suggested_action="仅可重试部分完成、失败、取消或中断的任务。",
+            )
+        return self.create_queued(
+            session_id=row["session_id"],
+            capture_id=row["capture_id"],
+            standard_bandwidth_mbps=row["standard_bandwidth_mbps"],
+            actual_bandwidth_mbps=row["actual_bandwidth_mbps"],
+            target=Target(row["target"]),
+            analysis_id=new_analysis_id,
+            retry_of_analysis_id=analysis_id,
+            now=now,
+        )
 
     def interrupt_stale(
         self,

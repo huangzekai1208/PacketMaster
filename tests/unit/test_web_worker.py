@@ -106,3 +106,55 @@ def test_stale_claimed_task_is_marked_interrupted(tmp_path: Path) -> None:
 
     assert interrupted == ["analysis-1"]
     assert repository.get("analysis-1").status is TaskStatus.INTERRUPTED
+
+
+def test_queued_cancellation_is_idempotent_and_worker_does_not_claim(
+    tmp_path: Path,
+) -> None:
+    repository = _task(tmp_path)
+
+    first = repository.request_cancel("analysis-1")
+    second = repository.request_cancel("analysis-1")
+    worker = AnalysisWorker(repository, lambda: object(), worker_id="worker-1")
+
+    assert first.status is TaskStatus.CANCELLED
+    assert second.status is TaskStatus.CANCELLED
+    assert asyncio.run(worker.run_once()) is False
+
+
+def test_worker_cancels_running_diagnosis(tmp_path: Path) -> None:
+    repository = _task(tmp_path)
+    started = asyncio.Event()
+
+    class Service:
+        async def run(self, **kwargs):
+            started.set()
+            await asyncio.Future()
+
+    worker = AnalysisWorker(
+        repository,
+        Service,
+        worker_id="worker-1",
+        heartbeat_interval_seconds=0.01,
+    )
+
+    async def scenario() -> None:
+        running = asyncio.create_task(worker.run_once())
+        await started.wait()
+        repository.request_cancel("analysis-1")
+        await running
+
+    asyncio.run(scenario())
+
+    assert repository.get("analysis-1").status is TaskStatus.CANCELLED
+
+
+def test_retry_creates_new_task_without_overwriting_original(tmp_path: Path) -> None:
+    repository = _task(tmp_path)
+    repository.request_cancel("analysis-1")
+
+    retry = repository.retry("analysis-1", new_analysis_id="analysis-2")
+
+    assert repository.get("analysis-1").status is TaskStatus.CANCELLED
+    assert retry.analysis_id == "analysis-2"
+    assert retry.status is TaskStatus.QUEUED
