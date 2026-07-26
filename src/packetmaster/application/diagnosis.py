@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from packetmaster.analyzer.real import RealAnalyzerAdapter
@@ -34,6 +35,7 @@ class DiagnosisOutcome:
     error: AppError | None = None
     analysis: AnalyzeResponse | None = None
     context: DiagnosisContext | None = None
+    report_path: Path | None = None
 
 
 class DiagnosisService:
@@ -132,6 +134,7 @@ class DiagnosisService:
             error=error,
             analysis=analysis,
             context=context,
+            report_path=paths.report_json,
         )
 
 

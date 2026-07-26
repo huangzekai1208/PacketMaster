@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 import uuid
-from datetime import UTC, datetime
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from packetmaster.domain import Target
 from packetmaster.errors import AppError
@@ -75,6 +77,17 @@ _TRANSITIONS = {
         TaskStatus.INTERRUPTED,
     },
 }
+
+
+@dataclass(frozen=True)
+class ClaimedAnalysis:
+    analysis_id: str
+    session_id: str
+    capture_id: str
+    pcap_path: Path
+    standard_bandwidth_mbps: float
+    actual_bandwidth_mbps: float
+    target: Target
 
 
 class AnalysisTaskRepository:
@@ -181,6 +194,10 @@ class AnalysisTaskRepository:
         *,
         stage_message: str = "",
         error_code: str | None = None,
+        error_message: str | None = None,
+        recoverable: bool = False,
+        suggested_action: str = "",
+        report_path: str | None = None,
         now: datetime | None = None,
     ) -> AnalysisSummary:
         current_time = (now or datetime.now(UTC)).astimezone(UTC)
@@ -213,7 +230,9 @@ class AnalysisTaskRepository:
                 """
                 UPDATE analyses
                 SET status = ?, stage_message = ?, updated_at = ?,
-                    started_at = ?, finished_at = ?, error_code = ?
+                    started_at = ?, finished_at = ?, error_code = ?,
+                    error_message = ?, recoverable = ?, suggested_action = ?,
+                    report_path = COALESCE(?, report_path)
                 WHERE analysis_id = ?
                 """,
                 (
@@ -223,6 +242,10 @@ class AnalysisTaskRepository:
                     started_at,
                     finished_at,
                     error_code,
+                    error_message,
+                    int(recoverable),
+                    suggested_action,
+                    report_path,
                     analysis_id,
                 ),
             )
@@ -243,6 +266,155 @@ class AnalysisTaskRepository:
                 error_code=error_code,
             )
             return self._analysis_in_connection(connection, analysis_id)
+
+    def claim_next(
+        self, worker_id: str, *, now: datetime | None = None
+    ) -> ClaimedAnalysis | None:
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        timestamp = current.isoformat()
+        with self.database.transaction(immediate=True) as connection:
+            row = connection.execute(
+                """
+                SELECT a.*, c.local_path
+                FROM analyses AS a
+                JOIN captures AS c ON c.capture_id = a.capture_id
+                WHERE a.status = ?
+                ORDER BY a.created_at, a.analysis_id
+                LIMIT 1
+                """,
+                (TaskStatus.QUEUED.value,),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                """
+                UPDATE analyses
+                SET status = ?, stage_message = ?, updated_at = ?,
+                    started_at = ?, worker_heartbeat_at = ?, worker_id = ?
+                WHERE analysis_id = ? AND status = ?
+                """,
+                (
+                    TaskStatus.VALIDATING.value,
+                    "正在校验分析任务",
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                    worker_id,
+                    row["analysis_id"],
+                    TaskStatus.QUEUED.value,
+                ),
+            )
+            connection.execute(
+                """
+                UPDATE sessions SET status = ?, updated_at = ?
+                WHERE session_id = ?
+                """,
+                (TaskStatus.VALIDATING.value, timestamp, row["session_id"]),
+            )
+            _insert_event(
+                connection,
+                analysis_id=row["analysis_id"],
+                event_type=EventType.ANALYSIS_STATUS,
+                status=TaskStatus.VALIDATING,
+                now=current,
+                stage_message="正在校验分析任务",
+            )
+            return ClaimedAnalysis(
+                analysis_id=row["analysis_id"],
+                session_id=row["session_id"],
+                capture_id=row["capture_id"],
+                pcap_path=Path(row["local_path"]),
+                standard_bandwidth_mbps=row["standard_bandwidth_mbps"],
+                actual_bandwidth_mbps=row["actual_bandwidth_mbps"],
+                target=Target(row["target"]),
+            )
+
+    def heartbeat(
+        self, analysis_id: str, worker_id: str, *, now: datetime | None = None
+    ) -> bool:
+        timestamp = (now or datetime.now(UTC)).astimezone(UTC).isoformat()
+        with self.database.transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE analyses SET worker_heartbeat_at = ?, updated_at = ?
+                WHERE analysis_id = ? AND worker_id = ?
+                    AND status IN ({_placeholders(_ACTIVE_STATUSES)})
+                """,
+                (
+                    timestamp,
+                    timestamp,
+                    analysis_id,
+                    worker_id,
+                    *(status.value for status in _ACTIVE_STATUSES),
+                ),
+            )
+        return cursor.rowcount > 0
+
+    def interrupt_stale(
+        self,
+        *,
+        heartbeat_timeout: timedelta,
+        now: datetime | None = None,
+    ) -> list[str]:
+        if heartbeat_timeout.total_seconds() <= 0:
+            raise ValueError("heartbeat timeout must be positive")
+        current = (now or datetime.now(UTC)).astimezone(UTC)
+        cutoff = (current - heartbeat_timeout).isoformat()
+        interrupted: list[str] = []
+        with self.database.transaction(immediate=True) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT analysis_id, session_id FROM analyses
+                WHERE status IN ({_placeholders(_ACTIVE_STATUSES)})
+                    AND worker_id IS NOT NULL
+                    AND worker_heartbeat_at < ?
+                ORDER BY analysis_id
+                """,
+                (*(status.value for status in _ACTIVE_STATUSES), cutoff),
+            ).fetchall()
+            for row in rows:
+                analysis_id = row["analysis_id"]
+                connection.execute(
+                    """
+                    UPDATE analyses
+                    SET status = ?, stage_message = ?, updated_at = ?,
+                        finished_at = ?, error_code = ?, error_message = ?,
+                        recoverable = 1, suggested_action = ?
+                    WHERE analysis_id = ?
+                    """,
+                    (
+                        TaskStatus.INTERRUPTED.value,
+                        "后台分析进程已中断",
+                        current.isoformat(),
+                        current.isoformat(),
+                        "WORKER_INTERRUPTED",
+                        "后台分析进程失去心跳",
+                        "请重试该分析任务。",
+                        analysis_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE sessions SET status = ?, updated_at = ?
+                    WHERE session_id = ?
+                    """,
+                    (
+                        TaskStatus.INTERRUPTED.value,
+                        current.isoformat(),
+                        row["session_id"],
+                    ),
+                )
+                _insert_event(
+                    connection,
+                    analysis_id=analysis_id,
+                    event_type=EventType.ANALYSIS_STATUS,
+                    status=TaskStatus.INTERRUPTED,
+                    now=current,
+                    stage_message="后台分析进程已中断",
+                    error_code="WORKER_INTERRUPTED",
+                )
+                interrupted.append(analysis_id)
+        return interrupted
 
     def update_progress(
         self,

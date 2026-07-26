@@ -16,7 +16,7 @@ from packetmaster.web.contracts import (
     WebMessage,
 )
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _MIGRATIONS = {
     1: """
         CREATE TABLE sessions (
@@ -121,6 +121,11 @@ _MIGRATIONS = {
     """,
     2: """
         CREATE UNIQUE INDEX captures_local_path_idx ON captures(local_path);
+    """,
+    3: """
+        ALTER TABLE analyses ADD COLUMN worker_id TEXT;
+        CREATE INDEX analyses_worker_idx
+            ON analyses(worker_id, status, worker_heartbeat_at);
     """,
 }
 
