@@ -58,8 +58,12 @@ def test_wheel_install_contains_default_speed_analyze_runtime(tmp_path: Path) ->
             "-c",
             "from pathlib import Path; "
             "from packetmaster.analyzer.real import RealAnalyzerAdapter; "
+            "from packetmaster.model import DiagnosisModel; "
+            "from packetmaster.web.runtime import static_directory; "
             "adapter = RealAnalyzerAdapter(artifact_root=Path('artifacts')); "
             "assert adapter.pipeline_script.is_file(), adapter.pipeline_script; "
+            "assert DiagnosisModel._prompt('general_chat.md'); "
+            "assert (static_directory() / 'index.html').is_file(); "
             "print(adapter.pipeline_script)",
         ],
         cwd=outside_repository,

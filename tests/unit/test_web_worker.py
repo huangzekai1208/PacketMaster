@@ -1,4 +1,5 @@
 import asyncio
+import signal
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from packetmaster.web.captures import CaptureRegistry, CaptureRepository
 from packetmaster.web.contracts import TaskStatus
 from packetmaster.web.database import SessionRepository, WebDatabase
 from packetmaster.web.tasks import AnalysisTaskRepository
-from packetmaster.web.worker import AnalysisWorker
+from packetmaster.web.worker import AnalysisWorker, _configure_worker_signal_handling
 
 
 def _report() -> DiagnosticReport:
@@ -158,3 +159,15 @@ def test_retry_creates_new_task_without_overwriting_original(tmp_path: Path) -> 
     assert repository.get("analysis-1").status is TaskStatus.CANCELLED
     assert retry.analysis_id == "analysis-2"
     assert retry.status is TaskStatus.QUEUED
+
+
+def test_worker_ignores_terminal_interrupt_owned_by_parent(monkeypatch) -> None:
+    configured = []
+    monkeypatch.setattr(
+        "packetmaster.web.worker.signal.signal",
+        lambda interrupt, handler: configured.append((interrupt, handler)),
+    )
+
+    _configure_worker_signal_handling()
+
+    assert configured == [(signal.SIGINT, signal.SIG_IGN)]

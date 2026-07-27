@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException
 
 from packetmaster.config import Settings
@@ -63,6 +64,7 @@ def create_app(
     *,
     testing: bool = False,
     conversation_model=None,
+    static_directory: Path | None = None,
 ) -> FastAPI:
     runtime = settings or Settings.load()
     database = WebDatabase(runtime.web_database_path)
@@ -512,6 +514,20 @@ def create_app(
             data=analysis_chat.history(analysis_id, offset=offset, limit=limit),
             request_id=request.state.request_id,
         )
+
+    @app.api_route(
+        "/api/{unknown_path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        include_in_schema=False,
+    )
+    async def unknown_api(unknown_path: str) -> None:
+        del unknown_path
+        raise HTTPException(status_code=404)
+
+    if not testing or static_directory is not None:
+        static_root = static_directory or Path(__file__).with_name("static")
+        if static_root.joinpath("index.html").is_file():
+            app.mount("/", StaticFiles(directory=static_root, html=True), name="webui")
 
     return app
 

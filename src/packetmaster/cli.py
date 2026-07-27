@@ -38,6 +38,7 @@ from packetmaster.mcp.server import create_server
 from packetmaster.model import DiagnosisModel
 from packetmaster.platform import is_absolute_path
 from packetmaster.report import render_chat_report, render_terminal, write_report
+from packetmaster.web.runtime import run_web
 
 app = typer.Typer(help="PacketMaster TCP 测速不达标诊断")
 
@@ -188,6 +189,26 @@ def diagnose(
         )
         typer.echo(json.dumps(error.to_dict(), ensure_ascii=False), err=True)
         raise typer.Exit(code=1) from exc
+
+
+@app.command(name="web")
+def web_command(
+    no_browser: Annotated[
+        bool, typer.Option("--no-browser", help="启动后不自动打开浏览器")
+    ] = False,
+) -> None:
+    """启动本机 Web 对话诊断工作台。"""
+
+    try:
+        settings = Settings.load()
+        run_web(
+            settings,
+            open_browser=not no_browser,
+            announce=lambda url: typer.echo(f"PacketMaster Web 已启动：{url}"),
+        )
+    except AppError as exc:
+        typer.echo(json.dumps(exc.to_dict(), ensure_ascii=False), err=True)
+        raise typer.Exit(code=2) from exc
 
 
 async def _answer_chat_question(

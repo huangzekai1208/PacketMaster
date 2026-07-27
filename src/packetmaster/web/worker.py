@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 import uuid
 from collections.abc import Callable
 from datetime import timedelta
@@ -162,11 +163,17 @@ class AnalysisWorker:
                 suggested_action="请重试该分析任务。",
             )
 
+
+def _configure_worker_signal_handling() -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+
+
 def run_worker_process(
     database_path: str, settings: Settings, stop_event: Any
 ) -> None:
     """Top-level Windows-spawn-compatible worker process target."""
 
+    _configure_worker_signal_handling()
     database = WebDatabase(Path(database_path))
     database.initialize()
     repository = AnalysisTaskRepository(database)

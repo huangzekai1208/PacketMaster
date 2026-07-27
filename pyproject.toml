@@ -17,6 +17,7 @@ dependencies = [
     "pydantic-settings>=2,<3",
     "scapy>=2",
     "typer>=0.12",
+    "uvicorn>=0.30,<1",
 ]
 
 [project.scripts]
@@ -50,7 +51,7 @@ select = ["E", "F", "I", "UP"]
 where = ["src"]
 
 [tool.setuptools.package-data]
-packetmaster = ["prompts/*.md"]
+packetmaster = ["prompts/*.md", "web/static/**/*"]
 
 [tool.setuptools.data-files]
 "share/packetmaster/speed-analyze/scripts" = [
