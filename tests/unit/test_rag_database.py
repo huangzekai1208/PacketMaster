@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -225,3 +226,70 @@ def test_database_does_not_define_capture_or_secret_columns(tmp_path: Path) -> N
     assert "payload" not in definitions
     assert "api_key" not in definitions
     assert "absolute_path" not in definitions
+
+
+def test_locked_database_returns_stable_recoverable_error(tmp_path: Path) -> None:
+    path = tmp_path / "knowledge.sqlite"
+    database = KnowledgeDatabase(path, timeout_seconds=0.01)
+    database.initialize()
+    locker = sqlite3.connect(path, isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(AppError) as raised:
+            with database.transaction(immediate=True):
+                pass
+    finally:
+        locker.rollback()
+        locker.close()
+
+    assert raised.value.code == "RAG_DATABASE_LOCKED"
+    assert raised.value.recoverable is True
+
+
+def test_active_gate_cannot_be_set_by_report_without_fifty_cases(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteKnowledgeStore(_database(tmp_path))
+
+    class IncompleteReport:
+        production_ready = True
+        case_count = 49
+
+        @staticmethod
+        def model_dump(mode="json"):
+            return {"production_ready": True, "case_count": 49}
+
+    store.record_evaluation(IncompleteReport())
+
+    assert store.active_gate_passed() is False
+
+
+def test_publish_rejects_more_than_twenty_five_thousand_chunks(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path)
+    store = SQLiteKnowledgeStore(database)
+    document, version, chunks, case = _draft_models()
+    store.save_draft(document, version, chunks[:1], case_profile=case)
+    with database.transaction(immediate=True) as connection:
+        connection.execute(
+            """
+            WITH RECURSIVE sequence(value) AS (
+                VALUES(1) UNION ALL SELECT value + 1 FROM sequence
+                WHERE value < 25000
+            )
+            INSERT INTO knowledge_chunks (
+                chunk_id, knowledge_id, version_id, chunk_index,
+                heading_path_json, source_location, content, content_hash, status
+            )
+            SELECT 'case.window.001:v1:bulk-' || value, ?, ?, value,
+                   '[]', '', '窗口容量知识 ' || value, ?, 'draft'
+            FROM sequence
+            """,
+            (document.knowledge_id, version.version_id, "d" * 64),
+        )
+
+    with pytest.raises(AppError) as raised:
+        store.publish_version(version.version_id, approved_by="reviewer")
+
+    assert raised.value.code == "RAG_CAPACITY_EXCEEDED"

@@ -148,6 +148,7 @@ class EmbeddingIndexer:
         )
         pending = [chunk for chunk in chunks if chunk.chunk_id not in indexed]
         completed = 0
+        staged: list[StoredEmbedding] = []
         try:
             for start in range(0, len(pending), self.batch_size):
                 batch = pending[start : start + self.batch_size]
@@ -169,8 +170,13 @@ class EmbeddingIndexer:
                             content_hash=chunk.content_hash,
                         )
                     )
-                self.store.save_embeddings(version_id, records)
+                if force:
+                    staged.extend(records)
+                else:
+                    self.store.save_embeddings(version_id, records)
                 completed += len(records)
+            if force and staged:
+                self.store.save_embeddings(version_id, staged)
         except AppError:
             raise
         except (TypeError, ValueError, OverflowError) as exc:

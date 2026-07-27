@@ -41,6 +41,7 @@ def test_active_mode_is_allowed_after_recorded_gate(tmp_path: Path) -> None:
 
     class PassedReport:
         production_ready = True
+        case_count = 50
 
         @staticmethod
         def model_dump(mode="json"):
@@ -58,3 +59,21 @@ def test_active_mode_is_allowed_after_recorded_gate(tmp_path: Path) -> None:
     assert runtime is not None
     assert runtime.mode is RagMode.ACTIVE
     assert runtime.degradation_reason is None
+
+
+def test_corrupt_database_degrades_runtime_without_blocking_startup(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "knowledge.sqlite"
+    path.write_bytes(b"not-a-sqlite-database")
+    runtime = build_rag_runtime(
+        Settings(
+            rag_enabled=True,
+            rag_mode="active",
+            knowledge_database_path=path,
+        )
+    )
+
+    assert runtime is not None
+    assert runtime.mode is RagMode.SHADOW
+    assert runtime.degradation_reason == "RAG_DATABASE_UNAVAILABLE"

@@ -23,6 +23,7 @@ from packetmaster.rag.contracts import (
 )
 
 _SCHEMA_VERSION = 1
+MAX_APPROVED_CHUNKS = 25_000
 _MIGRATION_1 = """
 CREATE TABLE knowledge_documents (
     knowledge_id TEXT PRIMARY KEY,
@@ -207,7 +208,9 @@ class KnowledgeDatabase:
         )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
+        connection.execute(
+            f"PRAGMA busy_timeout = {max(1, int(self.timeout_seconds * 1000))}"
+        )
         connection.execute("PRAGMA journal_mode = WAL")
         try:
             yield connection
@@ -216,15 +219,25 @@ class KnowledgeDatabase:
 
     @contextmanager
     def transaction(self, *, immediate: bool = False) -> Iterator[sqlite3.Connection]:
-        with self.connect() as connection:
-            connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
-            try:
-                yield connection
-            except BaseException:
-                connection.rollback()
+        try:
+            with self.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+                try:
+                    yield connection
+                except BaseException:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+        except sqlite3.OperationalError as exc:
+            if "locked" not in str(exc).casefold():
                 raise
-            else:
-                connection.commit()
+            raise AppError(
+                code="RAG_DATABASE_LOCKED",
+                message="知识数据库正被其他写操作占用",
+                recoverable=True,
+                suggested_action="请稍后重试，或检查是否有未结束的知识管理命令。",
+            ) from exc
 
 
 class SQLiteKnowledgeStore:
@@ -443,6 +456,29 @@ class SQLiteKnowledgeStore:
                     recoverable=True,
                     suggested_action="请创建新版本后重新审核。",
                 )
+            knowledge_id = str(version["knowledge_id"])
+            other_approved = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM knowledge_chunks
+                    WHERE status = ? AND knowledge_id != ?
+                    """,
+                    (KnowledgeStatus.APPROVED.value, knowledge_id),
+                ).fetchone()[0]
+            )
+            version_chunks = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM knowledge_chunks WHERE version_id = ?",
+                    (version_id,),
+                ).fetchone()[0]
+            )
+            if other_approved + version_chunks > MAX_APPROVED_CHUNKS:
+                raise AppError(
+                    code="RAG_CAPACITY_EXCEEDED",
+                    message="正式知识切片已超过本地 RAG 容量上限",
+                    recoverable=True,
+                    suggested_action="请停用冗余知识，或评估迁移到 Qdrant Server。",
+                )
             incomplete = connection.execute(
                 """
                 SELECT c.chunk_id
@@ -461,7 +497,6 @@ class SQLiteKnowledgeStore:
                     recoverable=True,
                     suggested_action="请重新生成该版本的完整向量索引。",
                 )
-            knowledge_id = str(version["knowledge_id"])
             current = connection.execute(
                 "SELECT current_version_id FROM knowledge_documents "
                 "WHERE knowledge_id = ?",
@@ -670,7 +705,10 @@ class SQLiteKnowledgeStore:
 
     def record_evaluation(self, report: object) -> None:
         payload = _json(report)
-        production_ready = bool(getattr(report, "production_ready", False))
+        production_ready = bool(
+            getattr(report, "production_ready", False)
+            and int(getattr(report, "case_count", 0)) >= 50
+        )
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
                 """

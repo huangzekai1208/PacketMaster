@@ -32,6 +32,25 @@ def test_health_uses_public_configuration_flags_and_security_headers(
     assert response.headers["x-frame-options"] == "DENY"
 
 
+def test_corrupt_rag_database_does_not_block_web_startup(tmp_path: Path) -> None:
+    knowledge_path = tmp_path / "knowledge.sqlite"
+    knowledge_path.write_bytes(b"corrupt knowledge database")
+    settings = Settings(
+        web_database_path=tmp_path / "web.sqlite",
+        knowledge_database_path=knowledge_path,
+        rag_enabled=True,
+        rag_mode="shadow",
+        tshark_path="definitely-not-installed-tshark",
+        web_allowed_capture_roots=[tmp_path],
+    )
+
+    with TestClient(create_app(settings, testing=True)) as client:
+        response = client.get("/api/health")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "ok"
+
+
 def test_non_local_host_and_origin_are_rejected(tmp_path: Path) -> None:
     client = _client(tmp_path)
 

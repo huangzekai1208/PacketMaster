@@ -36,6 +36,26 @@ _IPV4 = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])")
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _CUSTOMER = re.compile(r"\b[A-Z0-9][A-Z0-9_-]{2,}-(?:CUSTOMER|CLIENT)\b")
 _WORK_ORDER = re.compile(r"\b(?:INC|WO|TICKET)[-_]?\d{4,}\b", re.IGNORECASE)
+_SECRET = re.compile(
+    r"(?i)(?:\b(?:api[_-]?key|authorization|token|password|secret)\s*[:=]\s*"
+    r"|\bsk-)[^\s，。；,;]+"
+)
+_LOCAL_PATH = re.compile(
+    r"(?:[A-Za-z]:[\\/][^\s，。；,;]+|"
+    r"/(?:Users|home|private|tmp|var)/[^\s，。；,;]+)"
+)
+_DOMAIN = re.compile(
+    r"(?<![@\w])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z]{2,}(?![\w-])"
+)
+_ACCOUNT = re.compile(
+    r"(?i)\b(?:account|username|user|账号|用户)\s*[:=：]\s*[^\s，。；,;]+"
+)
+_SENSITIVE_KEY = re.compile(
+    r"(?i)(?:api[_-]?key|authorization|token|password|secret|payload|"
+    r"raw[_-]?packet|pcap[_-]?path|absolute[_-]?path|log[_-]?path|"
+    r"account|username|customer|client)"
+)
 
 
 def _digest(value: str) -> str:
@@ -48,8 +68,12 @@ def _placeholder(kind: str, value: str) -> str:
 
 def redact_text(value: str) -> str:
     replacements = (
+        (_SECRET, "SECRET"),
+        (_LOCAL_PATH, "PATH"),
+        (_ACCOUNT, "ACCOUNT"),
         (_IPV4, "IP"),
         (_EMAIL, "EMAIL"),
+        (_DOMAIN, "DOMAIN"),
         (_CUSTOMER, "CUSTOMER"),
         (_WORK_ORDER, "WORK_ORDER"),
     )
@@ -65,7 +89,11 @@ def _redact_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_redact_value(item) for item in value]
     if isinstance(value, dict):
-        return {str(key): _redact_value(item) for key, item in value.items()}
+        return {
+            str(key): _redact_value(item)
+            for key, item in value.items()
+            if not _SENSITIVE_KEY.search(str(key))
+        }
     return value
 
 

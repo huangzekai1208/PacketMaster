@@ -71,6 +71,56 @@ def test_prompt_injection_is_flagged_and_blocks_clean_review_state(
     assert preview.requires_risk_acknowledgement is True
 
 
+def test_import_redacts_secrets_paths_domains_and_accounts(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "sensitive.txt"
+    source.write_text(
+        "api_key=sk-private-secret 用户:alice 路径 "
+        "C:\\captures\\customer.pcapng，访问 internal.example.com。",
+        encoding="utf-8",
+    )
+
+    preview = KnowledgeImporter().preview(source, _metadata())
+    serialized = preview.model_dump_json()
+
+    assert "sk-private-secret" not in serialized
+    assert "alice" not in serialized
+    assert "customer.pcapng" not in serialized
+    assert "internal.example.com" not in serialized
+    assert "<SECRET:" in serialized
+    assert "<PATH:" in serialized
+
+
+def test_json_sensitive_fields_are_replaced_before_case_chunking(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "sensitive-case.json"
+    source.write_text(
+        json.dumps(
+            {
+                "direction": "download",
+                "standard_bandwidth_mbps": 1000,
+                "actual_bandwidth_mbps": 20,
+                "achievement_ratio_pct": 2,
+                "confirmed_primary_cause": "接收端处理不足",
+                "resolution": "提升处理能力",
+                "api_key": "sk-case-secret",
+                "payload": "raw packet bytes",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    preview = KnowledgeImporter().preview(
+        source, _metadata(knowledge_type="case")
+    )
+    serialized = preview.model_dump_json()
+
+    assert "sk-case-secret" not in serialized
+    assert "raw packet bytes" not in serialized
+
+
 def test_json_case_builds_structured_case_profile(tmp_path: Path) -> None:
     source = tmp_path / "case.json"
     source.write_text(

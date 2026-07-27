@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import math
 from pathlib import Path
 
@@ -7,10 +8,15 @@ import pytest
 
 from packetmaster.errors import AppError
 from packetmaster.rag.contracts import KnowledgeQuery
-from packetmaster.rag.database import KnowledgeDatabase, SQLiteKnowledgeStore
+from packetmaster.rag.database import (
+    KnowledgeDatabase,
+    SQLiteKnowledgeStore,
+    StoredEmbedding,
+)
 from packetmaster.rag.embedding import (
     EmbeddingIndexer,
     LocalEmbeddingProvider,
+    encode_vector,
     normalize_vector,
 )
 from tests.unit.test_rag_database import _draft_models
@@ -101,6 +107,23 @@ def test_vector_normalization_rejects_empty_zero_and_non_finite_values() -> None
             normalize_vector(vector, expected_dimension=2)
 
 
+def test_missing_optional_embedding_dependency_has_stable_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import = builtins.__import__
+
+    def missing(name, *args, **kwargs):
+        if name == "sentence_transformers":
+            raise ImportError("not installed")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing)
+
+    with pytest.raises(AppError) as raised:
+        LocalEmbeddingProvider(dimension=2)._load()
+    assert raised.value.code == "RAG_DEPENDENCY_MISSING"
+
+
 @pytest.mark.asyncio
 async def test_local_e5_provider_adds_query_and_passage_prefixes(
     monkeypatch: pytest.MonkeyPatch,
@@ -130,3 +153,104 @@ async def test_vector_search_rejects_dimension_mismatch(tmp_path: Path) -> None:
             limit=5,
         )
     assert raised.value.code == "INVALID_QUERY_VECTOR"
+
+
+@pytest.mark.asyncio
+async def test_independent_store_refreshes_vector_cache_after_generation_change(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    document, version, chunks, case = _draft_models()
+    store.save_draft(document, version, chunks, case_profile=case)
+    await EmbeddingIndexer(store, FakeEmbeddingProvider()).index_version(
+        version.version_id
+    )
+    store.publish_version(version.version_id, approved_by="reviewer")
+    reader = SQLiteKnowledgeStore(
+        store.database,
+        embedding_model="fake-multilingual-e5",
+        embedding_dimension=2,
+    )
+    query = KnowledgeQuery(query_id="query-1", query_text="零窗口")
+
+    first = await reader.vector_search(query, [1.0, 0.0], limit=2)
+    store.save_embeddings(
+        version.version_id,
+        [
+            StoredEmbedding(
+                chunk_id=chunks[0].chunk_id,
+                model_name="fake-multilingual-e5",
+                dimension=2,
+                vector=encode_vector([0.0, 1.0]),
+                content_hash=chunks[0].content_hash,
+            ),
+            StoredEmbedding(
+                chunk_id=chunks[1].chunk_id,
+                model_name="fake-multilingual-e5",
+                dimension=2,
+                vector=encode_vector([1.0, 0.0]),
+                content_hash=chunks[1].content_hash,
+            ),
+        ],
+    )
+    refreshed = await reader.vector_search(query, [1.0, 0.0], limit=2)
+
+    assert first[0].chunk_id == chunks[0].chunk_id
+    assert refreshed[0].chunk_id == chunks[1].chunk_id
+
+
+@pytest.mark.asyncio
+async def test_failed_force_rebuild_preserves_previous_complete_index(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    document, version, chunks, case = _draft_models()
+    store.save_draft(document, version, chunks, case_profile=case)
+    provider = FakeEmbeddingProvider()
+    await EmbeddingIndexer(store, provider, batch_size=1).index_version(
+        version.version_id
+    )
+    before = store.indexed_chunk_ids(
+        version.version_id,
+        model_name=provider.model_name,
+        dimension=provider.dimension,
+    )
+    with store.database.connect() as connection:
+        vectors_before = {
+            row["chunk_id"]: bytes(row["vector"])
+            for row in connection.execute(
+                "SELECT chunk_id, vector FROM knowledge_embeddings"
+            )
+        }
+
+    class FailingRebuildProvider(FakeEmbeddingProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def embed_documents(self, texts):
+            self.calls += 1
+            if self.calls == 2:
+                raise ValueError("forced rebuild failed")
+            return [[0.0, 1.0] for _ in texts]
+
+    with pytest.raises(AppError) as raised:
+        await EmbeddingIndexer(
+            store, FailingRebuildProvider(), batch_size=1
+        ).index_version(version.version_id, force=True)
+
+    after = store.indexed_chunk_ids(
+        version.version_id,
+        model_name=provider.model_name,
+        dimension=provider.dimension,
+    )
+    with store.database.connect() as connection:
+        vectors_after = {
+            row["chunk_id"]: bytes(row["vector"])
+            for row in connection.execute(
+                "SELECT chunk_id, vector FROM knowledge_embeddings"
+            )
+        }
+    assert raised.value.code == "INVALID_EMBEDDING_OUTPUT"
+    assert after == before == {chunk.chunk_id for chunk in chunks}
+    assert vectors_after == vectors_before
