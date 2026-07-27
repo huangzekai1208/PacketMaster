@@ -8,6 +8,8 @@ from typing import Literal
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from packetmaster.rag.contracts import RagMode
+
 try:
     from packetmaster import config_local as _local_config
 except ModuleNotFoundError as exc:
@@ -52,6 +54,30 @@ class Settings(BaseSettings):
     )
     web_host: Literal["127.0.0.1"] = "127.0.0.1"
     web_port: int = Field(default=8765, ge=1024, le=65535)
+    rag_enabled: bool = False
+    rag_mode: RagMode = RagMode.SHADOW
+    knowledge_database_path: Path = Field(
+        default=Path("artifacts/knowledge/packetmaster-knowledge.sqlite"),
+        exclude=True,
+        repr=False,
+    )
+    embedding_provider: Literal["local"] = "local"
+    embedding_model: str = Field(
+        default="intfloat/multilingual-e5-small", min_length=1, max_length=256
+    )
+    embedding_model_path: Path | None = Field(
+        default=None, exclude=True, repr=False
+    )
+    rag_keyword_top_k: int = Field(default=20, ge=1, le=100)
+    rag_vector_top_k: int = Field(default=20, ge=1, le=100)
+    rag_final_top_k: int = Field(default=8, ge=1, le=8)
+    rag_max_context_bytes: int = Field(default=24_576, ge=1_024, le=24_576)
+    rag_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    rag_max_chunks: int = Field(default=25_000, ge=1, le=25_000)
+
+    @property
+    def effective_rag_mode(self) -> RagMode:
+        return self.rag_mode if self.rag_enabled else RagMode.OFF
 
     @classmethod
     def load(cls) -> Settings:
