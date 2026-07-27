@@ -8,7 +8,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from packetmaster.domain import Target
+from packetmaster.domain import HypothesisBatch, Target
 from packetmaster.platform import is_absolute_path
 
 
@@ -273,4 +273,17 @@ class KnowledgeCitation(RagContract):
     def reject_local_source_path(cls, value: str) -> str:
         if value and is_absolute_path(value):
             raise ValueError("source_location must not contain a local absolute path")
+        return value
+
+
+class KnowledgeAugmentation(RagContract):
+    hypotheses: HypothesisBatch
+    citations: list[KnowledgeCitation] = Field(default_factory=list, max_length=32)
+    limitations: list[str] = Field(default_factory=list, max_length=32)
+
+    @field_validator("limitations")
+    @classmethod
+    def bound_limitations(cls, value: list[str]) -> list[str]:
+        if any(not item or len(item) > 1_000 for item in value):
+            raise ValueError("limitations must contain 1 to 1000 characters")
         return value

@@ -232,6 +232,12 @@ class DiagnosticReport(ContractModel):
     limitations: list[str] = Field(default_factory=list)
     troubleshooting_steps: list[str] = Field(default_factory=list)
     optimization_suggestions: list[str] = Field(default_factory=list)
+    knowledge_citations: list[dict[str, Any]] = Field(
+        default_factory=list, max_length=32
+    )
+    knowledge_conflicts: list[dict[str, Any]] = Field(
+        default_factory=list, max_length=32
+    )
     analysis_metadata: dict[str, Any] = Field(default_factory=dict)
 
 

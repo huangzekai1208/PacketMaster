@@ -25,7 +25,13 @@ from packetmaster.domain import (
     VerificationResult,
 )
 from packetmaster.errors import AppError
-from packetmaster.rag.contracts import KnowledgeBundle, KnowledgeQuery, RagMode
+from packetmaster.rag.contracts import (
+    KnowledgeBundle,
+    KnowledgeCitation,
+    KnowledgeQuery,
+    RagMode,
+)
+from packetmaster.rag.validation import CitationConflict
 
 MAX_EVIDENCE_ROUNDS = 3
 MAX_REQUESTS_PER_ROUND = 10
@@ -56,6 +62,10 @@ class AgentState(TypedDict, total=False):
     knowledge_bundle: KnowledgeBundle
     rag_mode: RagMode
     rag_warning: str
+    knowledge_citations: list[KnowledgeCitation]
+    knowledge_conflicts: list[CitationConflict]
+    knowledge_augmented_causes: list[str]
+    rag_limitations: list[str]
     round_count: int
     report: DiagnosticReport
     error: dict[str, Any]
@@ -343,6 +353,73 @@ def build_graph(
                 ),
             }
 
+    async def augment_hypotheses(state: AgentState) -> dict[str, Any]:
+        try:
+            augmentation = await diagnosis_model.augment_hypotheses(
+                state["context"],
+                state["hypotheses"],
+                state["knowledge_bundle"],
+            )
+            validation = await rag_runtime.citation_validator.validate(
+                augmentation.citations,
+                state["knowledge_bundle"],
+                state["knowledge_query"],
+            )
+            base_causes = {item.cause for item in state["hypotheses"].hypotheses}
+            augmented_causes = {
+                item.cause for item in augmentation.hypotheses.hypotheses
+            }
+            adds_knowledge_claim = bool(augmented_causes - base_causes)
+            all_valid = len(validation.valid_citations) == len(
+                augmentation.citations
+            )
+            if not all_valid or (
+                adds_knowledge_claim and not validation.valid_citations
+            ):
+                return {
+                    "rag_warning": "RAG_CITATION_VALIDATION_FAILED",
+                    "knowledge_conflicts": validation.conflicts,
+                    "trace": _trace(
+                        state,
+                        "augment_hypotheses",
+                        status="degraded",
+                        error_code="RAG_CITATION_VALIDATION_FAILED",
+                        rag_mode=RagMode.ACTIVE,
+                    ),
+                }
+            requests = normalize_requests(
+                state, augmentation.hypotheses.requested_evidence
+            )
+            return {
+                "hypotheses": augmentation.hypotheses,
+                "evidence_requests": requests,
+                "knowledge_citations": validation.valid_citations,
+                "knowledge_conflicts": validation.conflicts,
+                "knowledge_augmented_causes": sorted(
+                    augmented_causes - base_causes
+                ),
+                "rag_limitations": augmentation.limitations,
+                "trace": _trace(
+                    state,
+                    "augment_hypotheses",
+                    status="ok",
+                    evidence_request_count=len(requests),
+                    rag_mode=RagMode.ACTIVE,
+                ),
+            }
+        except Exception as exc:
+            code = exc.code if isinstance(exc, AppError) else "RAG_AUGMENTATION_FAILED"
+            return {
+                "rag_warning": code,
+                "trace": _trace(
+                    state,
+                    "augment_hypotheses",
+                    status="degraded",
+                    error_code=code,
+                    rag_mode=RagMode.ACTIVE,
+                ),
+            }
+
     async def inspect_evidence(state: AgentState) -> dict[str, Any]:
         try:
             responses: list[EvidenceResponse] = []
@@ -448,6 +525,7 @@ def build_graph(
         limitations = list(verification.limitations if verification else [])
         if state.get("rag_warning"):
             limitations.append(f"{state['rag_warning']}：知识检索已降级。")
+        limitations.extend(state.get("rag_limitations", []))
         if error:
             limitations.insert(0, f"{error['code']}：分析流程已降级")
         if (
@@ -481,10 +559,17 @@ def build_graph(
             key=lambda item: item.confidence,
             reverse=True,
         )
+        knowledge_augmented_causes = set(
+            state.get("knowledge_augmented_causes", [])
+        )
         supported_candidates = [
             item
             for item in report_candidates
             if any(evidence.strip() for evidence in item.supporting_evidence)
+            and not (
+                item.cause in knowledge_augmented_causes
+                and item.observability is Observability.OUTSIDE_CAPTURE
+            )
         ]
         if report_candidates and all(
             item.observability is Observability.OUTSIDE_CAPTURE
@@ -531,6 +616,14 @@ def build_graph(
                 if item.suggestion
             ][:20],
             optimization_suggestions=[],
+            knowledge_citations=[
+                item.model_dump(mode="json")
+                for item in state.get("knowledge_citations", [])
+            ],
+            knowledge_conflicts=[
+                item.model_dump(mode="json")
+                for item in state.get("knowledge_conflicts", [])
+            ],
             analysis_metadata={
                 "analysis_id": analysis.analysis_id if analysis else None,
                 "evidence_rounds": state.get("round_count", 0),
@@ -598,6 +691,16 @@ def build_graph(
         return after_retrieval(state)
 
     def after_retrieval(state: AgentState) -> str:
+        bundle = state.get("knowledge_bundle")
+        if (
+            state.get("rag_mode") is RagMode.ACTIVE
+            and bundle is not None
+            and bundle.results
+        ):
+            return "augment"
+        return after_augmentation(state)
+
+    def after_augmentation(state: AgentState) -> str:
         return "inspect_evidence" if state.get("evidence_requests") else "verify"
 
     def after_verify(state: AgentState) -> str:
@@ -618,6 +721,7 @@ def build_graph(
     graph.add_node("analyze", analyze)
     graph.add_node("reason", reason)
     graph.add_node("retrieve_knowledge", retrieve_knowledge)
+    graph.add_node("augment_hypotheses", augment_hypotheses)
     graph.add_node("inspect_evidence", inspect_evidence)
     graph.add_node("verify", verify)
     graph.add_node("report", report)
@@ -641,6 +745,15 @@ def build_graph(
     graph.add_conditional_edges(
         "retrieve_knowledge",
         after_retrieval,
+        {
+            "augment": "augment_hypotheses",
+            "inspect_evidence": "inspect_evidence",
+            "verify": "verify",
+        },
+    )
+    graph.add_conditional_edges(
+        "augment_hypotheses",
+        after_augmentation,
         {"inspect_evidence": "inspect_evidence", "verify": "verify"},
     )
     graph.add_conditional_edges(

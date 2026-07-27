@@ -12,14 +12,19 @@ from packetmaster.domain import (
     DiagnosticReport,
     EvidenceRequest,
     EvidenceResponse,
+    HypothesisType,
     Observability,
 )
 from packetmaster.graph import build_graph
 from packetmaster.rag.contracts import (
+    KnowledgeAugmentation,
     KnowledgeBundle,
+    KnowledgeCitation,
     KnowledgeQuery,
+    RagMode,
     RetrievalCandidate,
 )
+from packetmaster.rag.validation import KnowledgeCitationValidator
 from tests.fakes import FakeDiagnosisModel, FakeMCPClient
 
 
@@ -124,6 +129,85 @@ def _shadow_runtime(*, fail: bool = False):
     )
 
 
+def _active_runtime():
+    candidate = RetrievalCandidate(
+        knowledge_id="rfc.window",
+        version_id="rfc.window:v1",
+        chunk_id="rfc.window:v1:c1",
+        title="TCP 窗口",
+        knowledge_type="standard",
+        authority="high",
+        source_name="RFC",
+        content="窗口可能限制吞吐，需要结合当前报文验证。",
+    )
+
+    class QueryBuilder:
+        def build(self, context, hypotheses):
+            return KnowledgeQuery(
+                query_id="active-query",
+                analysis_id=context.analysis_id,
+                query_text="吞吐不足",
+            )
+
+    class Retriever:
+        async def retrieve(self, query):
+            return KnowledgeBundle(
+                query_id=query.query_id,
+                results=[candidate],
+                total_content_bytes=len(candidate.content.encode("utf-8")),
+            )
+
+    class Store:
+        async def get_candidate(self, chunk_id):
+            return candidate if chunk_id == candidate.chunk_id else None
+
+    return SimpleNamespace(
+        mode=RagMode.ACTIVE,
+        query_builder=QueryBuilder(),
+        retriever=Retriever(),
+        citation_validator=KnowledgeCitationValidator(Store()),
+        degradation_reason=None,
+    )
+
+
+class _AugmentingModel(FakeDiagnosisModel):
+    def __init__(self, *, quote: str = "窗口可能限制吞吐") -> None:
+        super().__init__(initial_request=False)
+        self.quote = quote
+        self.augment_calls = 0
+
+    async def augment_hypotheses(self, context, hypotheses, knowledge):
+        self.augment_calls += 1
+        knowledge_cause = hypotheses.hypotheses[0].model_copy(
+            update={
+                "cause": "接收窗口可能限制吞吐",
+                "hypothesis_type": HypothesisType.KNOWN_PATTERN,
+                "observability": Observability.OUTSIDE_CAPTURE,
+                "confidence": 95,
+                "supporting_evidence": ["知识库中的协议机制"],
+                "missing_evidence": ["需要当前报文窗口证据"],
+            }
+        )
+        return KnowledgeAugmentation(
+            hypotheses=hypotheses.model_copy(
+                update={"hypotheses": [*hypotheses.hypotheses, knowledge_cause]}
+            ),
+            citations=[
+                KnowledgeCitation(
+                    knowledge_id="rfc.window",
+                    version_id="rfc.window:v1",
+                    chunk_id="rfc.window:v1:c1",
+                    title="TCP 窗口",
+                    knowledge_type="standard",
+                    source_name="RFC",
+                    supported_statement="窗口可能限制吞吐",
+                    supporting_quote=self.quote,
+                )
+            ],
+            limitations=["知识新增原因需要报文或外部信息验证。"],
+        )
+
+
 def test_shadow_rag_records_bounded_refs_without_changing_diagnosis(
     tmp_path: Path,
 ) -> None:
@@ -157,6 +241,70 @@ def test_shadow_rag_failure_does_not_fail_base_diagnosis(tmp_path: Path) -> None
     assert result.get("error") is None
     assert result["report"].primary_cause == "开放式候选原因"
     assert "RAG_RETRIEVAL_FAILED" in result["report"].limitations[-1]
+
+
+def test_active_rag_accepts_valid_citation_but_does_not_promote_external_cause(
+    tmp_path: Path,
+) -> None:
+    model = _AugmentingModel()
+    graph = build_graph(
+        mcp_client=FakeMCPClient(),
+        diagnosis_model=model,
+        rag_runtime=_active_runtime(),
+    )
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert model.augment_calls == 1
+    assert result["report"].primary_cause == "开放式候选原因"
+    assert "接收窗口可能限制吞吐" in {
+        item.cause for item in result["report"].candidate_causes
+    }
+    assert result["report"].knowledge_citations[0]["chunk_id"] == (
+        "rfc.window:v1:c1"
+    )
+    assert "知识新增原因需要报文或外部信息验证。" in (
+        result["report"].limitations
+    )
+
+
+def test_active_rag_rejects_forged_quote_and_keeps_base_hypotheses(
+    tmp_path: Path,
+) -> None:
+    graph = build_graph(
+        mcp_client=FakeMCPClient(),
+        diagnosis_model=_AugmentingModel(quote="知识切片中不存在的引文"),
+        rag_runtime=_active_runtime(),
+    )
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert [item.cause for item in result["report"].candidate_causes] == [
+        "开放式候选原因",
+        "次要候选原因",
+    ]
+    assert result["report"].knowledge_citations == []
+    assert "RAG_CITATION_VALIDATION_FAILED" in result["report"].limitations[-1]
+
+
+def test_active_rag_model_failure_does_not_fail_base_diagnosis(
+    tmp_path: Path,
+) -> None:
+    class FailingAugmentationModel(_AugmentingModel):
+        async def augment_hypotheses(self, context, hypotheses, knowledge):
+            raise RuntimeError("augmentation failed")
+
+    graph = build_graph(
+        mcp_client=FakeMCPClient(),
+        diagnosis_model=FailingAugmentationModel(),
+        rag_runtime=_active_runtime(),
+    )
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert result.get("error") is None
+    assert result["report"].primary_cause == "开放式候选原因"
+    assert "RAG_AUGMENTATION_FAILED" in result["report"].limitations[-1]
 
 
 def test_graph_rejects_cross_analysis_evidence_request(tmp_path: Path) -> None:

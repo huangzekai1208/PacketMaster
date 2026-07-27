@@ -28,6 +28,7 @@ from packetmaster.intent import (
     extract_explicit_bandwidth,
     merge_intent,
 )
+from packetmaster.rag.contracts import KnowledgeAugmentation, KnowledgeBundle
 
 
 class DiagnosisModel:
@@ -97,7 +98,7 @@ class DiagnosisModel:
         serialized_payload = json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
         )
-        if len(serialized_payload) > 100_000:
+        if len(serialized_payload) > 132_000:
             raise AppError(
                 code="MODEL_CONTEXT_TOO_LARGE",
                 message="Bounded diagnosis context exceeds the model input limit",
@@ -265,6 +266,23 @@ class DiagnosisModel:
             },
         )
         return VerificationResult.model_validate(result)
+
+    async def augment_hypotheses(
+        self,
+        context: DiagnosisContext,
+        hypotheses: HypothesisBatch,
+        knowledge: KnowledgeBundle,
+    ) -> KnowledgeAugmentation:
+        result = await self._invoke(
+            KnowledgeAugmentation,
+            "knowledge_augmentation.md",
+            {
+                "diagnosis_context": context.model_dump(mode="json"),
+                "base_hypotheses": hypotheses.model_dump(mode="json"),
+                "retrieved_knowledge": knowledge.model_dump(mode="json"),
+            },
+        )
+        return KnowledgeAugmentation.model_validate(result)
 
     async def answer_question(self, context: ChatModelContext) -> ChatAnswer:
         result = await self._invoke(
