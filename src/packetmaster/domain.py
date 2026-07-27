@@ -302,6 +302,9 @@ class ChatAnswer(ContractModel):
     evidence_basis: list[ChatEvidenceCitation] = Field(
         default_factory=list, max_length=32
     )
+    knowledge_citations: list[dict[str, Any]] = Field(
+        default_factory=list, max_length=32
+    )
     limitations: list[str] = Field(default_factory=list, max_length=32)
     follow_up_suggestions: list[str] = Field(default_factory=list, max_length=32)
     requested_evidence: list[EvidenceRequest] = Field(
@@ -337,6 +340,16 @@ class ChatModelContext(ContractModel):
     collected_evidence: list[dict[str, Any]] = Field(
         default_factory=list, max_length=32
     )
+    knowledge_context: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("knowledge_context")
+    @classmethod
+    def bound_knowledge_context(cls, value: dict[str, Any]) -> dict[str, Any]:
+        import json
+
+        if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) > 24_576:
+            raise ValueError("knowledge_context must not exceed 24576 bytes")
+        return value
 
 
 class ChatSessionState(ContractModel):

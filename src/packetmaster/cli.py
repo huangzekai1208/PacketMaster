@@ -38,6 +38,7 @@ from packetmaster.mcp.server import create_server
 from packetmaster.model import DiagnosisModel
 from packetmaster.platform import is_absolute_path
 from packetmaster.rag.cli import knowledge_app
+from packetmaster.rag.runtime import build_rag_runtime
 from packetmaster.report import render_chat_report, render_terminal, write_report
 from packetmaster.web.runtime import run_web
 
@@ -228,6 +229,7 @@ async def _answer_chat_question(
         graph = build_chat_graph(
             mcp_client=client,
             diagnosis_model=DiagnosisModel(settings=settings),
+            rag_runtime=build_rag_runtime(settings),
         )
         result = await graph.ainvoke({"session": session.state})
     error = result.get("error")

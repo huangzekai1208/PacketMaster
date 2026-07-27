@@ -16,6 +16,12 @@ from packetmaster.domain import (
     EvidenceResponse,
 )
 from packetmaster.errors import AppError
+from packetmaster.rag.contracts import (
+    KnowledgeBundle,
+    KnowledgeCitation,
+    KnowledgeQuery,
+    RagMode,
+)
 
 MAX_CHAT_EVIDENCE_ROUNDS = 2
 MAX_CHAT_REQUESTS_PER_ROUND = 5
@@ -25,6 +31,10 @@ class ChatGraphState(TypedDict, total=False):
     session: ChatSessionState
     evidence: list[EvidenceResponse]
     answer: ChatAnswer
+    knowledge_query: KnowledgeQuery
+    knowledge_bundle: KnowledgeBundle
+    rag_mode: RagMode
+    rag_warning: str
     round_count: int
     error: dict[str, Any]
     trace: list[dict[str, Any]]
@@ -95,7 +105,46 @@ def _safe_evidence_layers(evidence: list[EvidenceResponse]) -> list[dict[str, An
     ]
 
 
-def build_chat_graph(*, mcp_client: Any, diagnosis_model: Any):
+def _question_needs_knowledge(question: str) -> bool:
+    text = question.casefold()
+    knowledge_markers = (
+        "为什么",
+        "原理",
+        "机制",
+        "如何",
+        "怎么",
+        "建议",
+        "处置",
+        "处理",
+        "优化",
+        "相似",
+        "案例",
+        "经验",
+        "规范",
+        "rfc",
+        "拥塞控制",
+        "window scaling",
+    )
+    concrete_markers = (
+        "哪一帧",
+        "哪些帧",
+        "帧号",
+        "哪条流",
+        "哪些流",
+        "时间点",
+        "当前哪个",
+        "当前多少",
+    )
+    if any(marker in text for marker in concrete_markers) and not any(
+        marker in text for marker in knowledge_markers
+    ):
+        return False
+    return any(marker in text for marker in knowledge_markers)
+
+
+def build_chat_graph(
+    *, mcp_client: Any, diagnosis_model: Any, rag_runtime: Any | None = None
+):
     """Build a chat graph that can only inspect bounded local evidence."""
 
     async def prepare_question(state: ChatGraphState) -> dict[str, Any]:
@@ -131,15 +180,128 @@ def build_chat_graph(*, mcp_client: Any, diagnosis_model: Any):
                 ),
             }
 
+    def model_context(
+        state: ChatGraphState, *, include_knowledge: bool = True
+    ):
+        context = build_model_context(state["session"])
+        bundle = state.get("knowledge_bundle")
+        if (
+            include_knowledge
+            and state.get("rag_mode") is RagMode.ACTIVE
+            and bundle is not None
+            and bundle.results
+        ):
+            return context.model_copy(
+                update={"knowledge_context": bundle.model_dump(mode="json")}
+            )
+        return context
+
+    async def retrieve_question_knowledge(
+        state: ChatGraphState,
+    ) -> dict[str, Any]:
+        if rag_runtime is None or not _question_needs_knowledge(
+            state["session"].question or ""
+        ):
+            return {
+                "trace": _trace(
+                    state, "retrieve_question_knowledge", status="skipped"
+                )
+            }
+        mode = rag_runtime.mode
+        try:
+            query = rag_runtime.query_builder.build_chat(
+                build_model_context(state["session"])
+            )
+            if query is None:
+                return {
+                    "rag_mode": mode,
+                    "trace": _trace(
+                        state, "retrieve_question_knowledge", status="skipped"
+                    ),
+                }
+            bundle = await rag_runtime.retriever.retrieve(query)
+            warning = rag_runtime.degradation_reason
+            if bundle.warnings:
+                warning = ";".join(bundle.warnings)
+            update: dict[str, Any] = {
+                "knowledge_query": query,
+                "knowledge_bundle": bundle,
+                "rag_mode": mode,
+                "trace": _trace(
+                    state,
+                    "retrieve_question_knowledge",
+                    status="degraded" if warning else "ok",
+                ),
+            }
+            if warning:
+                update["rag_warning"] = warning
+            return update
+        except Exception as exc:
+            code = exc.code if isinstance(exc, AppError) else "RAG_RETRIEVAL_FAILED"
+            return {
+                "rag_mode": mode,
+                "rag_warning": code,
+                "trace": _trace(
+                    state,
+                    "retrieve_question_knowledge",
+                    status="degraded",
+                    error_code=code,
+                ),
+            }
+
+    async def validate_knowledge_answer(
+        state: ChatGraphState, answer: ChatAnswer
+    ) -> ChatAnswer | None:
+        bundle = state.get("knowledge_bundle")
+        query = state.get("knowledge_query")
+        if (
+            state.get("rag_mode") is not RagMode.ACTIVE
+            or bundle is None
+            or query is None
+            or not bundle.results
+        ):
+            return answer
+        try:
+            citations = [
+                KnowledgeCitation.model_validate(item)
+                for item in answer.knowledge_citations
+            ]
+            if not citations:
+                return None
+            validation = await rag_runtime.citation_validator.validate(
+                citations, bundle, query
+            )
+            if len(validation.valid_citations) != len(citations):
+                return None
+            return answer.model_copy(
+                update={
+                    "knowledge_citations": [
+                        item.model_dump(mode="json")
+                        for item in validation.valid_citations
+                    ]
+                }
+            )
+        except Exception:
+            return None
+
     async def answer_question(state: ChatGraphState) -> dict[str, Any]:
         try:
             session = state["session"]
-            answer = await diagnosis_model.answer_question(build_model_context(session))
+            answer = await diagnosis_model.answer_question(model_context(state))
+            validated = await validate_knowledge_answer(state, answer)
+            warning = state.get("rag_warning")
+            if validated is None:
+                answer = await diagnosis_model.answer_question(
+                    model_context(state, include_knowledge=False)
+                )
+                warning = "RAG_CITATION_VALIDATION_FAILED"
+            else:
+                answer = validated
             requests = [] if answer.ready else _validated_requests(
                 session, answer.requested_evidence
             )
             session.requested_evidence = requests
-            return {
+            update = {
                 "session": session,
                 "answer": answer,
                 "trace": _trace(
@@ -149,6 +311,9 @@ def build_chat_graph(*, mcp_client: Any, diagnosis_model: Any):
                     evidence_request_count=len(requests),
                 ),
             }
+            if warning:
+                update["rag_warning"] = warning
+            return update
         except Exception as exc:
             error = _error_dict(exc, "CHAT_MODEL_FAILED")
             return {
@@ -209,8 +374,21 @@ def build_chat_graph(*, mcp_client: Any, diagnosis_model: Any):
         try:
             session = state["session"]
             answer = await diagnosis_model.verify_chat_answer(
-                build_model_context(session), state["answer"], state.get("evidence", [])
+                model_context(state), state["answer"], state.get("evidence", [])
             )
+            validated = await validate_knowledge_answer(state, answer)
+            warning = state.get("rag_warning")
+            if validated is None:
+                answer = await diagnosis_model.verify_chat_answer(
+                    model_context(state, include_knowledge=False),
+                    state["answer"].model_copy(
+                        update={"knowledge_citations": []}
+                    ),
+                    state.get("evidence", []),
+                )
+                warning = "RAG_CITATION_VALIDATION_FAILED"
+            else:
+                answer = validated
             requests = [] if answer.ready else _validated_requests(
                 session, answer.requested_evidence
             )
@@ -227,7 +405,7 @@ def build_chat_graph(*, mcp_client: Any, diagnosis_model: Any):
                 )
                 requests = []
             session.requested_evidence = requests
-            return {
+            update = {
                 "session": session,
                 "answer": answer,
                 "trace": _trace(
@@ -237,6 +415,9 @@ def build_chat_graph(*, mcp_client: Any, diagnosis_model: Any):
                     evidence_request_count=len(requests),
                 ),
             }
+            if warning:
+                update["rag_warning"] = warning
+            return update
         except Exception as exc:
             error = _error_dict(exc, "CHAT_VERIFICATION_FAILED")
             return {
@@ -272,6 +453,12 @@ def build_chat_graph(*, mcp_client: Any, diagnosis_model: Any):
                 ],
                 ready=True,
             )
+        if state.get("rag_warning"):
+            limitation = f"{state['rag_warning']}：知识检索已降级。"
+            if limitation not in answer.limitations:
+                answer = answer.model_copy(
+                    update={"limitations": [*answer.limitations, limitation]}
+                )
         session.answer = answer
         session.requested_evidence = []
         if session.question:
@@ -288,7 +475,9 @@ def build_chat_graph(*, mcp_client: Any, diagnosis_model: Any):
         }
 
     def after_prepare(state: ChatGraphState) -> str:
-        return "finalize" if state.get("error") else "answer"
+        if state.get("error"):
+            return "finalize"
+        return "retrieve" if rag_runtime is not None else "answer"
 
     def after_answer(state: ChatGraphState) -> str:
         if state.get("error"):
@@ -306,6 +495,7 @@ def build_chat_graph(*, mcp_client: Any, diagnosis_model: Any):
 
     graph = StateGraph(ChatGraphState)
     graph.add_node("prepare_question", prepare_question)
+    graph.add_node("retrieve_question_knowledge", retrieve_question_knowledge)
     graph.add_node("answer_question", answer_question)
     graph.add_node("inspect_question_evidence", inspect_evidence)
     graph.add_node("verify_answer", verify_answer)
@@ -314,8 +504,13 @@ def build_chat_graph(*, mcp_client: Any, diagnosis_model: Any):
     graph.add_conditional_edges(
         "prepare_question",
         after_prepare,
-        {"answer": "answer_question", "finalize": "finalize_answer"},
+        {
+            "retrieve": "retrieve_question_knowledge",
+            "answer": "answer_question",
+            "finalize": "finalize_answer",
+        },
     )
+    graph.add_edge("retrieve_question_knowledge", "answer_question")
     graph.add_conditional_edges(
         "answer_question",
         after_answer,

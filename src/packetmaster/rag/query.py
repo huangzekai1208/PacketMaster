@@ -8,7 +8,7 @@ import re
 from typing import Any
 
 from packetmaster.context import DiagnosisContext
-from packetmaster.domain import HypothesisBatch
+from packetmaster.domain import ChatModelContext, HypothesisBatch
 from packetmaster.rag.contracts import KnowledgeQuery
 
 _SENSITIVE_KEY = re.compile(
@@ -79,6 +79,73 @@ def _rtt_bin(value: float) -> str:
 
 
 class KnowledgeQueryBuilder:
+    def build_chat(self, context: ChatModelContext) -> KnowledgeQuery | None:
+        question = _safe_question(context.question)
+        if not question:
+            return None
+        feature_pairs = _feature_items(context.diagnosis_context)
+        features: dict[str, object] = {}
+        for key, value in feature_pairs:
+            short_key = key.split(".")[-1].split("[")[0]
+            if short_key not in features and len(features) < 64:
+                features[short_key] = value
+        report = context.report
+        raw_candidates = report.get("candidate_causes", [])
+        candidate_causes = [
+            str(item.get("cause", ""))[:1_000]
+            for item in raw_candidates[:32]
+            if isinstance(item, dict) and item.get("cause")
+        ]
+        primary = report.get("primary_cause")
+        if isinstance(primary, str) and primary and primary != "unresolved":
+            candidate_causes = list(dict.fromkeys([primary, *candidate_causes]))[:32]
+        ratio_value = report.get("achievement_ratio_pct")
+        ratio = (
+            float(ratio_value)
+            if isinstance(ratio_value, int | float)
+            and not isinstance(ratio_value, bool)
+            else None
+        )
+        keywords: list[str] = []
+        searchable = json.dumps(
+            {"question": question, "features": features},
+            ensure_ascii=False,
+            sort_keys=True,
+        ).casefold()
+        for metric, terms in _EVENT_TERMS.items():
+            if metric.casefold() in searchable or any(
+                term.casefold() in searchable for term in terms
+            ):
+                keywords.extend(terms)
+        identity = json.dumps(
+            {
+                "analysis_id": context.analysis_id,
+                "direction": context.target.value,
+                "ratio": ratio,
+                "question": question,
+                "features": features,
+                "causes": candidate_causes,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        query_id = "ragq-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        return KnowledgeQuery(
+            query_id=query_id,
+            analysis_id=context.analysis_id,
+            direction=context.target,
+            achievement_ratio_pct=ratio,
+            query_text=(
+                f"方向 {context.target.value}；"
+                f"用户问题 {question}；"
+                + "；".join(f"候选原因 {item}" for item in candidate_causes)
+            )[:4_000],
+            keywords=list(dict.fromkeys(keywords))[:64],
+            candidate_causes=candidate_causes,
+            global_features=features,
+        )
+
     def build(
         self,
         context: DiagnosisContext,

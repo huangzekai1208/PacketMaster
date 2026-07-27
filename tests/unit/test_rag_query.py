@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from packetmaster.context import DiagnosisContext
-from packetmaster.domain import Hypothesis, HypothesisBatch
+from packetmaster.domain import ChatModelContext, Hypothesis, HypothesisBatch
 from packetmaster.rag.query import KnowledgeQueryBuilder
 
 
@@ -107,3 +107,30 @@ def test_query_builder_preserves_explicit_upload_and_question() -> None:
     assert query is not None
     assert query.direction.value == "upload"
     assert "Linux CUBIC" in query.query_text
+
+
+def test_chat_query_builder_uses_bounded_question_and_hides_sensitive_data() -> None:
+    context = ChatModelContext(
+        analysis_id="analysis-1",
+        target="download",
+        report={
+            "primary_cause": "接收窗口受限",
+            "achievement_ratio_pct": 2,
+        },
+        diagnosis_context={
+            "zero_window_count": 4,
+            "api_key": "SECRET",
+            "pcap_path": "/Users/operator/private.pcapng",
+        },
+        question="token=SECRET，为什么接收窗口会限制吞吐？",
+    )
+
+    query = KnowledgeQueryBuilder().build_chat(context)
+
+    assert query is not None
+    assert query.analysis_id == "analysis-1"
+    assert "接收窗口受限" in query.candidate_causes
+    assert "zero_window" in query.keywords
+    serialized = query.model_dump_json()
+    assert "SECRET" not in serialized
+    assert "private.pcapng" not in serialized

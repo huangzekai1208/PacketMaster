@@ -28,10 +28,12 @@ class AnalysisChatService:
         reads: AnalysisReadService,
         turns: ChatTurnRepository,
         model: Any,
+        rag_runtime: Any | None = None,
     ) -> None:
         self.reads = reads
         self.turns = turns
         self.model = model
+        self.rag_runtime = rag_runtime
 
     async def ask(self, analysis_id: str, question: str) -> ChatTurnResult:
         detail = self.reads.detail(analysis_id)
@@ -58,7 +60,9 @@ class AnalysisChatService:
             question=safe_question,
         )
         graph = build_chat_graph(
-            mcp_client=_EvidenceClient(self.reads), diagnosis_model=self.model
+            mcp_client=_EvidenceClient(self.reads),
+            diagnosis_model=self.model,
+            rag_runtime=self.rag_runtime,
         )
         result = await graph.ainvoke({"session": session})
         answer = result.get("answer")

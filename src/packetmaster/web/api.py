@@ -20,6 +20,7 @@ from packetmaster.config import Settings
 from packetmaster.domain import EvidenceRequest, EvidenceResponse, EvidenceType, Target
 from packetmaster.errors import AppError
 from packetmaster.model import DiagnosisModel
+from packetmaster.rag.runtime import build_rag_runtime
 from packetmaster.web.analysis import AnalysisReadService
 from packetmaster.web.captures import CaptureRegistry, CaptureRepository
 from packetmaster.web.chat_service import AnalysisChatService
@@ -95,6 +96,7 @@ def create_app(
         reads=analysis_reads,
         turns=ChatTurnRepository(database),
         model=conversation.model,
+        rag_runtime=build_rag_runtime(runtime),
     )
     app.state.analysis_reads = analysis_reads
     app.state.analysis_chat = analysis_chat
