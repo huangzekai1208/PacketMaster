@@ -2,7 +2,7 @@
 
 日期：2026-07-26
 
-状态：待评审
+状态：本地实现完成，待 Windows 真机发布验收
 
 依据：`docs/specs/2026-07-26-packetmaster-web-chat-mvp-design.md`
 
@@ -568,3 +568,15 @@
 - Windows 正式门禁和 macOS 兼容门禁通过；
 - 使用文档、安装文档和现阶段功能说明同步更新；
 - 所有相关变更使用中文 Git 提交信息提交。
+
+## 12. 执行结果
+
+截至 2026-07-27：
+
+- 任务 1 至 21 已完成实现和本地自动化验证；
+- 任务 22 的 Python、Ruff、前端测试、生产构建、依赖审计、Playwright、敏感字段、Web 大文件包装、macOS 启动和真实 TShark 门禁已完成；
+- Playwright 覆盖参数确认、刷新恢复、取消确认、失败重试、报告、指标、TCP 流、证据，以及桌面、笔记本和窄屏布局；
+- 2 GB 稀疏报文注册和任务排队门禁验证 Web 层不读取或复制报文内容；
+- Windows 兼容逻辑已有自动化覆盖，但 Windows 真机门禁由用户按 `docs/windows-web-release-checklist.md` 执行。
+
+任务 22 在 Windows 真机结果返回前保持“待最终验收”，不将 macOS 结果表述为 Windows 真实通过。

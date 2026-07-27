@@ -2,7 +2,7 @@
 
 日期：2026-07-26
 
-状态：待评审
+状态：已确认并完成本地实现，待 Windows 真机发布验收
 
 关联文档：
 
@@ -67,7 +67,7 @@ MVP 不包含：
 | 层 | 选择 |
 | --- | --- |
 | 前端 | React、TypeScript、Vite |
-| 前端路由 | React Router |
+| 前端导航 | 单工作台标签与会话状态；MVP 无独立页面路由 |
 | 请求与缓存 | TanStack Query |
 | 图表 | Apache ECharts |
 | 图标 | Lucide React |
@@ -77,7 +77,7 @@ MVP 不包含：
 | 后台执行 | 独立本地 Worker 进程 |
 | 诊断核心 | 现有 LangGraph、FastMCP、RealAnalyzerAdapter 和 speed-analyze |
 
-MVP 不引入 Redis、Celery、PostgreSQL、Next.js、Electron 和 Kubernetes。
+MVP 不引入 React Router、Redis、Celery、PostgreSQL、Next.js、Electron 和 Kubernetes。当前只有一个工作台页面，移除未使用的 React Router 可以减少生产依赖和安全公告暴露；后续出现独立 URL 页面时再按需引入路由。
 
 ### 4.3 报文输入
 
@@ -607,5 +607,20 @@ MVP 稳定后按独立 spec 评估：
 5. 是否接受 React、TypeScript、Vite、FastAPI、SSE 和 ECharts 技术组合；
 6. 是否将 Tauri 原生文件选择明确放到 MVP 之后；
 7. 是否需要在 MVP 首版展示完整 TCP 流列表，还是先只展示异常流和前 20 条流。
+
+## 23. 实施结果
+
+截至 2026-07-27，MVP 功能和本地发布门禁已经完成：
+
+- CLI 与 Web 共用诊断应用服务和 `DiagnosticReport`；
+- FastAPI、SQLite WAL、独立 Worker、SSE、取消、重试和持续问答已经接通；
+- React 工作台已覆盖会话、确认、进度、报告、指标、TCP 流、证据和问答；
+- Python 测试、Ruff、TypeScript、ESLint、Vitest、Vite 构建和 Playwright 已通过；
+- Playwright 已检查桌面、笔记本和窄屏，并验证图表 canvas 非空；
+- 前端生产依赖审计为 0 个已知漏洞；
+- macOS 已完成真实启动、HTTP 健康检查、静态托管和真实 TShark 兼容门禁；
+- Windows `spawn`、路径、TShark 查找和进程终止逻辑有自动化覆盖。
+
+Windows 真机上的 Web 启动、真实报文三方向诊断、取消后进程树清理和约 2 GB 报文性能门禁仍需按 `docs/windows-web-release-checklist.md` 执行。未取得该结果前，不宣称 Windows 真实门禁通过。
 
 本 spec 确认后再生成中文实施 plan。在 spec 和 plan 均确认前不开始功能代码编写。

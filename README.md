@@ -1,58 +1,51 @@
 # PacketMaster
 
-PacketMaster 是 TCP 测速不达标原因分析 Agent。原始报文留在本机，模型只接收全量聚合后的有界摘要和分页证据。
+PacketMaster 是 TCP 测速不达标原因分析 Agent。它在本机流式处理 pcap/pcapng，模型只接收全量聚合后的有界摘要和分页证据，不接收原始报文、Payload、API Key 或本地绝对路径。
 
-## 默认分析下载
+当前提供三个入口：
 
-```powershell
-packetmaster diagnose "C:\captures\测速 报文.pcapng" --standard 1000 --actual 600
+- `packetmaster web`：本地 Web 对话与可视化工作台；
+- `packetmaster chat`：终端多轮对话；
+- `packetmaster diagnose`：一次性命令行诊断。
+
+## 安装
+
+支持 Python 3.11 至 3.13。正式运行需要 Wireshark/TShark。
+
+```bash
+conda create -n agent python=3.12
+conda activate agent
+python -m pip install -r requirements.txt
 ```
 
-省略 `--target` 时固定使用 `download`，不会因为报文含双向流自动切换。
-
-## 显式分析上行或双向
-
-```powershell
-packetmaster diagnose "C:\captures\test.pcapng" --standard 1000 --actual 600 --target upload
-packetmaster diagnose "C:\captures\test.pcapng" --standard 1000 --actual 600 --target both
-```
-
-可用 `--keep-artifacts` 保留本次本地产物。结构化结果写入 `report.json`。
-packetmaster diagnose \
-  artifacts/synthetic-model-test/capture.pcapng \
-  --standard 1000 \
-  --actual 600 \
-  --output-dir artifacts/my-first-report \
-  --keep-artifacts
-
-## Windows
-
-安装 Wireshark 并勾选 TShark。若不在 PATH，设置：
+Windows 安装 Wireshark 时勾选 TShark。若不在 PATH：
 
 ```powershell
 $env:TSHARK_PATH = "C:\Program Files\Wireshark\tshark.exe"
 ```
 
-支持盘符、反斜杠、空格和中文路径。
-
-## macOS 开发环境
+macOS 开发环境可以使用：
 
 ```bash
 brew install wireshark
 export TSHARK_PATH=/opt/homebrew/bin/tshark
-packetmaster diagnose "/Users/me/captures/test capture.pcapng" --standard 1000 --actual 600
 ```
 
-诊断需要兼容 OpenAI API 的模型配置。Payload、完整逐包字段、完整日志和 API Key 不进入模型上下文。
+## 模型配置
 
-推荐复制本地配置模板并填写模型配置：
+推荐复制本地模板并填写模型配置：
 
 ```powershell
 Copy-Item src\packetmaster\config_local.example.py src\packetmaster\config_local.py
 ```
 
-`config_local.py` 会被 Git 忽略，PacketMaster 启动时自动读取，无需每次设置
-环境变量。环境变量的优先级更高，仍可用于临时覆盖。Windows PowerShell：
+macOS：
+
+```bash
+cp src/packetmaster/config_local.example.py src/packetmaster/config_local.py
+```
+
+`config_local.py` 已被 Git 忽略。也可以使用环境变量临时覆盖：
 
 ```powershell
 $env:MODEL_API_KEY = "..."
@@ -61,62 +54,115 @@ $env:MODEL_NAME = "deepseek-v4-flash"
 $env:MODEL_STRUCTURED_OUTPUT_METHOD = "auto"
 ```
 
-macOS/Linux：
+`auto` 会为 DeepSeek 兼容服务选择 `json_mode`，其他服务默认使用 `json_schema`。也可显式设置 `json_mode`、`json_schema` 或 `function_calling`。
 
-```bash
-export MODEL_API_KEY="..."
-export MODEL_BASE_URL="https://api.deepseek.com"
-export MODEL_NAME="deepseek-v4-flash"
-export MODEL_STRUCTURED_OUTPUT_METHOD="auto"
-```
+## Web 工作台
 
-`auto` 会对模型名或接口地址中包含 `deepseek` 的服务使用 `json_mode`，
-其他模型默认使用 `json_schema`。兼容服务也可以显式设置为
-`json_mode`、`json_schema` 或 `function_calling`。
-
-## CLI 对话模式
+Web 模式默认只监听 `127.0.0.1`，启动 API、单 Worker 和已构建的 React 页面：
 
 ```bash
 conda activate agent
+packetmaster web
+```
+
+不自动打开浏览器：
+
+```bash
+packetmaster web --no-browser
+```
+
+默认访问地址为 `http://127.0.0.1:8765`。端口占用时会继续尝试后续本机端口。
+
+Web 首版不上传报文。用户输入本机 pcap/pcapng 绝对路径，后端校验后返回 `capture_id`，后续浏览器请求不再使用真实路径。默认只允许注册当前工作目录内的报文；生产环境应显式配置允许目录：
+
+```powershell
+$env:WEB_ALLOWED_CAPTURE_ROOTS = '["D:\\captures"]'
+$env:WEB_DATABASE_PATH = "D:\PacketMaster\packetmaster-web.sqlite"
+```
+
+macOS：
+
+```bash
+export WEB_ALLOWED_CAPTURE_ROOTS='["/Users/me/captures"]'
+export WEB_DATABASE_PATH='/Users/me/PacketMaster/packetmaster-web.sqlite'
+```
+
+工作台支持会话恢复、普通对话、分轮参数补充、确认后后台分析、SSE 进度、取消与重试、报告、吞吐/RTT/TCP 事件图表、TCP 流分页、证据浏览和诊断后持续问答。
+
+## CLI 诊断
+
+省略 `--target` 时固定使用 `download`：
+
+```powershell
+packetmaster diagnose "C:\captures\测速 报文.pcapng" --standard 1000 --actual 600
+```
+
+只有明确需要时才使用上行或双向：
+
+```powershell
+packetmaster diagnose "C:\captures\test.pcapng" --standard 1000 --actual 600 --target upload
+packetmaster diagnose "C:\captures\test.pcapng" --standard 1000 --actual 600 --target both
+```
+
+指定报告目录并保留产物：
+
+```bash
+packetmaster diagnose samples/packetmaster_download_underperform.pcapng \
+  --standard 1000 \
+  --actual 20 \
+  --output-dir artifacts/my-first-report \
+  --keep-artifacts
+```
+
+## CLI 对话
+
+```bash
 packetmaster chat
 ```
 
-首次输入自然语言任务，例如：
+可以一次提供完整参数，也可以分多轮补充：
 
 ```text
 请分析 /Users/me/captures/test.pcapng，标准带宽 1Gbps，实际 600M
 ```
 
-PacketMaster 会抽取参数、补问缺失项并等待确认；未明确方向时默认分析下载。
-确认完成后进入 `PacketMaster>` 提示符，可继续询问当前报告和证据。
+未明确方向时默认下载，参数完整后仍需用户确认。诊断完成后可继续询问当前报告和证据。
 
-内置命令：`/new` 新建任务，`/report` 查看完整中文报告，`/evidence` 查看有界证据，
-`/save` 查看 JSON 报告路径，`/help` 查看帮助，`/quit` 退出。
+内置命令：`/new`、`/report`、`/evidence`、`/save`、`/help`、`/quit`。
 
-## 开发与测试
+## 前端开发
 
-```bash
-python -m pip install -e ".[dev]"
-python -m pytest -m "not performance" -v
-python -m ruff check src speed-analyze/scripts tests scripts
-```
-
-可生成确定性的多流测试报文，重传、重复 ACK 和可选零窗口将出现在第 5000 个报文之后：
+运行已构建 Web 不需要 Node.js。只有修改 React 前端时才需要 Node 20 至 24：
 
 ```bash
-python scripts/generate_test_capture.py \
-  --output "artifacts/test captures/late-evidence.pcapng" \
-  --flows 2 \
-  --data-packets-per-flow 2500 \
-  --anomaly-after 5000 \
-  --zero-window
+cd webui
+npm ci
+npm run dev
 ```
 
-## 发布门禁
+Vite 开发服务运行在 `http://127.0.0.1:5173`，并将 `/api` 代理到 PacketMaster Web 后端。生产构建：
 
-GitHub Actions 在 Windows 和 macOS 上安装真实 TShark 并运行所有非性能测试。Windows job 是正式发布门禁，macOS job 是开发兼容门禁。
+```bash
+npm run build
+```
 
-约 2 GB 的大报文性能门禁需在带有 `packetmaster-performance` 标签的 Windows 自托管 runner 上手动运行，并配置仓库变量 `PERF_PCAP_PATH` 和 `PERF_METADATA_PATH`。也可在实机本地执行：
+## 测试
+
+```bash
+python -m pytest -m "not performance" -q
+python -m ruff check .
+
+cd webui
+npm run typecheck
+npm run lint
+npm test
+npm run build
+npm run test:e2e
+```
+
+`npm run test:e2e` 默认使用系统 Google Chrome 访问 `http://127.0.0.1:8765`。先启动 `packetmaster web --no-browser`。
+
+大报文真实门禁：
 
 ```powershell
 $env:PERF_PCAP_PATH = "D:\captures\release-2gb.pcapng"
@@ -125,4 +171,4 @@ $env:PERF_MAX_RSS_BYTES = "1073741824"
 python -m pytest tests/performance/test_large_capture.py -v
 ```
 
-元数据 JSON 必须由发布夹具的独立生成流程提供 `input_size_bytes`、`total_packets_seen`、`tcp_packets_seen` 和 `speed_packets_analyzed` 四个正整数。门禁要求分析结果与这些期望值完全相等、无截断，且子进程树的采样 RSS 峰值大于零并不超过预算。RSS 约每 250 ms 采样一次，不是操作系统级精确峰值，因此发布预算应保留安全余量。
+独立元数据需要包含 `input_size_bytes`、`total_packets_seen`、`tcp_packets_seen` 和 `speed_packets_analyzed`。Windows 真机发布步骤见 [Windows Web 发布验收清单](docs/windows-web-release-checklist.md)。
