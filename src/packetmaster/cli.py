@@ -37,10 +37,12 @@ from packetmaster.mcp.client import SpeedMCPClient
 from packetmaster.mcp.server import create_server
 from packetmaster.model import DiagnosisModel
 from packetmaster.platform import is_absolute_path
+from packetmaster.rag.cli import knowledge_app
 from packetmaster.report import render_chat_report, render_terminal, write_report
 from packetmaster.web.runtime import run_web
 
 app = typer.Typer(help="PacketMaster TCP 测速不达标诊断")
+app.add_typer(knowledge_app, name="knowledge")
 
 _PROGRESS_MESSAGES = {
     "Starting speed analysis": "正在启动测速分析",

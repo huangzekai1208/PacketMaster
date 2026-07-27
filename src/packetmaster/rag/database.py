@@ -613,6 +613,18 @@ class SQLiteKnowledgeStore:
             ).fetchall()
         return [self._chunk(row) for row in rows]
 
+    def list_versions(self, knowledge_id: str) -> list[KnowledgeVersion]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM knowledge_versions
+                WHERE knowledge_id = ?
+                ORDER BY version_number DESC, version_id
+                """,
+                (knowledge_id,),
+            ).fetchall()
+        return [self._version(row) for row in rows]
+
     def get_case_profile(self, version_id: str) -> CaseProfile | None:
         with self.database.connect() as connection:
             row = connection.execute(
