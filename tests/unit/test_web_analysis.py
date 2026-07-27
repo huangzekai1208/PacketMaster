@@ -166,6 +166,7 @@ def test_completed_analysis_chat_is_persistent(tmp_path: Path) -> None:
     assert answer.answer == "主要证据是发生了重传。"
     assert restored.total == 1
     assert restored.items[0].turn_id == answer.turn_id
+    assert restored.items[0].knowledge_citations == []
 
 
 def test_sse_stream_is_ordered_and_resumes_after_last_event(tmp_path: Path) -> None:

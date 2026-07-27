@@ -98,6 +98,27 @@ def render_chat_report(
                         lines.append(
                             "   引用：" + _render_evidence_reference(reference)
                         )
+    if report.knowledge_citations:
+        lines.append("知识经验引用：")
+        for index, citation in enumerate(report.knowledge_citations, 1):
+            lines.append(
+                f"{index}. [{citation.get('knowledge_type', 'knowledge')}] "
+                f"{citation.get('title', '未命名知识')}，"
+                f"版本 {citation.get('version_id', '未知')}"
+            )
+            statement = citation.get("supported_statement")
+            quote = citation.get("supporting_quote")
+            if statement:
+                lines.append(f"   支持陈述：{statement}")
+            if quote:
+                lines.append(f"   原文摘录：{quote}")
+    if report.knowledge_conflicts:
+        lines.append("知识与报文证据冲突：")
+        for conflict in report.knowledge_conflicts:
+            lines.append(
+                "   "
+                + str(conflict.get("packet_evidence", "待复核"))
+            )
     if report.limitations:
         lines.append("限制：" + "；".join(report.limitations))
     if report.troubleshooting_steps:

@@ -21,7 +21,7 @@ from packetmaster.web.contracts import (
     WebMessage,
 )
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _MIGRATIONS = {
     1: """
         CREATE TABLE sessions (
@@ -145,6 +145,10 @@ _MIGRATIONS = {
             confirmed_analysis_id TEXT REFERENCES analyses(analysis_id),
             updated_at TEXT NOT NULL
         );
+    """,
+    5: """
+        ALTER TABLE chat_turns ADD COLUMN knowledge_citations_json TEXT
+            NOT NULL DEFAULT '[]';
     """,
 }
 
@@ -487,6 +491,7 @@ class ChatTurnRepository:
         citations: list[dict[str, object]],
         limitations: list[str],
         suggestions: list[str],
+        knowledge_citations: list[dict[str, object]] | None = None,
         turn_id: str | None = None,
     ) -> ChatTurnResult:
         identifier = turn_id or uuid.uuid4().hex
@@ -498,8 +503,8 @@ class ChatTurnRepository:
                     INSERT INTO chat_turns (
                         turn_id, session_id, analysis_id, question, answer,
                         citations_json, limitations_json, suggestions_json,
-                        created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        knowledge_citations_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         identifier,
@@ -510,6 +515,9 @@ class ChatTurnRepository:
                         json.dumps(citations, ensure_ascii=False),
                         json.dumps(limitations, ensure_ascii=False),
                         json.dumps(suggestions, ensure_ascii=False),
+                        json.dumps(
+                            knowledge_citations or [], ensure_ascii=False
+                        ),
                         _timestamp(current),
                     ),
                 )
@@ -528,6 +536,7 @@ class ChatTurnRepository:
             citations=citations,
             limitations=limitations,
             suggestions=suggestions,
+            knowledge_citations=knowledge_citations or [],
             created_at=current,
         )
 
@@ -597,6 +606,11 @@ def _chat_turn(row: sqlite3.Row) -> ChatTurnResult:
         citations=json.loads(row["citations_json"]),
         limitations=json.loads(row["limitations_json"]),
         suggestions=json.loads(row["suggestions_json"]),
+        knowledge_citations=json.loads(
+            row["knowledge_citations_json"]
+        )
+        if "knowledge_citations_json" in row.keys()
+        else [],
         created_at=_datetime(row["created_at"]),
     )
 

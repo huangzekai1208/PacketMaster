@@ -259,6 +259,9 @@ class ChatTurnResult(WebContract):
     question: str = Field(min_length=1, max_length=2_000)
     answer: str = Field(min_length=1, max_length=8_000)
     citations: list[ChatEvidenceCitation] = Field(default_factory=list, max_length=32)
+    knowledge_citations: list[dict[str, Any]] = Field(
+        default_factory=list, max_length=32
+    )
     limitations: list[str] = Field(default_factory=list, max_length=32)
     suggestions: list[str] = Field(default_factory=list, max_length=32)
     created_at: datetime

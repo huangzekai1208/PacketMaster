@@ -79,6 +79,7 @@ class AnalysisChatService:
             question=safe_question,
             answer=redact_message(answer.answer),
             citations=[item.model_dump(mode="json") for item in answer.evidence_basis],
+            knowledge_citations=answer.knowledge_citations,
             limitations=answer.limitations,
             suggestions=answer.follow_up_suggestions,
         )

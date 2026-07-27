@@ -260,7 +260,7 @@ def build_chat_graph(
             or query is None
             or not bundle.results
         ):
-            return answer
+            return answer.model_copy(update={"knowledge_citations": []})
         try:
             citations = [
                 KnowledgeCitation.model_validate(item)

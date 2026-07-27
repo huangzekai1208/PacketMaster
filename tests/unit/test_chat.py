@@ -161,6 +161,18 @@ def test_chat_report_renders_all_candidates_without_model_call() -> None:
         limitations=["抓包时长较短"],
         troubleshooting_steps=["检查链路丢包"],
         optimization_suggestions=["延长测速时间"],
+        knowledge_citations=[
+            {
+                "knowledge_id": "rfc.window",
+                "version_id": "rfc.window:v1",
+                "chunk_id": "rfc.window:v1:c1",
+                "title": "TCP 窗口机制",
+                "knowledge_type": "standard",
+                "source_name": "RFC",
+                "supported_statement": "窗口会限制吞吐",
+                "supporting_quote": "接收窗口会限制在途数据量。",
+            }
+        ],
     )
     output = render_chat_report(report)
     assert "候选原因" in output
@@ -169,3 +181,11 @@ def test_chat_report_renders_all_candidates_without_model_call() -> None:
     assert "frame.number=42" in output
     assert "抓包时长较短" in output
     assert "延长测速时间" in output
+    assert "知识经验引用" in output
+    assert "TCP 窗口机制" in output
+    assert "版本 rfc.window:v1" in output
+
+
+def test_chat_answer_defaults_knowledge_citations_for_old_payloads() -> None:
+    answer = ChatAnswer(answer="当前报文显示存在重传。", ready=True)
+    assert answer.knowledge_citations == []

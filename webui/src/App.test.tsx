@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { App } from './App'
+import { App, KnowledgeReferences } from './App'
 
 const session = { session_id: 'session-1', title: '下载测速诊断', status: 'draft', created_at: '2026-07-26T00:00:00Z', updated_at: '2026-07-26T00:00:00Z' }
 
@@ -23,4 +23,21 @@ it('呈现工作台、历史会话和任务视图标签', async () => {
   await waitFor(() => expect(screen.getByText('下载测速诊断')).toBeInTheDocument())
   expect(screen.getByRole('button', { name: /报告/ })).toBeInTheDocument()
   expect(screen.getByLabelText('对话输入')).toBeInTheDocument()
+})
+
+it('将知识经验引用与报文证据分区展示', () => {
+  render(<KnowledgeReferences value={[{
+    knowledge_id: 'rfc.window',
+    version_id: 'rfc.window:v1',
+    chunk_id: 'rfc.window:v1:c1',
+    title: 'TCP 窗口机制',
+    knowledge_type: 'standard',
+    source_name: 'RFC',
+    supported_statement: '窗口会限制在途数据量',
+    supporting_quote: '接收窗口会限制在途未确认数据量。',
+  }]} />)
+
+  expect(screen.getByRole('region', { name: '知识经验引用' })).toBeInTheDocument()
+  expect(screen.getByText('TCP 窗口机制')).toBeInTheDocument()
+  expect(screen.getByText(/rfc.window:v1/)).toBeInTheDocument()
 })

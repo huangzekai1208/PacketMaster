@@ -144,6 +144,13 @@ async function mockApi(
           limitations: ['报文不包含操作系统 TCP 参数'],
           troubleshooting_steps: ['检查接收端窗口缩放是否生效', '对照交换机接口丢包计数'],
           optimization_suggestions: ['增大 TCP 接收缓冲区', '排查链路丢包'],
+          knowledge_citations: [{
+            knowledge_id: 'rfc.window', version_id: 'rfc.window:v1', chunk_id: 'rfc.window:v1:c1',
+            title: 'TCP 窗口机制', knowledge_type: 'standard', source_name: 'RFC',
+            supported_statement: '接收窗口会限制在途数据量',
+            supporting_quote: '接收窗口会限制在途未确认数据量。',
+          }],
+          knowledge_conflicts: [],
           analysis_metadata: {},
         },
       }
@@ -254,6 +261,8 @@ for (const viewport of [
 
     await page.getByRole('button', { name: '报告' }).click()
     await expect(page.getByText('接收窗口受限并伴随持续重传，吞吐在整个测速阶段明显低于标准带宽')).toBeVisible()
+    await expect(page.getByRole('region', { name: '知识经验引用' })).toBeVisible()
+    await expect(page.getByText('TCP 窗口机制')).toBeVisible()
     await expectNoViewportOverflow(page)
     await page.screenshot({ path: testInfo.outputPath('report.png'), fullPage: true })
 
