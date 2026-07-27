@@ -199,6 +199,7 @@ def test_citation_identifies_supported_statement_and_exact_chunk() -> None:
         source_name="RFC 7323",
         source_location="section 2.2",
         supported_statement="接收窗口不足可能限制单流吞吐。",
+        supporting_quote="接收窗口需要覆盖链路带宽时延积",
     )
 
     assert citation.chunk_id.endswith("chunk-1")
