@@ -1,0 +1,26 @@
+[
+  {
+    "case_id": "eval.zero-window.001",
+    "query": {
+      "query_id": "eval.zero-window.001",
+      "analysis_id": "evaluation-001",
+      "direction": "download",
+      "achievement_ratio_pct": 12,
+      "query_text": "下载吞吐不足并出现持续零窗口",
+      "keywords": ["zero_window", "零窗口"],
+      "candidate_causes": ["接收端处理能力不足"],
+      "missing_evidence": ["端系统资源使用率"],
+      "global_features": {"zero_window_count": 18},
+      "environment_tags": {"operating_system": "Windows"},
+      "knowledge_types": ["standard", "case"]
+    },
+    "relevant_chunk_ids": ["case.window.001:v1:chunk-0"],
+    "relevance_grades": {"case.window.001:v1:chunk-0": 3},
+    "expected_causes": ["接收端处理能力不足"],
+    "baseline_causes": [],
+    "rag_causes": ["接收端处理能力不足"],
+    "answer_citation_chunk_ids": ["case.window.001:v1:chunk-0"],
+    "applicable_chunk_ids": ["case.window.001:v1:chunk-0"],
+    "forbidden_conclusions": ["当前报文已经证明接收端 CPU 饱和"]
+  }
+]

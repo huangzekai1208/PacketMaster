@@ -1,0 +1,34 @@
+{
+  "direction": "download",
+  "standard_bandwidth_mbps": 1000,
+  "actual_bandwidth_mbps": 120,
+  "achievement_ratio_pct": 12,
+  "tcp_features": {
+    "zero_window_count": 18,
+    "retransmission_count": 4,
+    "window_min": 0
+  },
+  "anomaly_summaries": [
+    "低吞吐区间与 Zero Window 事件重合"
+  ],
+  "confirmed_primary_cause": "接收端处理能力不足导致接收窗口耗尽",
+  "candidate_causes": [
+    "接收端 TCP 缓冲区配置不足"
+  ],
+  "supporting_evidence": [
+    "经过脱敏的聚合证据摘要"
+  ],
+  "contradicting_evidence": [],
+  "external_factors": [
+    "端系统 CPU 与应用读取速率需要外部验证"
+  ],
+  "resolution": "提升接收端处理能力并复测，吞吐恢复到验收范围",
+  "applicability": {
+    "directions": ["download"],
+    "operating_systems": ["Windows"],
+    "link_types": [],
+    "tools": ["iperf3"],
+    "devices": [],
+    "tags": {}
+  }
+}

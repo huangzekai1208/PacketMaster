@@ -8,7 +8,7 @@ PacketMaster 是一个用于分析 TCP 测速速率不达标原因的单 Agent �
 
 PacketMaster 不是对 speed-analyze 的简单调用包装。speed-analyze 负责确定性的报文筛选、字段提取、指标聚合和证据索引；PacketMaster 在此基础上增加参数理解、任务编排、候选原因推理、主动取证、证据复核、报告生成和持续问答。
 
-当前版本同时提供 CLI 和本机 Web 工作台。RAG 知识库、多 Agent 协作和批量任务平台尚未接入。
+当前版本同时提供 CLI、本机 Web 工作台和可选 RAG 知识库。RAG 已接入诊断图与分析后问答，但默认关闭，正式评估通过前只能使用 `shadow`。多 Agent 协作和批量任务平台尚未接入。
 
 ## 2. 已实现功能
 
@@ -55,7 +55,19 @@ PacketMaster 不是对 speed-analyze 的简单调用包装。speed-analyze 负�
 - 诊断后问答绑定当前 `analysis_id`，复用有界 LangGraph 取证流程，不重复执行基础分析。
 - 浏览器只保存会话 ID、布局和非敏感草稿，不保存 API Key、绝对路径、完整报告或证据。
 
-### 2.4 大报文处理
+### 2.4 RAG 知识检索
+
+- 使用独立 SQLite 元数据、FTS5 trigram 关键词索引和本地多语言向量。
+- 支持标准、厂商资料、内部手册和结构化历史案例。
+- 提供导入、查看、审核、停用、重建、健康检查和离线评估命令。
+- 基础 `reason` 节点只依据报文，知识检索发生在基础候选生成之后。
+- `shadow` 不改变诊断；`active` 只能补充候选原因和建议。
+- 知识引用必须属于本次召回包，版本、来源和逐字引文通过确定性校验。
+- Web 和 CLI 将报文证据与知识经验分区展示。
+- 最终模型知识上下文最多 8 条、24 KB，正式切片最多 25,000。
+- RAG 故障自动退化到现有基础诊断和问答。
+
+### 2.5 大报文处理
 
 - 面向几百 MB 到数 GB 的报文设计。
 - 原始报文由本地脚本和 TShark 流式处理，不经过 LangGraph 状态或模型上下文。
@@ -64,7 +76,7 @@ PacketMaster 不是对 speed-analyze 的简单调用包装。speed-analyze 负�
 - 运行前检查输入文件和可用磁盘空间。
 - 支持动态分析超时、进度消息、子进程取消和过期产物清理。
 
-### 2.5 平台兼容
+### 2.6 平台兼容
 
 - Windows 是正式运行和发布验收平台。
 - macOS 是当前开发和兼容验证平台。
@@ -167,7 +179,7 @@ CLI 参数校验或 Web/CLI 对话意图路由
     全量聚合摘要 + 本地 SQLite 证据索引
         |
         v
-    候选原因生成 -> 局部取证 -> 证据复核
+    报文候选原因生成 -> 可选知识检索/补充 -> 局部取证 -> 证据复核
         |
         v
     共享 DiagnosticReport + report.json + trace.jsonl
@@ -181,14 +193,16 @@ CLI 参数校验或 Web/CLI 对话意图路由
 
 ## 5. 诊断 LangGraph 工作流程
 
-一次诊断由六个节点组成：
+一次诊断由八个节点组成：
 
 1. `validate`：校验报文路径、带宽、分析方向、磁盘预算和请求结构。
 2. `analyze`：通过 MCP 调用 `analyze_speed_capture`，执行 speed-analyze 全量基础分析。
 3. `reason`：Context Builder 将聚合结果压缩为有界上下文，大模型生成开放式候选原因和证据请求。
-4. `inspect_evidence`：通过 MCP 调用 `get_tcp_evidence`，查询指定流、时间区间或 TCP 字段的分页证据。
-5. `verify`：大模型根据新增证据调整候选原因、置信度、反向证据和限制，并判断是否继续取证。
-6. `report`：确定性生成最终诊断报告并结束任务。
+4. `retrieve_knowledge`：根据报文摘要和基础候选构建脱敏查询，执行有界混合检索。
+5. `augment_hypotheses`：仅在通过门禁的 `active` 模式补充候选原因和建议，并验证知识引用。
+6. `inspect_evidence`：通过 MCP 调用 `get_tcp_evidence`，查询指定流、时间区间或 TCP 字段的分页证据。
+7. `verify`：大模型根据新增证据调整候选原因、置信度、反向证据和限制，并判断是否继续取证。
+8. `report`：确定性生成最终诊断报告并结束任务，保存知识引用快照和冲突。
 
 诊断取证循环最多执行 3 轮，每轮最多处理 10 个证据请求。循环由 LangGraph 控制，大模型不能无限调用工具。即使部分模型调用或证据查询失败，只要已有基础分析结果，系统也会尽量输出带限制说明的降级报告。
 
@@ -197,10 +211,11 @@ CLI 参数校验或 Web/CLI 对话意图路由
 诊断完成后的每个问题使用独立的有界问答图：
 
 1. `prepare_question`：校验问题，并绑定当前 `analysis_id`。
-2. `answer_question`：先根据当前报告、诊断上下文和最近对话尝试回答。
-3. `inspect_question_evidence`：上下文不足时，通过 MCP 查询额外证据。
-4. `verify_answer`：使用新证据复核回答，判断是否还需继续取证。
-5. `finalize_answer`：形成最终中文回答或带限制的降级回答。
+2. `retrieve_question_knowledge`：仅对协议机制、相似案例和处置方法问题检索知识；具体帧、流和时间问题跳过。
+3. `answer_question`：根据当前报告、诊断上下文、最近对话及可选知识包尝试回答。
+4. `inspect_question_evidence`：上下文不足时，通过 MCP 查询额外证据。
+5. `verify_answer`：使用新证据复核回答，同时验证知识引用。
+6. `finalize_answer`：形成最终中文回答或带限制的降级回答。
 
 单个问题最多取证 2 轮，每轮最多 5 个请求。所有证据请求必须与当前 `analysis_id` 一致，防止不同任务之间混用证据。
 
@@ -219,6 +234,9 @@ CLI 参数校验或 Web/CLI 对话意图路由
 | RealAnalyzerAdapter | 将 MCP 请求连接到 speed-analyze，并读取本地产物和证据索引 |
 | speed-analyze | 筛选目标方向 TCP 流、提取字段、全量聚合指标并建立 SQLite 证据索引 |
 | Context Builder | 从全量统计中生成有界、分层、允许进入模型的上下文 |
+| Knowledge Store | 保存版本化知识、FTS5、Embedding、审核状态和评估门禁 |
+| RAG Retrieval Service | 构建脱敏查询，融合关键词、向量与案例相似度并限制上下文 |
+| Citation Validator | 校验知识身份、版本、适用条件和逐字引文，拒绝伪造引用 |
 | 大模型 | 理解模糊参数、生成候选原因、提出证据需求、复核原因和回答追问 |
 | Artifact Store | 保存覆盖率、统计、证据索引、筛选报文、报告和运行轨迹 |
 
@@ -241,6 +259,7 @@ CLI 参数校验或 Web/CLI 对话意图路由
 - 有界的时间区间指标和异常区间；
 - 经字段白名单过滤的分页证据；
 - 当前报告、当前问题和有界对话历史。
+- 最多 8 条、24 KB 的已审核知识切片及引用身份。
 
 路径在进入模型前会替换为 `capture_XXXXXXXX` 形式的不透明引用。MCP Server 和 Context Builder 对字段、条数、大小和字符串长度进行约束。
 
@@ -274,11 +293,10 @@ CLI 参数校验或 Web/CLI 对话意图路由
 
 当前版本尚未实现：
 
-- RAG 故障案例和网络知识库；
 - 多 Agent 分工协作；
 - 多报文批量任务和多 Worker 并发队列；
 - CLI 会话退出后的历史恢复；
 - 基于 analysis_id 的 `/resume`、`/status` 和 `/cancel` 命令；
 - 自动修改操作系统或网络设备配置。
 
-现阶段已经形成单 Agent、全量流式报文分析、证据驱动推理、CLI 和 Web 持续问答闭环。macOS 本地自动化、真实 TShark 和浏览器门禁已完成；Windows 真机启动、真实 TShark、取消后进程树清理和大报文门禁需要按发布清单完成最终验收。RAG 等能力应在积累经过确认的诊断案例、术语定义和处置规则后接入，作为证据解释和经验检索的补充，而不是替代报文直接证据。
+现阶段已经形成单 Agent、全量流式报文分析、证据驱动推理、RAG 补充、CLI 和 Web 持续问答闭环。RAG V1 的代码与 macOS 自动化门禁已完成；真实本地 E5 模型、Windows 真机和不少于 50 条正式评估样本仍需外部验收。在这些条件完成前，生产配置必须保持 `off` 或 `shadow`，不能宣称 RAG 已获准影响正式诊断。

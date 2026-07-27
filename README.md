@@ -89,6 +89,42 @@ export WEB_DATABASE_PATH='/Users/me/PacketMaster/packetmaster-web.sqlite'
 
 工作台支持会话恢复、普通对话、分轮参数补充、确认后后台分析、SSE 进度、取消与重试、报告、吞吐/RTT/TCP 事件图表、TCP 流分页、证据浏览和诊断后持续问答。
 
+## RAG 知识库
+
+RAG 是可选能力。基础安装和无 RAG 诊断不依赖本地 Embedding 模型。安装可选依赖：
+
+```powershell
+python -m pip install -e ".[rag]"
+```
+
+首次联网运行会下载 `intfloat/multilingual-e5-small`。正式 Windows 离线环境应预先准备模型目录：
+
+```powershell
+$env:EMBEDDING_MODEL_PATH = "D:\PacketMaster\models\multilingual-e5-small"
+$env:KNOWLEDGE_DATABASE_PATH = "D:\PacketMaster\knowledge\packetmaster-knowledge.sqlite"
+$env:RAG_ENABLED = "true"
+$env:RAG_MODE = "shadow"
+```
+
+导入、审核和检查知识：
+
+```powershell
+pkm knowledge import ".\knowledge\tcp-window.md" `
+  --knowledge-id rfc.tcp-window --title "TCP 窗口机制" `
+  --type standard --authority high --source-name "RFC"
+pkm knowledge approve rfc.tcp-window:v1 --reviewer network-reviewer
+pkm knowledge list --status approved
+pkm knowledge health
+```
+
+运行模式：
+
+- `off`：不检索知识；
+- `shadow`：执行检索但不改变诊断候选，适合上线前观察；
+- `active`：已验证知识可以补充候选原因和建议，但不能覆盖报文证据。
+
+`active` 不是只改环境变量即可启用。必须先用不少于 50 条正式脱敏样本执行 `pkm knowledge evaluate` 并达到质量门槛；否则启动时自动降级为 `shadow`。完整知识管理、备份恢复、评估和离线部署步骤见 [RAG 使用与运维手册](docs/rag-operations.md)。
+
 ## CLI 诊断
 
 省略 `--target` 时固定使用 `download`：
@@ -172,3 +208,9 @@ python -m pytest tests/performance/test_large_capture.py -v
 ```
 
 独立元数据需要包含 `input_size_bytes`、`total_packets_seen`、`tcp_packets_seen` 和 `speed_packets_analyzed`。Windows 真机发布步骤见 [Windows Web 发布验收清单](docs/windows-web-release-checklist.md)。
+
+RAG 25,000 切片容量门禁：
+
+```bash
+python -m pytest tests/performance/test_rag_capacity.py -v
+```

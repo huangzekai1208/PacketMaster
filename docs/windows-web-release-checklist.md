@@ -11,6 +11,7 @@ conda activate agent
 python --version
 tshark --version
 python -m pip install -r requirements.txt
+python -m pip install -e ".[rag]"
 ```
 
 要求：Python 3.11 至 3.13，TShark 可执行。若 TShark 不在 PATH：
@@ -28,6 +29,10 @@ $env:MODEL_NAME = "deepseek-v4-flash"
 $env:MODEL_STRUCTURED_OUTPUT_METHOD = "auto"
 $env:WEB_ALLOWED_CAPTURE_ROOTS = '["D:\\captures"]'
 $env:WEB_DATABASE_PATH = "D:\PacketMaster\packetmaster-web.sqlite"
+$env:KNOWLEDGE_DATABASE_PATH = "D:\PacketMaster\knowledge\packetmaster-knowledge.sqlite"
+$env:EMBEDDING_MODEL_PATH = "D:\PacketMaster\models\multilingual-e5-small"
+$env:RAG_ENABLED = "true"
+$env:RAG_MODE = "shadow"
 ```
 
 ## 2. 自动化门禁
@@ -113,7 +118,40 @@ python -m pytest tests/performance/test_web_large_capture.py -v
 
 预期：覆盖计数完全一致、无截断、RSS 不超过预算，Web 包装不复制报文到 SQLite 或 Python 内存。
 
-## 7. 验收记录
+## 7. RAG 真机门禁
+
+使用包含空格和中文的离线模型及知识目录，依次执行：
+
+```powershell
+pkm knowledge health
+pkm knowledge import ".\fixtures\窗口 案例.json" `
+  --knowledge-id case.windows-window --title "Windows 窗口案例" `
+  --type case --authority medium_high --source-name "验收案例"
+pkm knowledge approve case.windows-window:v1 --reviewer windows-reviewer
+pkm knowledge reindex case.windows-window:v1 --force
+python -m pytest tests\performance\test_rag_capacity.py -v
+```
+
+检查：
+
+- 中文路径和离线模型目录可用，运行时不访问公网；
+- 导入预览、审核、重建和检索均不输出绝对路径或密钥；
+- Web 报告与机制类追问显示独立“知识经验引用”；
+- 询问具体帧或流时仍优先使用报文证据；
+- 暂停访问知识 DB 或临时移走模型后，Web 仍能启动，基础诊断和问答可用；
+- `RAG_MODE=active` 在没有 50 条合格评估记录时自动降为 `shadow`；
+- `Get-Process python,tshark` 未出现异常残留进程。
+
+正式 `active` 验收还需使用不少于 50 条经过脱敏和人工标注的评估集：
+
+```powershell
+pkm knowledge evaluate ".\evaluation\rag-production.json" `
+  --output ".\evaluation\rag-report.json"
+```
+
+报告的 `production_ready` 必须为 `true`，否则保持 `shadow`。
+
+## 8. 验收记录
 
 | 项目 | 结果 | 备注 |
 | --- | --- | --- |
@@ -126,5 +164,10 @@ python -m pytest tests/performance/test_web_large_capture.py -v
 | 取消无残留进程 | 待执行 | |
 | 失败或取消后重试 | 待执行 | |
 | 2 GB 性能门禁 | 待执行 | |
+| RAG 离线模型与中文路径 | 待执行 | |
+| 知识导入、审核与重建 | 待执行 | |
+| 25,000 切片 P95 门禁 | 待执行 | |
+| RAG 故障降级 | 待执行 | |
+| 50 条正式评估与 active 门禁 | 待执行 | |
 
-全部通过后，将结果和 Windows 版本、Python 版本、TShark 版本反馈回来，以便把 Web MVP 状态更新为“完成”。
+全部通过后，将结果和 Windows 版本、Python 版本、TShark 版本、Embedding 模型哈希及评估报告摘要反馈回来。不要反馈 API Key、知识正文或报文路径。
