@@ -668,6 +668,35 @@ class SQLiteKnowledgeStore:
             ).fetchall()
         return [self._document(row) for row in rows], total
 
+    def record_evaluation(self, report: object) -> None:
+        payload = _json(report)
+        production_ready = bool(getattr(report, "production_ready", False))
+        with self.database.transaction(immediate=True) as connection:
+            connection.execute(
+                """
+                INSERT INTO knowledge_metadata(key, value)
+                VALUES ('last_evaluation', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (payload,),
+            )
+            connection.execute(
+                """
+                INSERT INTO knowledge_metadata(key, value)
+                VALUES ('active_gate_passed', ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                ("1" if production_ready else "0",),
+            )
+
+    def active_gate_passed(self) -> bool:
+        with self.database.connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM knowledge_metadata "
+                "WHERE key = 'active_gate_passed'"
+            ).fetchone()
+        return bool(row and row[0] == "1")
+
     async def keyword_search(
         self, query: KnowledgeQuery, *, limit: int
     ) -> list[RetrievalCandidate]:

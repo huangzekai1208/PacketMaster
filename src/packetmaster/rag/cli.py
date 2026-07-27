@@ -18,7 +18,9 @@ from packetmaster.rag.contracts import (
 )
 from packetmaster.rag.database import KnowledgeDatabase, SQLiteKnowledgeStore
 from packetmaster.rag.embedding import EmbeddingIndexer, LocalEmbeddingProvider
+from packetmaster.rag.evaluation import RagEvaluator, load_evaluation_cases
 from packetmaster.rag.importer import ImportMetadata, KnowledgeImporter
+from packetmaster.rag.retrieval import HybridKnowledgeRetriever
 
 knowledge_app = typer.Typer(help="管理 PacketMaster RAG 知识库")
 
@@ -241,5 +243,46 @@ def health_command() -> None:
             "知识库状态正常；FTS5 可用；"
             f"文档 {documents}，已发布 {approved}，索引代次 {generation}"
         )
+    except Exception as exc:
+        _error(exc)
+
+
+@knowledge_app.command(name="evaluate")
+def evaluate_command(
+    dataset: Annotated[Path, typer.Argument(help="脱敏后的 JSON 评估集")],
+    output: Annotated[Path | None, typer.Option("--output")] = None,
+) -> None:
+    try:
+        settings = Settings.load()
+        database = _database(settings)
+        provider = _embedding_provider(settings)
+        store = SQLiteKnowledgeStore(
+            database,
+            embedding_model=provider.model_name,
+            embedding_dimension=provider.dimension,
+        )
+        retriever = HybridKnowledgeRetriever(
+            store,
+            provider,
+            keyword_top_k=settings.rag_keyword_top_k,
+            vector_top_k=settings.rag_vector_top_k,
+            final_top_k=settings.rag_final_top_k,
+            max_context_bytes=settings.rag_max_context_bytes,
+            timeout_seconds=settings.rag_timeout_seconds,
+        )
+        cases = load_evaluation_cases(dataset)
+        report = asyncio.run(RagEvaluator(retriever).evaluate(cases))
+        store.record_evaluation(report)
+        rendered = json.dumps(
+            report.model_dump(mode="json"), ensure_ascii=False, indent=2
+        )
+        if output is not None:
+            destination = output.expanduser().resolve()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(rendered + "\n", encoding="utf-8")
+            typer.echo(f"评估报告已保存：{destination}")
+        typer.echo(rendered)
+        if not report.production_ready:
+            typer.echo("当前评估尚未达到 active 模式启用门槛。")
     except Exception as exc:
         _error(exc)
