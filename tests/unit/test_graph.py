@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,6 +15,11 @@ from packetmaster.domain import (
     Observability,
 )
 from packetmaster.graph import build_graph
+from packetmaster.rag.contracts import (
+    KnowledgeBundle,
+    KnowledgeQuery,
+    RetrievalCandidate,
+)
 from tests.fakes import FakeDiagnosisModel, FakeMCPClient
 
 
@@ -79,6 +85,78 @@ def test_graph_verifies_summary_only_hypothesis(tmp_path: Path) -> None:
 
     assert model.verify_calls == 1
     assert result["report"].primary_cause == "开放式候选原因"
+
+
+def _shadow_runtime(*, fail: bool = False):
+    class QueryBuilder:
+        def build(self, context, hypotheses):
+            return KnowledgeQuery(
+                query_id="shadow-query",
+                analysis_id=context.analysis_id,
+                query_text="吞吐不足",
+            )
+
+    class Retriever:
+        async def retrieve(self, query):
+            if fail:
+                raise RuntimeError("retrieval failed")
+            candidate = RetrievalCandidate(
+                knowledge_id="rfc.window",
+                version_id="rfc.window:v1",
+                chunk_id="rfc.window:v1:c1",
+                title="TCP 窗口",
+                knowledge_type="standard",
+                authority="high",
+                source_name="RFC",
+                content="窗口可能限制吞吐",
+            )
+            return KnowledgeBundle(
+                query_id=query.query_id,
+                results=[candidate],
+                total_content_bytes=len(candidate.content.encode("utf-8")),
+            )
+
+    return SimpleNamespace(
+        mode=graph_module.RagMode.SHADOW,
+        query_builder=QueryBuilder(),
+        retriever=Retriever(),
+        degradation_reason=None,
+    )
+
+
+def test_shadow_rag_records_bounded_refs_without_changing_diagnosis(
+    tmp_path: Path,
+) -> None:
+    model = FakeDiagnosisModel(initial_request=False)
+    graph = build_graph(
+        mcp_client=FakeMCPClient(),
+        diagnosis_model=model,
+        rag_runtime=_shadow_runtime(),
+    )
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert result["report"].primary_cause == "开放式候选原因"
+    assert result["report"].analysis_metadata["rag_mode"] == "shadow"
+    rag_trace = next(
+        item for item in result["trace"] if item["node"] == "retrieve_knowledge"
+    )
+    assert rag_trace["knowledge_count"] == 1
+    assert "content" not in json.dumps(rag_trace)
+
+
+def test_shadow_rag_failure_does_not_fail_base_diagnosis(tmp_path: Path) -> None:
+    graph = build_graph(
+        mcp_client=FakeMCPClient(),
+        diagnosis_model=FakeDiagnosisModel(initial_request=False),
+        rag_runtime=_shadow_runtime(fail=True),
+    )
+
+    result = asyncio.run(graph.ainvoke(_input(tmp_path)))
+
+    assert result.get("error") is None
+    assert result["report"].primary_cause == "开放式候选原因"
+    assert "RAG_RETRIEVAL_FAILED" in result["report"].limitations[-1]
 
 
 def test_graph_rejects_cross_analysis_evidence_request(tmp_path: Path) -> None:

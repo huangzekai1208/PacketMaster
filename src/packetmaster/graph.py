@@ -25,6 +25,7 @@ from packetmaster.domain import (
     VerificationResult,
 )
 from packetmaster.errors import AppError
+from packetmaster.rag.contracts import KnowledgeBundle, KnowledgeQuery, RagMode
 
 MAX_EVIDENCE_ROUNDS = 3
 MAX_REQUESTS_PER_ROUND = 10
@@ -51,6 +52,10 @@ class AgentState(TypedDict, total=False):
     evidence_requests: list[EvidenceRequest]
     evidence: list[EvidenceResponse]
     verification: VerificationResult
+    knowledge_query: KnowledgeQuery
+    knowledge_bundle: KnowledgeBundle
+    rag_mode: RagMode
+    rag_warning: str
     round_count: int
     report: DiagnosticReport
     error: dict[str, Any]
@@ -117,6 +122,8 @@ def _trace(
     status: str,
     error_code: str | None = None,
     evidence_request_count: int = 0,
+    rag_mode: RagMode | None = None,
+    knowledge_bundle: KnowledgeBundle | None = None,
 ) -> list[dict[str, Any]]:
     raw_target = state.get("target", Target.DOWNLOAD)
     try:
@@ -131,6 +138,22 @@ def _trace(
         "error_code": error_code,
         "evidence_request_count": evidence_request_count,
     }
+    if rag_mode is not None:
+        event["rag_mode"] = rag_mode.value
+    if knowledge_bundle is not None:
+        event["knowledge_count"] = len(knowledge_bundle.results)
+        event["knowledge_refs"] = [
+            {
+                "knowledge_id": item.knowledge_id,
+                "version_id": item.version_id,
+                "chunk_id": item.chunk_id,
+                "keyword_rank": item.keyword_rank,
+                "vector_rank": item.vector_rank,
+                "fusion_score": round(item.fusion_score, 6),
+                "rerank_score": round(item.rerank_score, 6),
+            }
+            for item in knowledge_bundle.results
+        ]
     return [*state.get("trace", []), event]
 
 
@@ -139,6 +162,7 @@ def build_graph(
     mcp_client: Any,
     diagnosis_model: Any,
     context_builder: ContextBuilder | None = None,
+    rag_runtime: Any | None = None,
 ):
     builder = context_builder or ContextBuilder()
 
@@ -273,6 +297,52 @@ def build_graph(
                 ),
             }
 
+    async def retrieve_knowledge(state: AgentState) -> dict[str, Any]:
+        mode = rag_runtime.mode
+        try:
+            query = rag_runtime.query_builder.build(
+                state["context"], state["hypotheses"]
+            )
+            if query is None:
+                return {
+                    "rag_mode": mode,
+                    "trace": _trace(
+                        state, "retrieve_knowledge", status="skipped", rag_mode=mode
+                    ),
+                }
+            bundle = await rag_runtime.retriever.retrieve(query)
+            warning = rag_runtime.degradation_reason
+            if bundle.warnings:
+                warning = ";".join(bundle.warnings)
+            update: dict[str, Any] = {
+                "knowledge_query": query,
+                "knowledge_bundle": bundle,
+                "rag_mode": mode,
+                "trace": _trace(
+                    state,
+                    "retrieve_knowledge",
+                    status="degraded" if warning else "ok",
+                    rag_mode=mode,
+                    knowledge_bundle=bundle,
+                ),
+            }
+            if warning:
+                update["rag_warning"] = warning
+            return update
+        except Exception as exc:
+            code = exc.code if isinstance(exc, AppError) else "RAG_RETRIEVAL_FAILED"
+            return {
+                "rag_mode": mode,
+                "rag_warning": code,
+                "trace": _trace(
+                    state,
+                    "retrieve_knowledge",
+                    status="degraded",
+                    error_code=code,
+                    rag_mode=mode,
+                ),
+            }
+
     async def inspect_evidence(state: AgentState) -> dict[str, Any]:
         try:
             responses: list[EvidenceResponse] = []
@@ -376,6 +446,8 @@ def build_graph(
         hypotheses = state.get("hypotheses")
         error = state.get("error")
         limitations = list(verification.limitations if verification else [])
+        if state.get("rag_warning"):
+            limitations.append(f"{state['rag_warning']}：知识检索已降级。")
         if error:
             limitations.insert(0, f"{error['code']}：分析流程已降级")
         if (
@@ -428,6 +500,7 @@ def build_graph(
         report_confidence = primary_candidate.confidence if primary_candidate else 0.0
         standard = _positive_float(state.get("standard_bandwidth_mbps"))
         actual = _positive_float(state.get("actual_bandwidth_mbps"))
+        knowledge_bundle = state.get("knowledge_bundle")
         try:
             report_target = Target(state.get("target", Target.DOWNLOAD))
         except (TypeError, ValueError):
@@ -462,6 +535,12 @@ def build_graph(
                 "analysis_id": analysis.analysis_id if analysis else None,
                 "evidence_rounds": state.get("round_count", 0),
                 "error_code": error["code"] if error else None,
+                "rag_mode": (
+                    state["rag_mode"].value if state.get("rag_mode") else "off"
+                ),
+                "knowledge_count": (
+                    len(knowledge_bundle.results) if knowledge_bundle else 0
+                ),
             },
         )
         return {
@@ -514,6 +593,11 @@ def build_graph(
     def after_reason(state: AgentState) -> str:
         if state.get("error"):
             return "report"
+        if rag_runtime is not None:
+            return "retrieve"
+        return after_retrieval(state)
+
+    def after_retrieval(state: AgentState) -> str:
         return "inspect_evidence" if state.get("evidence_requests") else "verify"
 
     def after_verify(state: AgentState) -> str:
@@ -533,6 +617,7 @@ def build_graph(
     graph.add_node("validate", validate)
     graph.add_node("analyze", analyze)
     graph.add_node("reason", reason)
+    graph.add_node("retrieve_knowledge", retrieve_knowledge)
     graph.add_node("inspect_evidence", inspect_evidence)
     graph.add_node("verify", verify)
     graph.add_node("report", report)
@@ -547,10 +632,16 @@ def build_graph(
         "reason",
         after_reason,
         {
+            "retrieve": "retrieve_knowledge",
             "inspect_evidence": "inspect_evidence",
             "verify": "verify",
             "report": "report",
         },
+    )
+    graph.add_conditional_edges(
+        "retrieve_knowledge",
+        after_retrieval,
+        {"inspect_evidence": "inspect_evidence", "verify": "verify"},
     )
     graph.add_conditional_edges(
         "inspect_evidence",

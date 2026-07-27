@@ -17,6 +17,7 @@ from packetmaster.graph import build_graph
 from packetmaster.mcp.client import SpeedMCPClient
 from packetmaster.mcp.server import create_server
 from packetmaster.model import DiagnosisModel
+from packetmaster.rag.runtime import build_rag_runtime
 from packetmaster.report import write_report
 
 
@@ -52,6 +53,7 @@ class DiagnosisService:
         client_factory: Callable[..., Any] = SpeedMCPClient,
         graph_factory: Callable[..., Any] = build_graph,
         artifact_manager: ArtifactManager | None = None,
+        rag_runtime: Any | None = None,
     ) -> None:
         self.settings = settings
         self.adapter = adapter or RealAnalyzerAdapter(
@@ -67,6 +69,11 @@ class DiagnosisService:
         self.graph_factory = graph_factory
         self.artifact_manager = artifact_manager or ArtifactManager(
             settings.artifact_root, settings.artifact_ttl_hours
+        )
+        self.rag_runtime = (
+            rag_runtime
+            if rag_runtime is not None
+            else build_rag_runtime(settings)
         )
 
     async def run(
@@ -92,6 +99,7 @@ class DiagnosisService:
                 mcp_client=client,
                 diagnosis_model=self.diagnosis_model,
                 context_builder=self.context_builder,
+                rag_runtime=self.rag_runtime,
             )
             result = await graph.ainvoke(
                 {
