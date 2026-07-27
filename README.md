@@ -2,11 +2,11 @@
 
 PacketMaster 是 TCP 测速不达标原因分析 Agent。它在本机流式处理 pcap/pcapng，模型只接收全量聚合后的有界摘要和分页证据，不接收原始报文、Payload、API Key 或本地绝对路径。
 
-当前提供三个入口：
+当前提供三个入口。推荐使用短命令 `pkm`，完整命令 `packetmaster` 继续兼容：
 
-- `packetmaster web`：本地 Web 对话与可视化工作台；
-- `packetmaster chat`：终端多轮对话；
-- `packetmaster diagnose`：一次性命令行诊断。
+- `pkm web`：本地 Web 对话与可视化工作台；
+- `pkm chat`：终端多轮对话；
+- `pkm diagnose`：一次性命令行诊断。
 
 ## 安装
 
@@ -62,13 +62,13 @@ Web 模式默认只监听 `127.0.0.1`，启动 API、单 Worker 和已构建的 
 
 ```bash
 conda activate agent
-packetmaster web
+pkm web
 ```
 
 不自动打开浏览器：
 
 ```bash
-packetmaster web --no-browser
+pkm web --no-browser
 ```
 
 默认访问地址为 `http://127.0.0.1:8765`。端口占用时会继续尝试后续本机端口。
@@ -94,20 +94,20 @@ export WEB_DATABASE_PATH='/Users/me/PacketMaster/packetmaster-web.sqlite'
 省略 `--target` 时固定使用 `download`：
 
 ```powershell
-packetmaster diagnose "C:\captures\测速 报文.pcapng" --standard 1000 --actual 600
+pkm diagnose "C:\captures\测速 报文.pcapng" --standard 1000 --actual 600
 ```
 
 只有明确需要时才使用上行或双向：
 
 ```powershell
-packetmaster diagnose "C:\captures\test.pcapng" --standard 1000 --actual 600 --target upload
-packetmaster diagnose "C:\captures\test.pcapng" --standard 1000 --actual 600 --target both
+pkm diagnose "C:\captures\test.pcapng" --standard 1000 --actual 600 --target upload
+pkm diagnose "C:\captures\test.pcapng" --standard 1000 --actual 600 --target both
 ```
 
 指定报告目录并保留产物：
 
 ```bash
-packetmaster diagnose samples/packetmaster_download_underperform.pcapng \
+pkm diagnose samples/packetmaster_download_underperform.pcapng \
   --standard 1000 \
   --actual 20 \
   --output-dir artifacts/my-first-report \
@@ -117,7 +117,7 @@ packetmaster diagnose samples/packetmaster_download_underperform.pcapng \
 ## CLI 对话
 
 ```bash
-packetmaster chat
+pkm chat
 ```
 
 可以一次提供完整参数，也可以分多轮补充：
@@ -160,7 +160,7 @@ npm run build
 npm run test:e2e
 ```
 
-`npm run test:e2e` 默认使用系统 Google Chrome 访问 `http://127.0.0.1:8765`。先启动 `packetmaster web --no-browser`。
+`npm run test:e2e` 默认使用系统 Google Chrome 访问 `http://127.0.0.1:8765`。先启动 `pkm web --no-browser`。
 
 大报文真实门禁：
 

@@ -12,6 +12,12 @@ def _venv_python(environment: Path) -> Path:
     return environment / "bin" / "python"
 
 
+def _venv_script(environment: Path, name: str) -> Path:
+    if sys.platform == "win32":
+        return environment / "Scripts" / f"{name}.exe"
+    return environment / "bin" / name
+
+
 def test_wheel_install_contains_default_speed_analyze_runtime(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[2]
     wheelhouse = tmp_path / "wheels"
@@ -49,6 +55,20 @@ def test_wheel_install_contains_default_speed_analyze_runtime(tmp_path: Path) ->
         timeout=120,
     )
     assert installed.returncode == 0, installed.stdout + installed.stderr
+
+    for command in ("packetmaster", "pkm"):
+        executable = _venv_script(environment, command)
+        help_result = subprocess.run(
+            [str(executable), "--help"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+        assert executable.is_file()
+        assert help_result.returncode == 0, help_result.stdout + help_result.stderr
+        assert "PacketMaster" in help_result.stdout
 
     outside_repository = tmp_path / "outside"
     outside_repository.mkdir()

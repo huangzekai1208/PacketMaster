@@ -22,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 packetmaster = "packetmaster.cli:app"
+pkm = "packetmaster.cli:app"
 
 [project.optional-dependencies]
 dev = [
