@@ -228,8 +228,19 @@ class KnowledgeDatabase:
 
 
 class SQLiteKnowledgeStore:
-    def __init__(self, database: KnowledgeDatabase) -> None:
+    def __init__(
+        self,
+        database: KnowledgeDatabase,
+        *,
+        embedding_model: str | None = None,
+        embedding_dimension: int | None = None,
+    ) -> None:
         self.database = database
+        self.embedding_model = embedding_model
+        self.embedding_dimension = embedding_dimension
+        self._vector_cache: tuple[
+            int, int, list[tuple[dict[str, object], tuple[float, ...]]]
+        ] | None = None
 
     def save_draft(
         self,
@@ -353,6 +364,9 @@ class SQLiteKnowledgeStore:
     def save_embeddings(
         self, version_id: str, embeddings: Sequence[StoredEmbedding]
     ) -> None:
+        models = {(item.model_name, item.dimension) for item in embeddings}
+        if len(models) > 1:
+            raise ValueError("one embedding batch must use one model and dimension")
         with self.database.transaction(immediate=True) as connection:
             chunks = connection.execute(
                 "SELECT chunk_id FROM knowledge_chunks WHERE version_id = ?",
@@ -386,6 +400,23 @@ class SQLiteKnowledgeStore:
                     for item in embeddings
                 ],
             )
+            self._increment_generation(connection)
+
+    def indexed_chunk_ids(
+        self, version_id: str, *, model_name: str, dimension: int
+    ) -> set[str]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT c.chunk_id
+                FROM knowledge_chunks c
+                JOIN knowledge_embeddings e ON e.chunk_id = c.chunk_id
+                WHERE c.version_id = ? AND e.model_name = ? AND e.dimension = ?
+                  AND e.content_hash = c.content_hash
+                """,
+                (version_id, model_name, dimension),
+            ).fetchall()
+        return {str(row[0]) for row in rows}
 
     def publish_version(self, version_id: str, *, approved_by: str) -> None:
         if not approved_by or len(approved_by) > 128:
@@ -673,7 +704,7 @@ class SQLiteKnowledgeStore:
                 parameters,
             ).fetchall()
         candidates = [
-            self._candidate(row, rank=index + 1)
+            self._candidate(row, keyword_rank=index + 1)
             for index, row in enumerate(rows)
         ]
         applicable = [
@@ -688,12 +719,40 @@ class SQLiteKnowledgeStore:
         *,
         limit: int,
     ) -> list[RetrievalCandidate]:
-        raise AppError(
-            code="RAG_VECTOR_INDEX_UNAVAILABLE",
-            message="向量检索将在 RAG 任务 4 中启用",
-            recoverable=True,
-            suggested_action="当前仅可使用关键词检索。",
-        )
+        if not 1 <= limit <= 100:
+            raise ValueError("vector search limit must be between 1 and 100")
+        from packetmaster.rag.embedding import normalize_vector
+
+        try:
+            normalized = normalize_vector(
+                vector, expected_dimension=self.embedding_dimension
+            )
+        except ValueError as exc:
+            raise AppError(
+                code="INVALID_QUERY_VECTOR",
+                message="query vector dimension or value is invalid",
+                recoverable=True,
+                suggested_action="请使用与知识索引相同的 Embedding 模型。",
+            ) from exc
+        rows = self._approved_vectors(len(normalized))
+        scored: list[tuple[float, dict[str, object]]] = []
+        for row, stored in rows:
+            pairs = zip(normalized, stored, strict=True)
+            score = sum(left * right for left, right in pairs)
+            scored.append((score, row))
+        scored.sort(key=lambda item: (-item[0], str(item[1]["chunk_id"])))
+        candidates = [
+            self._candidate(
+                row,
+                vector_rank=index + 1,
+                semantic_score=max(0.0, min(1.0, (score + 1.0) / 2.0)),
+            )
+            for index, (score, row) in enumerate(scored[: limit * 3])
+        ]
+        applicable = [
+            item for item in candidates if self._direction_matches(item, query)
+        ]
+        return applicable[:limit]
 
     async def get_candidate(self, chunk_id: str) -> RetrievalCandidate | None:
         with self.database.connect() as connection:
@@ -709,7 +768,53 @@ class SQLiteKnowledgeStore:
                 """,
                 (chunk_id,),
             ).fetchone()
-        return self._candidate(row, rank=None) if row else None
+        return self._candidate(row) if row else None
+
+    def _approved_vectors(
+        self, dimension: int
+    ) -> list[tuple[dict[str, object], tuple[float, ...]]]:
+        from packetmaster.rag.embedding import decode_vector
+
+        with self.database.connect() as connection:
+            generation = int(
+                connection.execute(
+                    "SELECT value FROM knowledge_metadata "
+                    "WHERE key = 'index_generation'"
+                ).fetchone()[0]
+            )
+            if (
+                self._vector_cache is not None
+                and self._vector_cache[0] == generation
+                and self._vector_cache[1] == dimension
+            ):
+                return self._vector_cache[2]
+            model_clause = ""
+            parameters: list[object] = [dimension]
+            if self.embedding_model:
+                model_clause = " AND e.model_name = ?"
+                parameters.append(self.embedding_model)
+            records = connection.execute(
+                f"""
+                SELECT c.*, d.title, d.knowledge_type, d.authority,
+                       d.applicability_json, v.source_name,
+                       e.vector, e.dimension, e.model_name
+                FROM knowledge_embeddings e
+                JOIN knowledge_chunks c ON c.chunk_id = e.chunk_id
+                JOIN knowledge_documents d ON d.knowledge_id = c.knowledge_id
+                JOIN knowledge_versions v ON v.version_id = c.version_id
+                WHERE c.status = 'approved' AND d.status = 'approved'
+                  AND v.status = 'approved' AND e.dimension = ?
+                  {model_clause}
+                ORDER BY c.chunk_id
+                """,
+                parameters,
+            ).fetchall()
+        decoded = [
+            (dict(row), decode_vector(row["vector"], int(row["dimension"])))
+            for row in records
+        ]
+        self._vector_cache = (generation, dimension, decoded)
+        return decoded
 
     @staticmethod
     def _document(row: sqlite3.Row) -> KnowledgeDocument:
@@ -758,7 +863,14 @@ class SQLiteKnowledgeStore:
         )
 
     @staticmethod
-    def _candidate(row: sqlite3.Row, *, rank: int | None) -> RetrievalCandidate:
+    def _candidate(
+        row: sqlite3.Row | dict[str, object],
+        *,
+        keyword_rank: int | None = None,
+        vector_rank: int | None = None,
+        semantic_score: float = 0.0,
+    ) -> RetrievalCandidate:
+        rank = keyword_rank or vector_rank
         return RetrievalCandidate(
             knowledge_id=row["knowledge_id"],
             version_id=row["version_id"],
@@ -771,9 +883,10 @@ class SQLiteKnowledgeStore:
             source_location=row["source_location"],
             applicability=json.loads(row["applicability_json"]),
             content=row["content"],
-            keyword_rank=rank,
+            keyword_rank=keyword_rank,
+            vector_rank=vector_rank,
             fusion_score=(1 / (60 + rank)) if rank else 0,
-            rerank_score=(1 / (60 + rank)) if rank else 0,
+            rerank_score=semantic_score or ((1 / (60 + rank)) if rank else 0),
         )
 
     @staticmethod

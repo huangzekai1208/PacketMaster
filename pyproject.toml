@@ -25,6 +25,10 @@ packetmaster = "packetmaster.cli:app"
 pkm = "packetmaster.cli:app"
 
 [project.optional-dependencies]
+rag = [
+    "numpy>=1.26,<3",
+    "sentence-transformers>=3,<6",
+]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
