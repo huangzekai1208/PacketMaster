@@ -1,4 +1,4 @@
-"""Versioned SQLite persistence for the local PacketMaster Web workspace."""
+"""本机 PacketMaster Web 工作区的版本化 SQLite 持久化。"""
 
 from __future__ import annotations
 

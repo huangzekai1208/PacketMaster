@@ -1,4 +1,4 @@
-"""Per-request artifact storage and disk-space preflight checks."""
+"""按请求隔离诊断产物，并在写入前检查本机磁盘空间。"""
 
 from __future__ import annotations
 

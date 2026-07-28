@@ -1,4 +1,4 @@
-"""Cross-platform process and path helpers."""
+"""跨 Windows、macOS 与 Linux 的进程组和路径处理辅助函数。"""
 
 from __future__ import annotations
 

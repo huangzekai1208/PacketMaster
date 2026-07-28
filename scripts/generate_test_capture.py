@@ -1,4 +1,4 @@
-"""Generate deterministic multi-flow TCP captures for release-gate tests."""
+"""生成可复现的多 TCP 流测试报文，供发布门禁与性能测试使用。"""
 
 from __future__ import annotations
 

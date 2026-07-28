@@ -1,4 +1,4 @@
-"""Bounded LangGraph workflow for evidence-driven TCP speed diagnosis."""
+"""基于证据的 TCP 测速诊断 LangGraph：限制轮次、请求数和上下文大小。"""
 
 from __future__ import annotations
 
@@ -48,6 +48,7 @@ _REPORT_REFERENCE_FIELDS = (
 
 
 class AgentState(TypedDict, total=False):
+    """图节点之间传递的受限状态；原始报文不进入此状态。"""
     request: AnalyzeRequest | dict[str, Any]
     standard_bandwidth_mbps: float
     actual_bandwidth_mbps: float
@@ -93,6 +94,7 @@ def _positive_float(value: Any, default: float = 1.0) -> float:
 
 
 def _report_key_evidence(responses: list[EvidenceResponse]) -> list[dict[str, Any]]:
+    # 报告只保存有限字段的证据引用，避免将大页证据或 Payload 带入模型/报告。
     pages: list[dict[str, Any]] = []
     for response in responses[:MAX_KEY_EVIDENCE_PAGES]:
         coverage = response.coverage_range
@@ -135,6 +137,7 @@ def _trace(
     rag_mode: RagMode | None = None,
     knowledge_bundle: KnowledgeBundle | None = None,
 ) -> list[dict[str, Any]]:
+    # trace 是可审计摘要，不写入请求正文、报文路径或模型密钥。
     raw_target = state.get("target", Target.DOWNLOAD)
     try:
         target = Target(raw_target).value
@@ -179,6 +182,7 @@ def build_graph(
     def normalize_requests(
         state: AgentState, candidates: list[EvidenceRequest]
     ) -> list[EvidenceRequest]:
+        # 模型生成的证据请求必须绑定当前 analysis_id，并对等价分页请求去重。
         normalized: list[EvidenceRequest] = []
         current_keys: set[str] = set()
         analysis_id = state["analysis"].analysis_id
@@ -215,6 +219,7 @@ def build_graph(
         return normalized
 
     async def validate(state: AgentState) -> dict[str, Any]:
+        # 首节点统一补全默认方向和数值校验，后续节点只处理规范化请求。
         try:
             raw = state.get("request", {})
             if isinstance(raw, AnalyzeRequest):

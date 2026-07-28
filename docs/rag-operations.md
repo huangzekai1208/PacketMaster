@@ -16,20 +16,23 @@ RAG 故障不会阻止基础诊断、Web 启动和无 RAG 问答。生产默认�
 python -m pip install -r requirements.txt
 ```
 
-需要 RAG 时在项目根目录安装可选依赖：
+默认且唯一的 Embedding Provider 为百炼 DashScope，默认模型为 `text-embedding-v4`、维度为 1024。配置 API Key：
 
 ```powershell
-python -m pip install -e ".[rag]"
+$env:EMBEDDING_API_KEY = "..."
 ```
 
-默认模型为 `intfloat/multilingual-e5-small`，向量维度固定为 384。开发机可首次联网下载。Windows 离线部署应在联网机器下载完整模型目录，经组织批准的介质传到目标主机，再配置：
+DashScope 会接收已经过导入脱敏的知识切片和检索查询。确认组织允许该数据流后可显式配置：
 
 ```powershell
-$env:EMBEDDING_MODEL_PATH = "D:\PacketMaster\models\multilingual-e5-small"
-$env:EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
+$env:EMBEDDING_PROVIDER = "dashscope"
+$env:EMBEDDING_API_KEY = "..."
+$env:EMBEDDING_MODEL = "text-embedding-v4"
+# v4 的本项目默认维度为 1024；只有在已验证模型规格时才覆盖。
+$env:EMBEDDING_DIMENSION = "1024"
 ```
 
-离线目录必须包含模型配置、Tokenizer 和权重文件。不要只复制 Hugging Face 缓存中的单个权重文件。模型目录属于本地运行资产，不提交 Git。
+默认端点为 DashScope OpenAI 兼容地址。私有网关可设置 `EMBEDDING_BASE_URL`；可用 `EMBEDDING_TIMEOUT_SECONDS` 和 `EMBEDDING_MAX_RETRIES` 调整远程调用边界。不要把 `EMBEDDING_API_KEY` 写入 Git、知识源文件或诊断报告。
 
 ## 3. 配置
 
@@ -104,15 +107,16 @@ pkm knowledge reindex rfc.tcp-window:v1
 pkm knowledge reindex rfc.tcp-window:v1 --force
 ```
 
+切换模型或维度后，旧向量不会被新配置检索；对每个已发布版本运行强制重建，并重新执行正式评估。DashScope 不可用时 RAG 会降级，基础诊断继续运行。`active` 门禁不会因更换模型自动通过。
+
 强制重建先完整生成新向量，再在一个事务中替换；中途失败保留旧索引。API 和 Worker 按索引代次刷新各自的只读缓存。
 
 常见错误：
 
 | 错误码 | 含义 | 处理 |
 | --- | --- | --- |
-| `RAG_DEPENDENCY_MISSING` | 未安装可选依赖 | 安装 `.[rag]` |
-| `EMBEDDING_MODEL_UNAVAILABLE` | 模型缺失或离线目录不完整 | 检查 `EMBEDDING_MODEL_PATH` |
-| `EMBEDDING_DIMENSION_MISMATCH` | 模型不是 384 维 | 恢复指定模型并重建索引 |
+| `EMBEDDING_AUTH_MISSING` | 未配置 DashScope API Key | 配置 `EMBEDDING_API_KEY` |
+| `EMBEDDING_SERVICE_UNAVAILABLE` | DashScope 网络、限流或服务异常 | 检查网络、配额和服务状态后重试 |
 | `RAG_DATABASE_LOCKED` | 短时写锁冲突 | 等待其他管理命令结束后重试 |
 | `RAG_DATABASE_UNAVAILABLE` | DB 损坏或不可读 | 保持基础诊断，按备份恢复 |
 | `RAG_CAPACITY_EXCEEDED` | 正式切片超过 25,000 | 停用冗余知识或评估 Qdrant Server |
@@ -145,7 +149,7 @@ pkm knowledge health
 pkm knowledge reindex <version-id> --force
 ```
 
-数据库和本地模型不要打包进诊断报告。备份介质权限应至少与内部故障案例的敏感级别一致。
+数据库、API Key 和诊断产物不要打包进诊断报告。备份介质权限应至少与内部故障案例的敏感级别一致。
 
 ## 8. 容量和 Qdrant 迁移条件
 

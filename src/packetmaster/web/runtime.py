@@ -1,4 +1,4 @@
-"""Cross-platform lifecycle for the local PacketMaster Web workspace."""
+"""本机 PacketMaster Web 工作区的跨平台启动、端口与进程生命周期。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Structured errors exposed by PacketMaster interfaces."""
+"""PacketMaster 各接口统一返回的结构化错误类型。"""
 
 from __future__ import annotations
 

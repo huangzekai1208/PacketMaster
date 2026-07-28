@@ -1,4 +1,4 @@
-"""Offline RAG evaluation dataset and repeatable quality metrics."""
+"""离线 RAG 标注评估集、可复现指标与 active 门禁计算。"""
 
 from __future__ import annotations
 

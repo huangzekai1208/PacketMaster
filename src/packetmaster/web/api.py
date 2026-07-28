@@ -1,4 +1,4 @@
-"""FastAPI application factory for the local PacketMaster Web service."""
+"""PacketMaster 本机 FastAPI 服务工厂及公开 Web API 路由。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, File, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,6 +20,10 @@ from packetmaster.config import Settings
 from packetmaster.domain import EvidenceRequest, EvidenceResponse, EvidenceType, Target
 from packetmaster.errors import AppError
 from packetmaster.model import DiagnosisModel
+from packetmaster.rag.contracts import KnowledgeStatus, KnowledgeType
+from packetmaster.rag.database import KnowledgeDatabase, SQLiteKnowledgeStore
+from packetmaster.rag.embedding import EmbeddingIndexer, build_embedding_provider
+from packetmaster.rag.importer import ImportMetadata, KnowledgeImporter
 from packetmaster.rag.runtime import build_rag_runtime
 from packetmaster.web.analysis import AnalysisReadService
 from packetmaster.web.captures import CaptureRegistry, CaptureRepository
@@ -28,6 +32,7 @@ from packetmaster.web.contracts import (
     AnalysisDetail,
     AnalysisSummary,
     ApiError,
+    ApproveKnowledgeRequest,
     CaptureSummary,
     ChatRequest,
     ChatTurnResult,
@@ -35,12 +40,21 @@ from packetmaster.web.contracts import (
     ConversationResult,
     CreateSessionRequest,
     DeleteResult,
+    DisableKnowledgeRequest,
     ErrorEnvelope,
     FlowSummary,
     HealthStatus,
+    KnowledgeDetail,
+    KnowledgeEvaluationStatus,
+    KnowledgeImportPreview,
+    KnowledgeImportRequest,
+    KnowledgeMutationResult,
+    KnowledgeSummary,
+    KnowledgeVersionSummary,
     MetricSeries,
     Page,
     RegisterCaptureRequest,
+    ReindexKnowledgeRequest,
     ReportResult,
     SessionDetail,
     SessionSummary,
@@ -58,6 +72,7 @@ from packetmaster.web.database import (
 from packetmaster.web.tasks import AnalysisTaskRepository
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost"}
+_MAX_CAPTURE_UPLOAD_BYTES = 5 * 1024 * 1024 * 1024
 
 
 def create_app(
@@ -78,13 +93,17 @@ def create_app(
     )
     app.state.settings = runtime
     app.state.database = database
+    # 浏览器无法把本机绝对路径交给服务端；所选报文统一落入受管目录。
+    capture_upload_root = (
+        runtime.artifact_root / "web-captures"
+    ).expanduser().resolve()
     conversation = WebConversationService(
         sessions=SessionRepository(database),
         messages=MessageRepository(database),
         intents=PendingIntentRepository(database),
         captures=CaptureRegistry(
             CaptureRepository(database),
-            allowed_roots=runtime.web_allowed_capture_roots,
+            allowed_roots=[*runtime.web_allowed_capture_roots, capture_upload_root],
         ),
         tasks=AnalysisTaskRepository(database),
         model=conversation_model or DiagnosisModel(settings=runtime),
@@ -101,6 +120,47 @@ def create_app(
     app.state.analysis_reads = analysis_reads
     app.state.analysis_chat = analysis_chat
     allowed_hosts = {*_LOOPBACK_HOSTS, *( ["testserver"] if testing else [])}
+
+    def knowledge_store() -> tuple[KnowledgeDatabase, SQLiteKnowledgeStore]:
+        knowledge_database = KnowledgeDatabase(runtime.knowledge_database_path)
+        knowledge_database.initialize()
+        return knowledge_database, SQLiteKnowledgeStore(knowledge_database)
+
+    def import_preview(body: KnowledgeImportRequest):
+        metadata = ImportMetadata(
+            knowledge_id=body.knowledge_id,
+            title=body.title,
+            knowledge_type=body.knowledge_type,
+            authority=body.authority,
+            source_name=body.source_name,
+            source_location=body.source_location,
+            language=body.language,
+            summary=body.summary,
+            version_number=body.version,
+        )
+        try:
+            return KnowledgeImporter().preview_text(
+                body.content, body.file_name, metadata
+            )
+        except ValueError as exc:
+            raise AppError(
+                code="KNOWLEDGE_IMPORT_INVALID",
+                message="知识文件或导入元数据无效",
+                recoverable=True,
+                suggested_action="请检查文件格式、大小和导入字段后重试。",
+            ) from exc
+
+    def knowledge_summary(document) -> KnowledgeSummary:
+        return KnowledgeSummary(
+            knowledge_id=document.knowledge_id,
+            title=document.title,
+            knowledge_type=document.knowledge_type,
+            authority=document.authority,
+            status=document.status,
+            language=document.language,
+            summary=document.summary,
+            current_version_id=document.current_version_id,
+        )
 
     @app.middleware("http")
     async def local_security(request: Request, call_next):
@@ -216,6 +276,230 @@ def create_app(
             request_id=request.state.request_id,
         )
 
+    @app.get(
+        "/api/knowledge",
+        response_model=SuccessEnvelope[Page[KnowledgeSummary]],
+        tags=["knowledge"],
+    )
+    async def list_knowledge(
+        request: Request,
+        status: KnowledgeStatus | None = None,
+        knowledge_type: KnowledgeType | None = None,
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> SuccessEnvelope[Page[KnowledgeSummary]]:
+        _, store = knowledge_store()
+        items, total = store.list_documents(
+            status=status, knowledge_type=knowledge_type, offset=offset, limit=limit
+        )
+        return SuccessEnvelope(
+            data=Page(
+                items=[knowledge_summary(item) for item in items],
+                total=total,
+                offset=offset,
+                limit=limit,
+            ),
+            request_id=request.state.request_id,
+        )
+
+    @app.get(
+        "/api/knowledge/evaluation-status",
+        response_model=SuccessEnvelope[KnowledgeEvaluationStatus],
+        tags=["knowledge"],
+    )
+    async def knowledge_evaluation_status(
+        request: Request,
+    ) -> SuccessEnvelope[KnowledgeEvaluationStatus]:
+        knowledge_database, store = knowledge_store()
+        with knowledge_database.connect() as connection:
+            row = connection.execute(
+                "SELECT value FROM knowledge_metadata WHERE key = 'last_evaluation'"
+            ).fetchone()
+        report = json.loads(str(row[0])) if row else None
+        requested = runtime.effective_rag_mode.value
+        effective = requested
+        if requested == "active" and not store.active_gate_passed():
+            effective = "shadow"
+        return SuccessEnvelope(
+            data=KnowledgeEvaluationStatus(
+                active_gate_passed=store.active_gate_passed(),
+                requested_mode=requested,
+                effective_mode=effective,
+                last_report=report,
+            ),
+            request_id=request.state.request_id,
+        )
+
+    @app.get(
+        "/api/knowledge/{knowledge_id}",
+        response_model=SuccessEnvelope[KnowledgeDetail],
+        tags=["knowledge"],
+    )
+    async def get_knowledge(
+        knowledge_id: str, request: Request
+    ) -> SuccessEnvelope[KnowledgeDetail]:
+        _, store = knowledge_store()
+        document = store.get_document(knowledge_id)
+        if document is None:
+            raise AppError(
+                code="KNOWLEDGE_NOT_FOUND",
+                message="知识不存在",
+                recoverable=True,
+                suggested_action="请刷新知识列表后重试。",
+            )
+        versions = store.list_versions(knowledge_id)
+        return SuccessEnvelope(
+            data=KnowledgeDetail(
+                document=knowledge_summary(document),
+                versions=[
+                    KnowledgeVersionSummary(
+                        version_id=item.version_id,
+                        version_number=item.version_number,
+                        source_name=item.source_name,
+                        source_location=item.source_location,
+                        status=item.status,
+                        created_at=item.created_at,
+                        approved_at=item.approved_at,
+                        approved_by=item.approved_by,
+                        chunk_count=len(store.get_chunks(item.version_id)),
+                    )
+                    for item in versions
+                ],
+            ),
+            request_id=request.state.request_id,
+        )
+
+    @app.post(
+        "/api/knowledge/preview",
+        response_model=SuccessEnvelope[KnowledgeImportPreview],
+        tags=["knowledge"],
+    )
+    async def preview_knowledge(
+        request: Request, body: KnowledgeImportRequest
+    ) -> SuccessEnvelope[KnowledgeImportPreview]:
+        preview = import_preview(body)
+        return SuccessEnvelope(
+            data=KnowledgeImportPreview(
+                knowledge_id=preview.document.knowledge_id,
+                version_id=preview.version.version_id,
+                chunk_count=len(preview.chunks),
+                risk_flags=preview.risk_flags,
+                warnings=preview.warnings,
+                requires_risk_acknowledgement=preview.requires_risk_acknowledgement,
+                chunks=[
+                    {
+                        "chunk_id": item.chunk_id,
+                        "heading_path": item.heading_path,
+                        "content": item.content,
+                    }
+                    for item in preview.chunks[:16]
+                ],
+            ),
+            request_id=request.state.request_id,
+        )
+
+    @app.post(
+        "/api/knowledge/import",
+        response_model=SuccessEnvelope[KnowledgeMutationResult],
+        tags=["knowledge"],
+    )
+    async def import_knowledge(
+        request: Request, body: KnowledgeImportRequest
+    ) -> SuccessEnvelope[KnowledgeMutationResult]:
+        preview = import_preview(body)
+        if preview.requires_risk_acknowledgement and not body.ack_risk:
+            raise AppError(
+                code="KNOWLEDGE_RISK_ACK_REQUIRED",
+                message="知识内容包含风险标记，需要确认后才能保存草稿",
+                recoverable=True,
+                suggested_action="审核预览内容后确认风险提示。",
+            )
+        _, store = knowledge_store()
+        store.save_draft(
+            preview.document,
+            preview.version,
+            preview.chunks,
+            case_profile=preview.case_profile,
+        )
+        return SuccessEnvelope(
+            data=KnowledgeMutationResult(
+                version_id=preview.version.version_id,
+                status=KnowledgeStatus.DRAFT,
+            ),
+            request_id=request.state.request_id,
+        )
+
+    @app.post(
+        "/api/knowledge/versions/{version_id}/approve",
+        response_model=SuccessEnvelope[KnowledgeMutationResult],
+        tags=["knowledge"],
+    )
+    async def approve_knowledge(
+        version_id: str, request: Request, body: ApproveKnowledgeRequest
+    ) -> SuccessEnvelope[KnowledgeMutationResult]:
+        knowledge_database, _ = knowledge_store()
+        provider = build_embedding_provider(runtime)
+        store = SQLiteKnowledgeStore(
+            knowledge_database,
+            embedding_model=provider.model_name,
+            embedding_dimension=provider.dimension,
+        )
+        indexed = await EmbeddingIndexer(store, provider).index_version(version_id)
+        store.publish_version(version_id, approved_by=body.reviewer)
+        return SuccessEnvelope(
+            data=KnowledgeMutationResult(
+                version_id=version_id,
+                indexed_chunks=indexed,
+                status=KnowledgeStatus.APPROVED,
+            ),
+            request_id=request.state.request_id,
+        )
+
+    @app.post(
+        "/api/knowledge/versions/{version_id}/disable",
+        response_model=SuccessEnvelope[KnowledgeMutationResult],
+        tags=["knowledge"],
+    )
+    async def disable_knowledge(
+        version_id: str, request: Request, body: DisableKnowledgeRequest
+    ) -> SuccessEnvelope[KnowledgeMutationResult]:
+        _, store = knowledge_store()
+        store.disable_version(version_id, actor=body.actor, reason=body.reason)
+        return SuccessEnvelope(
+            data=KnowledgeMutationResult(
+                version_id=version_id, status=KnowledgeStatus.DISABLED
+            ),
+            request_id=request.state.request_id,
+        )
+
+    @app.post(
+        "/api/knowledge/versions/{version_id}/reindex",
+        response_model=SuccessEnvelope[KnowledgeMutationResult],
+        tags=["knowledge"],
+    )
+    async def reindex_knowledge(
+        version_id: str, request: Request, body: ReindexKnowledgeRequest
+    ) -> SuccessEnvelope[KnowledgeMutationResult]:
+        knowledge_database, _ = knowledge_store()
+        provider = build_embedding_provider(runtime)
+        store = SQLiteKnowledgeStore(
+            knowledge_database,
+            embedding_model=provider.model_name,
+            embedding_dimension=provider.dimension,
+        )
+        indexed = await EmbeddingIndexer(store, provider).index_version(
+            version_id, force=body.force
+        )
+        version = store.get_version(version_id)
+        return SuccessEnvelope(
+            data=KnowledgeMutationResult(
+                version_id=version_id,
+                indexed_chunks=indexed,
+                status=version.status if version else None,
+            ),
+            request_id=request.state.request_id,
+        )
+
     @app.post(
         "/api/sessions",
         response_model=SuccessEnvelope[SessionSummary],
@@ -318,6 +602,71 @@ def create_app(
             data=conversation.register_capture(body.path),
             request_id=request.state.request_id,
         )
+
+    @app.post(
+        "/api/captures/upload",
+        response_model=SuccessEnvelope[CaptureSummary],
+        tags=["captures"],
+    )
+    async def upload_capture(
+        request: Request, file: UploadFile = File(...)
+    ) -> SuccessEnvelope[CaptureSummary]:
+        original_name = Path(file.filename or "").name
+        if not original_name or Path(original_name).suffix.casefold() not in {
+            ".pcap",
+            ".pcapng",
+        }:
+            raise AppError(
+                code="UNSUPPORTED_CAPTURE_TYPE",
+                message="只支持 pcap 和 pcapng 报文",
+                recoverable=True,
+                suggested_action="请选择后缀为 .pcap 或 .pcapng 的文件。",
+            )
+        # 使用随机文件名避免客户端文件名覆盖或路径穿越，原名只作为展示元数据。
+        capture_upload_root.mkdir(parents=True, exist_ok=True)
+        suffix = Path(original_name).suffix.casefold()
+        destination = capture_upload_root / f"{uuid.uuid4().hex}{suffix}"
+        total_bytes = 0
+        try:
+            with destination.open("xb") as output:
+                # 分块落盘，避免将大报文整体读入 Web 进程内存。
+                while chunk := await file.read(1024 * 1024):
+                    total_bytes += len(chunk)
+                    if total_bytes > _MAX_CAPTURE_UPLOAD_BYTES:
+                        raise AppError(
+                            code="CAPTURE_UPLOAD_TOO_LARGE",
+                            message="报文文件超过 Web 上传大小限制",
+                            recoverable=True,
+                            suggested_action=(
+                                "请使用较小的报文文件，或通过 CLI 注册本机路径。"
+                            ),
+                        )
+                    output.write(chunk)
+            if total_bytes == 0:
+                raise AppError(
+                    code="EMPTY_CAPTURE_UPLOAD",
+                    message="报文文件为空",
+                    recoverable=True,
+                    suggested_action="请选择包含报文数据的 pcap 或 pcapng 文件。",
+                )
+            capture = conversation.captures.register_uploaded(
+                destination, original_name=original_name
+            )
+        except AppError:
+            # 无效或超限上传不保留半成品；成功注册后才由受管目录持久化。
+            destination.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            destination.unlink(missing_ok=True)
+            raise AppError(
+                code="CAPTURE_UPLOAD_FAILED",
+                message="报文文件上传失败",
+                recoverable=True,
+                suggested_action="请检查本机磁盘空间和文件读取权限后重试。",
+            ) from exc
+        finally:
+            await file.close()
+        return SuccessEnvelope(data=capture, request_id=request.state.request_id)
 
     @app.get(
         "/api/captures/recent",
@@ -581,7 +930,12 @@ def _error_response(
 def _app_error_status(code: str) -> int:
     if code.endswith("_NOT_FOUND"):
         return 404
-    if code in {"ANALYSIS_ALREADY_ACTIVE", "CAPTURE_IN_USE", "SESSION_IN_USE"}:
+    if code in {
+        "ANALYSIS_ALREADY_ACTIVE",
+        "CAPTURE_IN_USE",
+        "SESSION_IN_USE",
+        "KNOWLEDGE_RISK_ACK_REQUIRED",
+    }:
         return 409
     if code in {"INVALID_TASK_TRANSITION", "ANALYSIS_NOT_RETRYABLE"}:
         return 409

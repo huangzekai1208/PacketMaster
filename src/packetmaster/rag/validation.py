@@ -1,4 +1,4 @@
-"""Deterministic validation for model-produced knowledge citations."""
+"""对模型产出的知识引用进行确定性校验与冲突识别。"""
 
 from __future__ import annotations
 

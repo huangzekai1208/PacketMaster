@@ -1,4 +1,4 @@
-"""Provider protocols used by the RAG application layer."""
+"""RAG 应用层依赖的 embedding Provider 与知识存储协议。"""
 
 from __future__ import annotations
 

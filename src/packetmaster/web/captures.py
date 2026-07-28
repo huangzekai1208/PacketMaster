@@ -1,4 +1,4 @@
-"""Safe backend-only registration of local packet capture files."""
+"""安全注册本机或浏览器上传的报文文件，并仅暴露公共元数据。"""
 
 from __future__ import annotations
 
@@ -43,6 +43,7 @@ class CaptureRepository:
         *,
         size_bytes: int,
         modified_at_ns: int,
+        file_name: str | None = None,
         now: datetime | None = None,
     ) -> CaptureRecord:
         current = (now or datetime.now(UTC)).astimezone(UTC)
@@ -61,7 +62,7 @@ class CaptureRepository:
                     WHERE capture_id = ?
                     """,
                     (
-                        path.name,
+                        file_name or path.name,
                         size_bytes,
                         modified_at_ns,
                         timestamp,
@@ -84,7 +85,7 @@ class CaptureRepository:
                 """,
                 (
                     capture_id,
-                    path.name,
+                    file_name or path.name,
                     size_bytes,
                     local_path,
                     modified_at_ns,
@@ -167,6 +168,37 @@ class CaptureRegistry:
                 "报文文件不存在或无法访问",
                 "请检查路径后重新注册报文。",
             ) from exc
+        return self._register_resolved(resolved)
+
+    def register_uploaded(self, path: Path, *, original_name: str) -> CaptureSummary:
+        # 受管文件名是随机值，向 UI 保留用户选择时的原始文件名即可。
+        file_name = Path(original_name).name
+        if not file_name or file_name != original_name:
+            raise _capture_error(
+                "INVALID_CAPTURE_NAME",
+                "报文文件名无效",
+                "请重新选择 pcap 或 pcapng 文件。",
+            )
+        if Path(file_name).suffix.casefold() not in {".pcap", ".pcapng"}:
+            raise _capture_error(
+                "UNSUPPORTED_CAPTURE_TYPE",
+                "只支持 pcap 和 pcapng 报文",
+                "请选择后缀为 .pcap 或 .pcapng 的文件。",
+            )
+        try:
+            resolved = path.resolve(strict=True)
+        except (FileNotFoundError, OSError) as exc:
+            raise _capture_error(
+                "CAPTURE_NOT_FOUND",
+                "上传的报文文件不存在或无法访问",
+                "请重新选择报文文件后重试。",
+            ) from exc
+        return self._register_resolved(resolved, file_name=file_name)
+
+    def _register_resolved(
+        self, resolved: Path, *, file_name: str | None = None
+    ) -> CaptureSummary:
+        # 路径注册和上传注册都必须落在白名单目录内，防止任意文件读取。
         if not any(resolved.is_relative_to(root) for root in self.allowed_roots):
             raise _capture_error(
                 "CAPTURE_OUTSIDE_ALLOWED_ROOT",
@@ -205,6 +237,7 @@ class CaptureRegistry:
             resolved,
             size_bytes=stat.st_size,
             modified_at_ns=stat.st_mtime_ns,
+            file_name=file_name,
         ).public()
 
     def recent(self, *, limit: int = 20) -> list[CaptureSummary]:

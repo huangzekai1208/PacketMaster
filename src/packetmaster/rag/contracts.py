@@ -1,4 +1,4 @@
-"""Strict contracts shared by RAG storage, retrieval, models, and interfaces."""
+"""RAG 存储、检索、模型与接口共享的严格数据契约。"""
 
 from __future__ import annotations
 

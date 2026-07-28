@@ -1,4 +1,4 @@
-"""Bounded CLI chat state and safe model-context projection."""
+"""CLI 对话状态与安全的模型上下文投影，保持历史与输入有界。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Typer commands for review-first local knowledge management."""
+"""先审核后发布的本机知识库 Typer 命令。"""
 
 from __future__ import annotations
 
@@ -11,13 +11,17 @@ import typer
 
 from packetmaster.config import Settings
 from packetmaster.errors import AppError
+from packetmaster.rag.base import EmbeddingProvider
 from packetmaster.rag.contracts import (
     AuthorityLevel,
     KnowledgeStatus,
     KnowledgeType,
 )
 from packetmaster.rag.database import KnowledgeDatabase, SQLiteKnowledgeStore
-from packetmaster.rag.embedding import EmbeddingIndexer, LocalEmbeddingProvider
+from packetmaster.rag.embedding import (
+    EmbeddingIndexer,
+    build_embedding_provider,
+)
 from packetmaster.rag.evaluation import RagEvaluator, load_evaluation_cases
 from packetmaster.rag.importer import ImportMetadata, KnowledgeImporter
 from packetmaster.rag.retrieval import HybridKnowledgeRetriever
@@ -31,11 +35,24 @@ def _database(settings: Settings) -> KnowledgeDatabase:
     return database
 
 
-def _embedding_provider(settings: Settings) -> LocalEmbeddingProvider:
-    return LocalEmbeddingProvider(
-        settings.embedding_model,
-        model_path=settings.embedding_model_path,
+def _embedding_provider(settings: Settings) -> EmbeddingProvider:
+    return build_embedding_provider(settings)
+
+
+def _index_version(
+    database: KnowledgeDatabase, settings: Settings, version_id: str, *, force: bool
+) -> int:
+    indexed = 0
+    provider = _embedding_provider(settings)
+    store = SQLiteKnowledgeStore(
+        database,
+        embedding_model=provider.model_name,
+        embedding_dimension=provider.dimension,
     )
+    indexed += asyncio.run(
+        EmbeddingIndexer(store, provider).index_version(version_id, force=force)
+    )
+    return indexed
 
 
 def _error(exc: Exception) -> None:
@@ -170,16 +187,8 @@ def approve_command(
     try:
         settings = Settings.load()
         database = _database(settings)
-        provider = _embedding_provider(settings)
-        store = SQLiteKnowledgeStore(
-            database,
-            embedding_model=provider.model_name,
-            embedding_dimension=provider.dimension,
-        )
-        indexed = asyncio.run(
-            EmbeddingIndexer(store, provider).index_version(version_id)
-        )
-        store.publish_version(version_id, approved_by=reviewer)
+        indexed = _index_version(database, settings, version_id, force=False)
+        SQLiteKnowledgeStore(database).publish_version(version_id, approved_by=reviewer)
         typer.echo(f"知识版本已发布：{version_id}（新增索引 {indexed} 个）")
     except Exception as exc:
         _error(exc)
@@ -206,15 +215,7 @@ def reindex_command(
 ) -> None:
     try:
         settings = Settings.load()
-        provider = _embedding_provider(settings)
-        store = SQLiteKnowledgeStore(
-            _database(settings),
-            embedding_model=provider.model_name,
-            embedding_dimension=provider.dimension,
-        )
-        indexed = asyncio.run(
-            EmbeddingIndexer(store, provider).index_version(version_id, force=force)
-        )
+        indexed = _index_version(_database(settings), settings, version_id, force=force)
         typer.echo(f"向量索引已更新：{version_id}（处理 {indexed} 个）")
     except Exception as exc:
         _error(exc)

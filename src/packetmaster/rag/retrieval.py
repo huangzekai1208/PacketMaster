@@ -1,4 +1,4 @@
-"""Bounded hybrid keyword/vector retrieval with deterministic reranking."""
+"""有界的关键词/向量混合检索与可解释的确定性排序。"""
 
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ class HybridKnowledgeRetriever:
         max_context_bytes: int = 24_576,
         timeout_seconds: float = 2.0,
         rrf_k: int = 60,
+        fail_on_vector_error: bool = False,
     ) -> None:
         if not 1 <= keyword_top_k <= 100 or not 1 <= vector_top_k <= 100:
             raise ValueError("retrieval candidate limits must be between 1 and 100")
@@ -51,6 +52,7 @@ class HybridKnowledgeRetriever:
         self.max_context_bytes = min(max_context_bytes, 24_576)
         self.timeout_seconds = timeout_seconds
         self.rrf_k = rrf_k
+        self.fail_on_vector_error = fail_on_vector_error
 
     async def retrieve(self, query: KnowledgeQuery) -> KnowledgeBundle:
         try:
@@ -66,6 +68,7 @@ class HybridKnowledgeRetriever:
             ) from exc
 
     async def _retrieve(self, query: KnowledgeQuery) -> KnowledgeBundle:
+        # 关键词和向量召回互不依赖，并发执行可控制外部 embedding 的额外延迟。
         keyword_task = asyncio.create_task(
             self.store.keyword_search(query, limit=self.keyword_top_k)
         )
@@ -83,6 +86,8 @@ class HybridKnowledgeRetriever:
         else:
             keyword = keyword_result
         if isinstance(vector_result, BaseException):
+            if self.fail_on_vector_error and isinstance(vector_result, AppError):
+                raise vector_result
             if isinstance(vector_result, AppError):
                 warnings.append(f"向量检索降级：{vector_result.code}")
             else:
@@ -107,8 +112,7 @@ class HybridKnowledgeRetriever:
         vector = await self.embedding_provider.embed_query(query.query_text)
         return await self.store.vector_search(
             query, vector, limit=self.vector_top_k
-        )
-
+            )
     def _merge(
         self,
         keyword: list[RetrievalCandidate],
@@ -125,6 +129,7 @@ class HybridKnowledgeRetriever:
             ranks[item.chunk_id]["vector"] = rank
         merged: list[RetrievalCandidate] = []
         for chunk_id, item in values.items():
+            # 不适用的操作系统、工具或环境标签不参与后续排序。
             if not self._environment_matches(item, query):
                 continue
             keyword_rank = ranks[chunk_id].get("keyword")
@@ -135,6 +140,7 @@ class HybridKnowledgeRetriever:
                 if rank is not None
             )
             case_boost = self._case_similarity(item, query)
+            # 这里是可解释的规则排序，不是额外调用 Cross-Encoder 的模型 reranker。
             rerank = fusion + _AUTHORITY_BOOST[item.authority] + case_boost
             merged.append(
                 item.model_copy(

@@ -1,4 +1,4 @@
-"""Deterministic helpers for natural-language diagnosis intent extraction."""
+"""从自然语言稳定提取诊断参数、带宽单位和本机路径引用。"""
 
 from __future__ import annotations
 

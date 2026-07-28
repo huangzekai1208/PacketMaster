@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-"""Stream filtered captures into TCP aggregates and optional SQLite evidence."""
+"""流式提取筛选报文的 TCP 聚合指标与可选 SQLite 证据。"""
 
 from __future__ import annotations
 

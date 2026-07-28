@@ -1,3 +1,4 @@
+// 前端 API 纯工具函数的边界测试。
 import { describe, expect, it } from 'vitest'
 import { formatBytes, isReportReady, isRunning } from './api'
 

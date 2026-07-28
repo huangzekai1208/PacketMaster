@@ -1,4 +1,4 @@
-"""OpenAI-compatible structured diagnosis without exposing hidden reasoning."""
+"""使用 OpenAI 兼容接口生成结构化诊断结论，不暴露隐藏推理。"""
 
 from __future__ import annotations
 

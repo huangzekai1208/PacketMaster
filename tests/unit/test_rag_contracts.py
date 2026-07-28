@@ -254,14 +254,14 @@ def test_settings_parse_active_rag_and_reject_unsafe_limits(
 def test_sensitive_rag_paths_are_excluded_from_settings_dump(tmp_path) -> None:
     settings = Settings(
         knowledge_database_path=tmp_path / "private" / "knowledge.sqlite",
-        embedding_model_path=tmp_path / "private" / "embedding-model",
+        embedding_api_key="do-not-serialize",
     )
 
     dumped = settings.model_dump(mode="json")
     rendered = repr(settings)
 
     assert "knowledge_database_path" not in dumped
-    assert "embedding_model_path" not in dumped
+    assert "embedding_api_key" not in dumped
     assert str(tmp_path) not in rendered
 
 

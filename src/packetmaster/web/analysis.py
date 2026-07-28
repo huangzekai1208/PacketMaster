@@ -1,4 +1,4 @@
-"""Bounded report, metric, flow and evidence reads for the Web API."""
+"""为 Web API 提供有界的报告、指标、TCP 流和证据读取。"""
 
 from __future__ import annotations
 

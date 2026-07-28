@@ -1,4 +1,4 @@
-"""Deterministic, review-first knowledge parsing and chunking."""
+"""确定性的知识解析、脱敏、风险检测、切片与审核前预览。"""
 
 from __future__ import annotations
 
@@ -156,15 +156,25 @@ class KnowledgeImporter:
             raw_text = source.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("knowledge files must use UTF-8 encoding") from exc
+        return self.preview_text(raw_text, source.name, metadata)
+
+    def preview_text(
+        self, raw_text: str, file_name: str, metadata: ImportMetadata
+    ) -> ImportPreview:
+        suffix = Path(file_name).suffix.lower()
+        if suffix not in _SUPPORTED_SUFFIXES:
+            raise ValueError("unsupported knowledge file type")
+        if not 1 <= len(raw_text.encode("utf-8")) <= self.max_file_bytes:
+            raise ValueError("knowledge file size is outside the allowed range")
         risks = [
             "prompt_injection"
             for pattern in _PROMPT_INJECTION_PATTERNS
             if pattern.search(raw_text)
         ][:1]
         case_profile: CaseProfile | None = None
-        if source.suffix.lower() == ".json":
+        if suffix == ".json":
             sections, case_profile = self._json_sections(raw_text, metadata)
-        elif source.suffix.lower() in {".md", ".markdown"}:
+        elif suffix in {".md", ".markdown"}:
             sections = self._markdown_sections(redact_text(raw_text))
         else:
             sections = self._text_sections(redact_text(raw_text))

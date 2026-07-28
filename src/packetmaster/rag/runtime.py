@@ -1,4 +1,4 @@
-"""Shared construction and activation gating for the local RAG stack."""
+"""RAG 运行时构建与 active 模式评估门禁控制。"""
 
 from __future__ import annotations
 
@@ -6,9 +6,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from packetmaster.config import Settings
+from packetmaster.errors import AppError
 from packetmaster.rag.contracts import RagMode
 from packetmaster.rag.database import KnowledgeDatabase, SQLiteKnowledgeStore
-from packetmaster.rag.embedding import LocalEmbeddingProvider
+from packetmaster.rag.embedding import build_embedding_provider
 from packetmaster.rag.query import KnowledgeQueryBuilder
 from packetmaster.rag.retrieval import HybridKnowledgeRetriever
 from packetmaster.rag.validation import KnowledgeCitationValidator
@@ -66,22 +67,21 @@ def build_rag_runtime(settings: Settings) -> RagRuntime | None:
     except Exception:
         return _unavailable_runtime("RAG_DATABASE_UNAVAILABLE")
     try:
+        provider = build_embedding_provider(settings)
         store = SQLiteKnowledgeStore(
             database,
-            embedding_model=settings.embedding_model,
-            embedding_dimension=384,
+            embedding_model=provider.model_name,
+            embedding_dimension=provider.dimension,
         )
-        mode = requested_mode
-        degradation_reason = None
-        if mode is RagMode.ACTIVE and not store.active_gate_passed():
-            mode = RagMode.SHADOW
-            degradation_reason = "RAG_ACTIVE_GATE_NOT_PASSED"
+    except AppError as exc:
+        return _unavailable_runtime(exc.code)
     except Exception:
         return _unavailable_runtime("RAG_DATABASE_UNAVAILABLE")
-    provider = LocalEmbeddingProvider(
-        settings.embedding_model,
-        model_path=settings.embedding_model_path,
-    )
+    mode = requested_mode
+    degradation_reason = None
+    if mode is RagMode.ACTIVE and not store.active_gate_passed():
+        mode = RagMode.SHADOW
+        degradation_reason = "RAG_ACTIVE_GATE_NOT_PASSED"
     retriever = HybridKnowledgeRetriever(
         store,
         provider,
@@ -90,6 +90,7 @@ def build_rag_runtime(settings: Settings) -> RagRuntime | None:
         final_top_k=settings.rag_final_top_k,
         max_context_bytes=settings.rag_max_context_bytes,
         timeout_seconds=settings.rag_timeout_seconds,
+        fail_on_vector_error=True,
     )
     return RagRuntime(
         mode=mode,

@@ -1,4 +1,4 @@
-"""Typed client wrapper around FastMCP stdio or in-process transports."""
+"""FastMCP 标准输入输出或进程内传输的类型化客户端封装。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Terminal and atomic JSON reporting for PacketMaster."""
+"""终端输出与原子写入的 PacketMaster JSON 诊断报告。"""
 
 from __future__ import annotations
 

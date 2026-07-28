@@ -1,3 +1,4 @@
+// Web API 客户端：仅使用公开 ID 和元数据，绝不向界面泄露服务端本地路径。
 export type TaskStatus = 'draft' | 'awaiting_confirmation' | 'queued' | 'validating' | 'analyzing' | 'reasoning' | 'verifying' | 'reporting' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'interrupted'
 export type Target = 'download' | 'upload' | 'both'
 
@@ -14,6 +15,16 @@ export interface Metrics { tcp_summary: Record<string, number>; coverage_summary
 export interface Flow { flow_id: string; direction: Target; packet_count: number; payload_bytes: number; throughput_mbps: number; duration_seconds: number; retransmission_count: number; duplicate_ack_count: number; out_of_order_count: number; zero_window_count: number; window_full_count: number; window_min?: number; window_max?: number }
 export interface Evidence { analysis_id: string; evidence_type: string; items: Array<Record<string, string | number | boolean>>; total: number; next_offset?: number; truncated: boolean; warnings: string[] }
 export interface ChatTurn { turn_id: string; analysis_id: string; question: string; answer: string; citations: Array<Record<string, unknown>>; knowledge_citations?: KnowledgeCitation[]; limitations: string[]; suggestions: string[]; created_at: string }
+export type KnowledgeStatus = 'draft' | 'approved' | 'disabled' | 'superseded'
+export type KnowledgeType = 'standard' | 'vendor' | 'runbook' | 'case'
+export type AuthorityLevel = 'high' | 'medium_high' | 'medium' | 'low'
+export interface KnowledgeSummary { knowledge_id: string; title: string; knowledge_type: KnowledgeType; authority: AuthorityLevel; status: KnowledgeStatus; language: string; summary: string; current_version_id?: string }
+export interface KnowledgeVersion { version_id: string; version_number: number; source_name: string; source_location: string; status: KnowledgeStatus; created_at: string; approved_at?: string; approved_by?: string; chunk_count: number }
+export interface KnowledgeDetail { document: KnowledgeSummary; versions: KnowledgeVersion[] }
+export interface KnowledgeImportRequest { file_name: string; content: string; knowledge_id: string; title: string; knowledge_type: KnowledgeType; authority: AuthorityLevel; source_name: string; source_location: string; language: string; summary: string; version: number; ack_risk: boolean }
+export interface KnowledgePreview { knowledge_id: string; version_id: string; chunk_count: number; risk_flags: string[]; warnings: string[]; requires_risk_acknowledgement: boolean; chunks: Array<{ chunk_id: string; heading_path: string[]; content: string }> }
+export interface KnowledgeMutation { version_id: string; indexed_chunks: number; status?: KnowledgeStatus }
+export interface KnowledgeEvaluationStatus { active_gate_passed: boolean; requested_mode: string; effective_mode: string; last_report?: Record<string, number | boolean> }
 
 interface Envelope<T> { ok: true; data: T }
 interface ErrorEnvelope { ok: false; error: { code: string; message: string; suggested_action: string; recoverable: boolean } }
@@ -21,6 +32,7 @@ interface ErrorEnvelope { ok: false; error: { code: string; message: string; sug
 export class ApiFailure extends Error { constructor(public code: string, message: string, public action = '') { super(message) } }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  // JSON API 统一解包稳定错误信封，调用方只处理 ApiFailure。
   const response = await fetch(path, { ...init, headers: { 'Content-Type': 'application/json', ...init?.headers } })
   const body = await response.json() as Envelope<T> | ErrorEnvelope
   if (!response.ok || !body.ok) {
@@ -37,6 +49,18 @@ export const api = {
   session: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),
   send: (id: string, content: string, capture_id?: string) => request<{ parameters?: Parameters }>(`/api/sessions/${id}/messages`, { method: 'POST', body: JSON.stringify({ content, capture_id }) }),
   register: (path: string) => request<Capture>('/api/captures/register', { method: 'POST', body: JSON.stringify({ path }) }),
+  uploadCapture: async (file: File) => {
+    // 上传使用 multipart，不能附带默认 JSON Content-Type，否则浏览器不会生成 boundary。
+    const body = new FormData()
+    body.append('file', file)
+    const response = await fetch('/api/captures/upload', { method: 'POST', body })
+    const payload = await response.json() as Envelope<Capture> | ErrorEnvelope
+    if (!response.ok || !payload.ok) {
+      const error = (payload as ErrorEnvelope).error
+      throw new ApiFailure(error?.code ?? 'REQUEST_FAILED', error?.message ?? '请求失败', error?.suggested_action)
+    }
+    return payload.data
+  },
   recent: () => request<Capture[]>('/api/captures/recent'),
   confirm: (id: string) => request<Analysis>(`/api/sessions/${id}/confirm`, { method: 'POST', body: '{}' }),
   analysis: (id: string) => request<{ analysis: Analysis; report_available: boolean; recoverable: boolean; suggested_action: string }>(`/api/analyses/${id}`),
@@ -48,6 +72,14 @@ export const api = {
   evidence: (id: string, type: string, offset: number, flow = '') => request<Evidence>(`/api/analyses/${id}/evidence?evidence_type=${type}&offset=${offset}&limit=50${flow ? `&flow_id=${encodeURIComponent(flow)}` : ''}`),
   chat: (id: string, question: string) => request<ChatTurn>(`/api/analyses/${id}/chat`, { method: 'POST', body: JSON.stringify({ question }) }),
   chatHistory: (id: string) => request<Page<ChatTurn>>(`/api/analyses/${id}/chat`),
+  knowledge: (status = '') => request<Page<KnowledgeSummary>>(`/api/knowledge?limit=100${status ? `&status=${status}` : ''}`),
+  knowledgeDetail: (id: string) => request<KnowledgeDetail>(`/api/knowledge/${id}`),
+  previewKnowledge: (body: KnowledgeImportRequest) => request<KnowledgePreview>('/api/knowledge/preview', { method: 'POST', body: JSON.stringify(body) }),
+  importKnowledge: (body: KnowledgeImportRequest) => request<KnowledgeMutation>('/api/knowledge/import', { method: 'POST', body: JSON.stringify(body) }),
+  approveKnowledge: (id: string, reviewer: string) => request<KnowledgeMutation>(`/api/knowledge/versions/${id}/approve`, { method: 'POST', body: JSON.stringify({ reviewer }) }),
+  disableKnowledge: (id: string, actor: string, reason: string) => request<KnowledgeMutation>(`/api/knowledge/versions/${id}/disable`, { method: 'POST', body: JSON.stringify({ actor, reason }) }),
+  reindexKnowledge: (id: string, force: boolean) => request<KnowledgeMutation>(`/api/knowledge/versions/${id}/reindex`, { method: 'POST', body: JSON.stringify({ force }) }),
+  knowledgeEvaluation: () => request<KnowledgeEvaluationStatus>('/api/knowledge/evaluation-status'),
 }
 
 export const isRunning = (status?: TaskStatus) => Boolean(status && ['queued', 'validating', 'analyzing', 'reasoning', 'verifying', 'reporting'].includes(status))

@@ -1,0 +1,50 @@
+[
+  {
+    "case_id": "eval.zero-window.web.001",
+    "query": {
+      "query_id": "eval.zero-window.web.001",
+      "analysis_id": "evaluation-zero-window-web-001",
+      "direction": "download",
+      "achievement_ratio_pct": 12,
+      "query_text": "下载吞吐明显低于基准，并且低吞吐区间反复出现 Zero Window，应优先排查什么？",
+      "keywords": ["Zero Window", "下载吞吐"],
+      "candidate_causes": ["接收端处理能力不足"],
+      "missing_evidence": ["接收端 CPU 和应用读取速率"],
+      "global_features": {
+        "zero_window_count": 18
+      },
+      "environment_tags": {},
+      "knowledge_types": ["runbook"]
+    },
+    "relevant_chunk_ids": [
+      "test.zero-window.web:v1:chunk-2",
+      "test.zero-window.web:v1:chunk-3"
+    ],
+    "relevance_grades": {
+      "test.zero-window.web:v1:chunk-2": 3,
+      "test.zero-window.web:v1:chunk-3": 2
+    },
+    "expected_causes": [
+      "接收端处理能力不足",
+      "接收缓冲区不足"
+    ],
+    "baseline_causes": [
+      "接收端处理能力不足"
+    ],
+    "rag_causes": [
+      "接收端处理能力不足",
+      "接收缓冲区不足"
+    ],
+    "answer_citation_chunk_ids": [
+      "test.zero-window.web:v1:chunk-2"
+    ],
+    "applicable_chunk_ids": [
+      "test.zero-window.web:v1:chunk-2",
+      "test.zero-window.web:v1:chunk-3"
+    ],
+    "forbidden_conclusions": [
+      "仅凭一次 Zero Window 就确认接收端 CPU 已饱和",
+      "当前报文已经证明接收端应用读取过慢"
+    ]
+  }
+]

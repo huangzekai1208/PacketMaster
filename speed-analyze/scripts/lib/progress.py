@@ -1,3 +1,5 @@
+"""以 JSONL 写入流水线进度，供 CLI 与 Web Worker 转发。"""
+
 from __future__ import annotations
 
 import json

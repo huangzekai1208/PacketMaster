@@ -1,4 +1,4 @@
-"""Deterministic adapter used by contract tests and demonstrations."""
+"""用于合约测试和演示的确定性报文分析器，不读取真实 pcap。"""
 
 from __future__ import annotations
 

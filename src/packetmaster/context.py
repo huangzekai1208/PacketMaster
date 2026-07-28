@@ -1,4 +1,4 @@
-"""Build bounded, allowlisted model context from aggregate analysis artifacts."""
+"""从聚合分析产物构建白名单且有大小上限的模型上下文。"""
 
 from __future__ import annotations
 

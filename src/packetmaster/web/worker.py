@@ -1,4 +1,4 @@
-"""Single-process local worker for persisted PacketMaster analyses."""
+"""本机单进程 Worker：从持久化队列领取任务并持续发送心跳。"""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ class AnalysisWorker:
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
 
     async def run_once(self) -> bool:
+        # 心跳与取消检查在诊断协程运行期间进行，避免长报文任务被错误判定失联。
         task = self.repository.claim_next(self.worker_id)
         if task is None:
             return False
@@ -73,6 +74,7 @@ class AnalysisWorker:
     async def run_forever(
         self, stop_event: Any, *, poll_interval_seconds: float = 0.5
     ) -> None:
+        # 启动时先将旧 Worker 遗留的超时任务标记为 interrupted，避免永久卡在活动状态。
         self.repository.interrupt_stale(
             heartbeat_timeout=timedelta(
                 seconds=max(15.0, self.heartbeat_interval_seconds * 3)
@@ -84,6 +86,7 @@ class AnalysisWorker:
                 await asyncio.sleep(poll_interval_seconds)
 
     async def _run_claimed(self, task: ClaimedAnalysis) -> None:
+        # 诊断服务负责实际分析；Worker 只负责状态机、进度转发和错误归类。
         try:
             self.repository.transition(
                 task.analysis_id,

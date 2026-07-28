@@ -1,5 +1,6 @@
+// 工作台关键导航和知识库入口的组件测试。
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { App, KnowledgeReferences } from './App'
 
@@ -9,12 +10,15 @@ beforeEach(() => {
   localStorage.clear()
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input)
-    const data = path.includes('/api/health') ? { status: 'ok', model_configured: true, tshark_configured: true } : path.includes('/api/sessions/session-1') ? { session, messages: { items: [], total: 0, offset: 0, limit: 100 }, parameters: null } : { items: [session], total: 1, offset: 0, limit: 50 }
+    const data = path.includes('/api/health') ? { status: 'ok', model_configured: true, tshark_configured: true } : path.includes('/api/knowledge/evaluation-status') ? { active_gate_passed: false, requested_mode: 'shadow', effective_mode: 'shadow', last_report: null } : path.includes('/api/knowledge') ? { items: [], total: 0, offset: 0, limit: 100 } : path.includes('/api/sessions/session-1') ? { session, messages: { items: [], total: 0, offset: 0, limit: 100 }, parameters: null } : { items: [session], total: 1, offset: 0, limit: 50 }
     return new Response(JSON.stringify({ ok: true, data }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   }))
 })
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
 it('呈现工作台、历史会话和任务视图标签', async () => {
   render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
@@ -40,4 +44,18 @@ it('将知识经验引用与报文证据分区展示', () => {
   expect(screen.getByRole('region', { name: '知识经验引用' })).toBeInTheDocument()
   expect(screen.getByText('TCP 窗口机制')).toBeInTheDocument()
   expect(screen.getByText(/rfc.window:v1/)).toBeInTheDocument()
+})
+
+it('可从工作台进入知识管理视图', async () => {
+  render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
+
+  await screen.findByRole('button', { name: '知识库' })
+  screen.getByRole('button', { name: '知识库' }).click()
+
+  expect(await screen.findByRole('heading', { name: '知识库' })).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: '导入知识' })).toBeInTheDocument()
+  expect(screen.getByText('Active 门禁')).toBeInTheDocument()
+
+  screen.getByRole('button', { name: '导入知识' }).click()
+  expect(await screen.findByRole('button', { name: '选择本地文件' })).toBeInTheDocument()
 })

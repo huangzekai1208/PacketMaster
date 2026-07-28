@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-"""Identify directional speed-test flows and filter them into pcapng captures."""
+"""识别测速方向的 TCP 流，并筛选为最小化 pcapng 报文。"""
 
 from __future__ import annotations
 

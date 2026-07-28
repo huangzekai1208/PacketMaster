@@ -1,4 +1,4 @@
-"""Stable public contracts for the PacketMaster Web interface."""
+"""PacketMaster Web 接口稳定的公开请求、响应和分页契约。"""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Annotated, Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from packetmaster.domain import ChatEvidenceCitation, DiagnosticReport, Target
+from packetmaster.rag.contracts import AuthorityLevel, KnowledgeStatus, KnowledgeType
 
 PublicId = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[\w.-]+$")]
 
@@ -171,6 +172,102 @@ class HealthStatus(WebContract):
     version: str = Field(min_length=1, max_length=64)
     model_configured: bool
     tshark_configured: bool
+
+
+class KnowledgeSummary(WebContract):
+    knowledge_id: str = Field(min_length=1, max_length=128)
+    title: str = Field(min_length=1, max_length=256)
+    knowledge_type: KnowledgeType
+    authority: AuthorityLevel
+    status: KnowledgeStatus
+    language: str = Field(min_length=2, max_length=32)
+    summary: str = Field(default="", max_length=2_000)
+    current_version_id: str | None = Field(default=None, max_length=128)
+
+
+class KnowledgeVersionSummary(WebContract):
+    version_id: str = Field(min_length=1, max_length=128)
+    version_number: int = Field(ge=1)
+    source_name: str = Field(min_length=1, max_length=256)
+    source_location: str = Field(default="", max_length=512)
+    status: KnowledgeStatus
+    created_at: datetime
+    approved_at: datetime | None = None
+    approved_by: str | None = Field(default=None, max_length=128)
+    chunk_count: int = Field(ge=0)
+
+
+class KnowledgeDetail(WebContract):
+    document: KnowledgeSummary
+    versions: list[KnowledgeVersionSummary] = Field(
+        default_factory=list, max_length=128
+    )
+
+
+class KnowledgeImportRequest(WebContract):
+    file_name: str = Field(min_length=1, max_length=255)
+    content: str = Field(min_length=1, max_length=5 * 1024 * 1024)
+    knowledge_id: str = Field(
+        min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$"
+    )
+    title: str = Field(min_length=1, max_length=256)
+    knowledge_type: KnowledgeType
+    authority: AuthorityLevel
+    source_name: str = Field(min_length=1, max_length=256)
+    source_location: str = Field(default="", max_length=512)
+    language: str = Field(default="zh-CN", min_length=2, max_length=32)
+    summary: str = Field(default="", max_length=2_000)
+    version: int = Field(default=1, ge=1)
+    ack_risk: bool = False
+
+    @field_validator("file_name")
+    @classmethod
+    def file_name_only(cls, value: str) -> str:
+        if "/" in value or "\\" in value or value in {".", ".."}:
+            raise ValueError("file_name must not contain a path")
+        return value
+
+
+class KnowledgeChunkPreview(WebContract):
+    chunk_id: str = Field(min_length=1, max_length=128)
+    heading_path: list[str] = Field(default_factory=list, max_length=16)
+    content: str = Field(min_length=1, max_length=1_500)
+
+
+class KnowledgeImportPreview(WebContract):
+    knowledge_id: str = Field(min_length=1, max_length=128)
+    version_id: str = Field(min_length=1, max_length=128)
+    chunk_count: int = Field(ge=1, le=512)
+    risk_flags: list[str] = Field(default_factory=list, max_length=16)
+    warnings: list[str] = Field(default_factory=list, max_length=32)
+    requires_risk_acknowledgement: bool = False
+    chunks: list[KnowledgeChunkPreview] = Field(default_factory=list, max_length=16)
+
+
+class KnowledgeMutationResult(WebContract):
+    version_id: str = Field(min_length=1, max_length=128)
+    indexed_chunks: int = Field(default=0, ge=0)
+    status: KnowledgeStatus | None = None
+
+
+class ApproveKnowledgeRequest(WebContract):
+    reviewer: str = Field(min_length=1, max_length=128)
+
+
+class DisableKnowledgeRequest(WebContract):
+    actor: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=1_000)
+
+
+class ReindexKnowledgeRequest(WebContract):
+    force: bool = False
+
+
+class KnowledgeEvaluationStatus(WebContract):
+    active_gate_passed: bool
+    requested_mode: str = Field(min_length=1, max_length=16)
+    effective_mode: str = Field(min_length=1, max_length=16)
+    last_report: dict[str, Any] | None = None
 
 
 class CreateSessionRequest(WebContract):

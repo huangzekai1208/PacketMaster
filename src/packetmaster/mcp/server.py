@@ -1,4 +1,4 @@
-"""FastMCP server exposing only structured PacketMaster operations."""
+"""仅暴露结构化 PacketMaster 操作的 FastMCP Server。"""
 
 from __future__ import annotations
 

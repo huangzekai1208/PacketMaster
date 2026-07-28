@@ -1,4 +1,4 @@
-"""Persistent evidence-bounded follow-up chat for completed Web analyses."""
+"""已完成 Web 分析的持久化追问服务，回答仅使用有界证据。"""
 
 from __future__ import annotations
 

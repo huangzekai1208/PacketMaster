@@ -1,4 +1,4 @@
-"""Pydantic contracts shared by the CLI, MCP server, and diagnostic graph."""
+"""CLI、MCP Server 和诊断图共享的 Pydantic 领域契约。"""
 
 from __future__ import annotations
 

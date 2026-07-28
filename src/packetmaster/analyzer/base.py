@@ -1,4 +1,4 @@
-"""Shared adapter protocol for local and test speed analyzers."""
+"""真实与测试报文分析器共用的协议、分页规则和输入校验。"""
 
 from __future__ import annotations
 

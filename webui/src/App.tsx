@@ -1,8 +1,10 @@
+// 主工作台：会话、分析进度、报表视图、报文选择与知识库入口。
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { EChartsOption } from 'echarts'
-import { Activity, BarChart3, ChevronLeft, ChevronRight, FileSearch, FileUp, Menu, MessageSquare, Network, PanelRight, Plus, RefreshCw, Send, Square, X } from 'lucide-react'
+import { Activity, BarChart3, BookOpen, ChevronLeft, ChevronRight, FileSearch, FileUp, Menu, MessageSquare, Network, PanelRight, Plus, RefreshCw, Send, Square, X } from 'lucide-react'
 import { FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
 import { Analysis, api, ApiFailure, Capture, Evidence, formatBytes, isReportReady, isRunning, KnowledgeCitation, Metrics, Parameters, Session, SessionDetail, TaskStatus } from './api'
+import { KnowledgeManagement } from './KnowledgeManagement'
 const Chart = lazy(() => import('./Chart'))
 
 type Tab = 'chat' | 'report' | 'metrics' | 'flows' | 'evidence'
@@ -10,12 +12,14 @@ const statusText: Record<TaskStatus, string> = { draft: '收集参数', awaiting
 const targetText = { download: '下载', upload: '上行', both: '上行 + 下载' }
 
 export function App() {
+  // 会话 ID 持久化在浏览器本地；服务端仍是任务和报文引用的唯一可信来源。
   const client = useQueryClient()
   const [selected, setSelected] = useState(() => localStorage.getItem('packetmaster.session') ?? '')
   const [tab, setTab] = useState<Tab>('chat')
   const [leftOpen, setLeftOpen] = useState(() => innerWidth > 800)
   const [rightOpen, setRightOpen] = useState(() => innerWidth > 800)
   const [captureOpen, setCaptureOpen] = useState(false)
+  const [knowledgeOpen, setKnowledgeOpen] = useState(false)
   const autoCreated = useRef(false)
   const sessions = useQuery({ queryKey: ['sessions'], queryFn: api.sessions })
   const create = useMutation({ mutationFn: api.createSession, onSuccess: (value) => { setSelected(value.session_id); client.invalidateQueries({ queryKey: ['sessions'] }) } })
@@ -29,12 +33,9 @@ export function App() {
   const health = useQuery({ queryKey: ['health'], queryFn: api.health, refetchInterval: 15_000 })
   const refresh = () => { client.invalidateQueries({ queryKey: ['session', selected] }); client.invalidateQueries({ queryKey: ['analysis', analysisId] }); client.invalidateQueries({ queryKey: ['sessions'] }) }
 
-  return <div className={`app ${leftOpen ? '' : 'left-collapsed'} ${rightOpen ? '' : 'right-collapsed'}`}>
-    <header><button className="icon mobile-only" onClick={() => setLeftOpen(!leftOpen)} aria-label="打开会话"><Menu /></button><div className="brand"><span className="brand-mark">PM</span><strong>PacketMaster</strong><span>TCP 诊断工作台</span></div><div className="header-actions"><span className={`connection ${health.isSuccess ? 'online' : ''}`}>{health.isSuccess ? '本机服务已连接' : '连接中断'}</span><button className="icon" onClick={refresh} title="刷新"><RefreshCw /></button><button className="command" onClick={() => create.mutate()} disabled={create.isPending}><Plus />新建任务</button><button className="icon" onClick={() => setRightOpen(!rightOpen)} title="切换上下文栏"><PanelRight /></button></div></header>
-    <aside className="sessions"><div className="aside-head"><b>会话与任务</b><button className="icon" onClick={() => setLeftOpen(false)} aria-label="收起会话"><ChevronLeft /></button></div><div className="session-list">{sessions.data?.items.map(item => <SessionItem key={item.session_id} item={item} active={item.session_id === selected} onClick={() => { setSelected(item.session_id); setTab('chat'); if (innerWidth < 800) setLeftOpen(false) }} />)}{sessions.data?.items.length === 0 && <Empty text="还没有诊断会话" />}</div></aside>
-    <main><nav className="tabs" aria-label="任务视图">{([['chat', MessageSquare, '对话'], ['report', FileSearch, '报告'], ['metrics', BarChart3, '指标'], ['flows', Network, 'TCP 流'], ['evidence', Activity, '证据']] as const).map(([id, Icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon />{label}</button>)}</nav><div className="workspace">{!selected ? <Empty text="新建一个会话开始诊断" /> : tab === 'chat' ? <ChatView sessionId={selected} detail={detail.data} analysis={analysis.data?.analysis} onCapture={() => setCaptureOpen(true)} refresh={refresh} /> : !analysisId ? <Empty text="当前会话还没有分析任务" /> : tab === 'report' ? <ReportView id={analysisId} status={analysis.data?.analysis.status} /> : tab === 'metrics' ? <MetricsView id={analysisId} status={analysis.data?.analysis.status} /> : tab === 'flows' ? <FlowsView id={analysisId} status={analysis.data?.analysis.status} /> : <EvidenceView id={analysisId} status={analysis.data?.analysis.status} />}</div></main>
-    <aside className="context"><div className="aside-head"><b>当前任务</b><button className="icon" onClick={() => setRightOpen(false)} aria-label="收起上下文"><ChevronRight /></button></div><Context parameters={detail.data?.parameters} analysis={analysis.data?.analysis} onCapture={() => setCaptureOpen(true)} refresh={refresh} /></aside>
-    {captureOpen && <CaptureDialog sessionId={selected} close={() => setCaptureOpen(false)} refresh={refresh} />}
+  return <div className={`app ${knowledgeOpen ? 'knowledge-open' : ''} ${leftOpen ? '' : 'left-collapsed'} ${rightOpen ? '' : 'right-collapsed'}`}>
+    <header><button className="icon mobile-only" onClick={() => setLeftOpen(!leftOpen)} aria-label="打开会话"><Menu /></button><div className="brand"><span className="brand-mark">PM</span><strong>PacketMaster</strong><span>TCP 诊断工作台</span></div><div className="header-actions"><span className={`connection ${health.isSuccess ? 'online' : ''}`}>{health.isSuccess ? '本机服务已连接' : '连接中断'}</span><button className="icon" onClick={refresh} title="刷新"><RefreshCw /></button><button className="command" onClick={() => setKnowledgeOpen(value => !value)}><BookOpen />{knowledgeOpen ? '诊断工作台' : '知识库'}</button>{!knowledgeOpen && <><button className="command" onClick={() => create.mutate()} disabled={create.isPending}><Plus />新建任务</button><button className="icon" onClick={() => setRightOpen(!rightOpen)} title="切换上下文栏"><PanelRight /></button></>}</div></header>
+    {knowledgeOpen ? <main className="knowledge-main"><KnowledgeManagement /></main> : <><aside className="sessions"><div className="aside-head"><b>会话与任务</b><button className="icon" onClick={() => setLeftOpen(false)} aria-label="收起会话"><ChevronLeft /></button></div><div className="session-list">{sessions.data?.items.map(item => <SessionItem key={item.session_id} item={item} active={item.session_id === selected} onClick={() => { setSelected(item.session_id); setTab('chat'); if (innerWidth < 800) setLeftOpen(false) }} />)}{sessions.data?.items.length === 0 && <Empty text="还没有诊断会话" />}</div></aside><main><nav className="tabs" aria-label="任务视图">{([['chat', MessageSquare, '对话'], ['report', FileSearch, '报告'], ['metrics', BarChart3, '指标'], ['flows', Network, 'TCP 流'], ['evidence', Activity, '证据']] as const).map(([id, Icon, label]) => <button key={id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}><Icon />{label}</button>)}</nav><div className="workspace">{!selected ? <Empty text="新建一个会话开始诊断" /> : tab === 'chat' ? <ChatView sessionId={selected} detail={detail.data} analysis={analysis.data?.analysis} onCapture={() => setCaptureOpen(true)} refresh={refresh} /> : !analysisId ? <Empty text="当前会话还没有分析任务" /> : tab === 'report' ? <ReportView id={analysisId} status={analysis.data?.analysis.status} /> : tab === 'metrics' ? <MetricsView id={analysisId} status={analysis.data?.analysis.status} /> : tab === 'flows' ? <FlowsView id={analysisId} status={analysis.data?.analysis.status} /> : <EvidenceView id={analysisId} status={analysis.data?.analysis.status} />}</div></main><aside className="context"><div className="aside-head"><b>当前任务</b><button className="icon" onClick={() => setRightOpen(false)} aria-label="收起上下文"><ChevronRight /></button></div><Context parameters={detail.data?.parameters} analysis={analysis.data?.analysis} onCapture={() => setCaptureOpen(true)} refresh={refresh} /></aside>{captureOpen && <CaptureDialog sessionId={selected} close={() => setCaptureOpen(false)} refresh={refresh} />}</>}
   </div>
 }
 
@@ -73,11 +74,13 @@ function Context({ parameters, analysis, onCapture, refresh }: { parameters?: Pa
 function ParameterGrid({ value }: { value: Parameters }) { return <div className="parameter-grid"><span>标准带宽<b>{value.standard_bandwidth_mbps ? `${value.standard_bandwidth_mbps} Mbps` : '待补充'}</b></span><span>实际带宽<b>{value.actual_bandwidth_mbps ? `${value.actual_bandwidth_mbps} Mbps` : '待补充'}</b></span><span>分析方向<b>{targetText[value.target]}</b></span></div> }
 
 function CaptureDialog({ sessionId, close, refresh }: { sessionId: string; close: () => void; refresh: () => void }) {
-  const [path, setPath] = useState('')
+  // 浏览器只能访问用户主动选择的文件，随后上传到本机服务受管目录。
+  const [file, setFile] = useState<File | null>(null)
+  const fileInput = useRef<HTMLInputElement>(null)
   const recent = useQuery({ queryKey: ['captures'], queryFn: api.recent })
   const select = useMutation({ mutationFn: async (capture: Capture) => api.send(sessionId, '使用这个报文进行测速诊断', capture.capture_id), onSuccess: () => { refresh(); close() } })
-  const register = useMutation({ mutationFn: async () => { const capture = await api.register(path); await api.send(sessionId, '使用这个报文进行测速诊断', capture.capture_id) }, onSuccess: () => { refresh(); close() } })
-  return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) close() }}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="capture-title"><div className="modal-head"><h2 id="capture-title">注册本机报文</h2><button className="icon" onClick={close} aria-label="关闭"><X /></button></div><label htmlFor="capture-path">pcap 或 pcapng 绝对路径</label><input id="capture-path" autoFocus value={path} onChange={event => setPath(event.target.value)} placeholder="C:\captures\speed-test.pcapng" /><p className="hint">路径只用于本机后端注册，后续页面仅使用报文引用。</p>{register.error && <ErrorNotice error={register.error} />}<button className="primary full" onClick={() => register.mutate()} disabled={!path.trim() || register.isPending}>注册并选择</button>{recent.data && recent.data.length > 0 && <div className="recent"><label>最近使用</label>{recent.data.map(item => <button key={item.capture_id} onClick={() => select.mutate(item)}><FileSearch /><span><b>{item.file_name}</b><small>{formatBytes(item.size_bytes)}</small></span></button>)}</div>}</div></div>
+  const register = useMutation({ mutationFn: async () => { const capture = await api.uploadCapture(file!); await api.send(sessionId, '使用这个报文进行测速诊断', capture.capture_id) }, onSuccess: () => { refresh(); close() } })
+  return <div className="modal-backdrop" role="presentation" onMouseDown={event => { if (event.target === event.currentTarget) close() }}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="capture-title"><div className="modal-head"><h2 id="capture-title">注册报文</h2><button className="icon" onClick={close} aria-label="关闭"><X /></button></div><div className="capture-file-picker"><span>pcap 或 pcapng 文件</span><input ref={fileInput} className="visually-hidden" type="file" accept=".pcap,.pcapng,application/vnd.tcpdump.pcap,application/octet-stream" onChange={event => setFile(event.target.files?.[0] ?? null)} /><button type="button" className="secondary" onClick={() => fileInput.current?.click()}><FileUp />选择本地报文</button><small>{file ? `${file.name} · ${formatBytes(file.size)}` : '选择后会上传到本机 PacketMaster 管理目录'}</small></div>{register.error && <ErrorNotice error={register.error} />}<button className="primary full" onClick={() => register.mutate()} disabled={!file || register.isPending}>{register.isPending ? '正在上传并注册' : '注册并选择'}</button>{recent.data && recent.data.length > 0 && <div className="recent"><label>最近使用</label>{recent.data.map(item => <button key={item.capture_id} onClick={() => select.mutate(item)}><FileSearch /><span><b>{item.file_name}</b><small>{formatBytes(item.size_bytes)}</small></span></button>)}</div>}</div></div>
 }
 
 function ReportView({ id, status }: { id: string; status?: TaskStatus }) {
@@ -144,6 +147,7 @@ function rttOption(metrics?: Metrics): EChartsOption { return { title: { text: '
 function eventOption(metrics?: Metrics): EChartsOption { const names = ['retransmission_count', 'duplicate_ack_count', 'out_of_order_count', 'zero_window_count', 'window_full_count']; return { title: { text: 'TCP 事件', textStyle: { fontSize: 14 } }, tooltip: { trigger: 'axis' }, grid: { left: 48, right: 18, top: 48, bottom: 58 }, xAxis: { type: 'category', axisLabel: { rotate: 25 }, data: names.map(name => name.replace('_count', '')) }, yAxis: { type: 'value' }, series: [{ type: 'bar', data: names.map(name => metrics?.tcp_summary[name] ?? 0), itemStyle: { color: '#b75d36' } }] } }
 
 function useAnalysisEvents(id: string | undefined, client: ReturnType<typeof useQueryClient>) {
+  // SSE 只用于刷新查询缓存；页面状态始终以服务端持久化记录为准。
   useEffect(() => {
     if (!id) return
     const key = `packetmaster.event.${id}`

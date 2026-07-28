@@ -1,4 +1,4 @@
-"""Shared diagnosis orchestration for CLI and future Web interfaces."""
+"""CLI 与 Web 共用的诊断编排层，不依赖具体用户界面。"""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class DiagnosisOutcome:
 
 
 class DiagnosisService:
-    """Run one diagnosis without depending on a user-interface framework."""
+    """执行一次诊断，并把流程产物收敛为可持久化的报告与审计轨迹。"""
 
     def __init__(
         self,
@@ -86,6 +86,7 @@ class DiagnosisService:
         request_id: str,
         progress_handler: ProgressHandler | None = None,
     ) -> DiagnosisOutcome:
+        # MCP Server 与 Client 在一次调用内成对创建和关闭，避免跨任务共享状态。
         def progress(value: float | None, message: str | None):
             if progress_handler is None:
                 return None
@@ -115,6 +116,7 @@ class DiagnosisService:
         return self._finalize(result, request_id)
 
     def _finalize(self, result: dict[str, Any], request_id: str) -> DiagnosisOutcome:
+        # 无论诊断完整或部分完成，都先持久化 trace 和报告，便于后续排查。
         paths = self.artifact_manager.create(request_id)
         for event in result.get("trace", []):
             self.artifact_manager.append_trace(paths, event)

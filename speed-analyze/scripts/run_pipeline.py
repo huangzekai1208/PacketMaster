@@ -1,5 +1,5 @@
 # ruff: noqa: E402
-"""Run the complete, streaming speed-analyze capture pipeline."""
+"""执行完整的流式报文分析流水线，并输出结构化聚合产物。"""
 
 from __future__ import annotations
 

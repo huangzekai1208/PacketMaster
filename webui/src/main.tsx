@@ -1,3 +1,4 @@
+// 前端应用入口：React Query 负责短时缓存，服务端负责最终状态。
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'

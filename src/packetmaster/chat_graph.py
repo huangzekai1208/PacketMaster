@@ -1,4 +1,4 @@
-"""Bounded evidence-driven graph for one PacketMaster chat question."""
+"""单轮报告追问的证据驱动图，限制检索与模型上下文范围。"""
 
 from __future__ import annotations
 

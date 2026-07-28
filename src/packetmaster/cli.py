@@ -1,4 +1,4 @@
-"""PacketMaster command-line entry point."""
+"""PacketMaster 命令行入口：诊断、对话、知识库和本机 Web 服务。"""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Adapter that runs the local speed-analyze pipeline without buffering captures."""
+"""调用本地 speed-analyze 流水线的大报文适配器，不在 Python 内存中缓冲整包。"""
 
 from __future__ import annotations
 
@@ -104,6 +104,7 @@ _EVENT_PACKET_FIELDS = {
 
 
 def default_pipeline_script() -> Path:
+    # 优先使用安装包携带的脚本；开发源码目录作为本地回退。
     installed = (
         Path(sysconfig.get_path("data"))
         / "share"
@@ -136,6 +137,7 @@ def _packet_scalar(field: str, value: str) -> object:
 
 
 def _packet_flow_id(row: dict[str, str]) -> str | None:
+    # 对端点排序后生成稳定五元组标识，双向报文会归入同一 TCP 流。
     source = row.get("ip.src") or row.get("ipv6.src")
     destination = row.get("ip.dst") or row.get("ipv6.dst")
     try:
@@ -160,6 +162,7 @@ def _packet_flow_id(row: dict[str, str]) -> str | None:
 def _packet_item(
     row: dict[str, str], direction: str, epoch_baseline: float | None
 ) -> dict[str, object]:
+    # 只保留白名单 TCP 字段，并将 epoch 时间换算为相对时间，避免泄露 Payload。
     frame_number = _packet_scalar("frame.number", row.get("frame.number", ""))
     event_type = "packet"
     for field, candidate in _EVENT_PACKET_FIELDS.items():

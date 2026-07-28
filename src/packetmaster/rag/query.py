@@ -1,4 +1,4 @@
-"""Build deterministic, allowlisted retrieval queries from diagnosis state."""
+"""从诊断状态构建确定性、字段白名单化的知识检索查询。"""
 
 from __future__ import annotations
 

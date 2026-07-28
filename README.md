@@ -56,6 +56,22 @@ $env:MODEL_STRUCTURED_OUTPUT_METHOD = "auto"
 
 `auto` 会为 DeepSeek 兼容服务选择 `json_mode`，其他服务默认使用 `json_schema`。也可显式设置 `json_mode`、`json_schema` 或 `function_calling`。
 
+### DashScope Embedding 配置
+
+RAG 仅使用阿里云百炼 DashScope 的 `text-embedding-v4`，不再提供本地 embedding 模型回退。将百炼 API Key 写入忽略的本地配置文件，或用环境变量覆盖：
+
+```python
+# src/packetmaster/config_local.py
+EMBEDDING_API_KEY = "sk-..."
+```
+
+```bash
+export EMBEDDING_API_KEY="sk-..."
+export EMBEDDING_MODEL="text-embedding-v4"
+```
+
+模型 API Key 和 Embedding API Key 都不会写入日志、Web API 响应或诊断报告。
+
 ## Web 工作台
 
 Web 模式默认只监听 `127.0.0.1`，启动 API、单 Worker 和已构建的 React 页面：
@@ -73,7 +89,9 @@ pkm web --no-browser
 
 默认访问地址为 `http://127.0.0.1:8765`。端口占用时会继续尝试后续本机端口。
 
-Web 首版不上传报文。用户输入本机 pcap/pcapng 绝对路径，后端校验后返回 `capture_id`，后续浏览器请求不再使用真实路径。默认只允许注册当前工作目录内的报文；生产环境应显式配置允许目录：
+在“注册报文”弹窗中点击“选择本地报文”即可打开系统文件选择器，支持 `.pcap` 和 `.pcapng`。选中的文件会上传到本机 PacketMaster 受管目录 `artifacts/web-captures` 后注册；页面和 API 仅使用 `capture_id`，不返回浏览器路径或受管文件绝对路径。删除报文引用不会删除原始文件或受管副本。
+
+路径注册 API 仍保留给 CLI 和已有本机自动化调用。默认只允许从当前工作目录注册路径；生产环境应显式配置允许目录：
 
 ```powershell
 $env:WEB_ALLOWED_CAPTURE_ROOTS = '["D:\\captures"]'
@@ -89,21 +107,21 @@ export WEB_DATABASE_PATH='/Users/me/PacketMaster/packetmaster-web.sqlite'
 
 工作台支持会话恢复、普通对话、分轮参数补充、确认后后台分析、SSE 进度、取消与重试、报告、吞吐/RTT/TCP 事件图表、TCP 流分页、证据浏览和诊断后持续问答。
 
+右上角“知识库”提供知识列表、浏览器文件导入预览、草稿保存、审核发布、版本历史、停用、重建索引，以及最后一次正式评估与 active 门禁状态。知识文件支持 `.md`、`.markdown`、`.txt`、`.json`；浏览器只提交所选文件名和内容，不提交本地路径。
+
 ## RAG 知识库
 
-RAG 是可选能力。基础安装和无 RAG 诊断不依赖本地 Embedding 模型。安装可选依赖：
+RAG 是可选能力。基础安装和无 RAG 诊断不依赖 embedding 服务；启用 RAG 时需要 DashScope API Key。安装可选依赖：
 
 ```powershell
 python -m pip install -e ".[rag]"
 ```
 
-首次联网运行会下载 `intfloat/multilingual-e5-small`。正式 Windows 离线环境应预先准备模型目录：
-
-```powershell
-$env:EMBEDDING_MODEL_PATH = "D:\PacketMaster\models\multilingual-e5-small"
-$env:KNOWLEDGE_DATABASE_PATH = "D:\PacketMaster\knowledge\packetmaster-knowledge.sqlite"
-$env:RAG_ENABLED = "true"
-$env:RAG_MODE = "shadow"
+```bash
+export EMBEDDING_API_KEY="sk-..."
+export KNOWLEDGE_DATABASE_PATH="artifacts/knowledge/packetmaster-knowledge.sqlite"
+export RAG_ENABLED=true
+export RAG_MODE=shadow
 ```
 
 导入、审核和检查知识：
@@ -124,6 +142,8 @@ pkm knowledge health
 - `active`：已验证知识可以补充候选原因和建议，但不能覆盖报文证据。
 
 `active` 不是只改环境变量即可启用。必须先用不少于 50 条正式脱敏样本执行 `pkm knowledge evaluate` 并达到质量门槛；否则启动时自动降级为 `shadow`。完整知识管理、备份恢复、评估和离线部署步骤见 [RAG 使用与运维手册](docs/rag-operations.md)。
+
+当前检索使用 FTS5 关键词检索和 DashScope 向量检索并行召回，再用 RRF、适用环境过滤、权威性与案例相似度进行确定性排序。它没有接入独立 Cross-Encoder 或外部 reranker 模型。
 
 ## CLI 诊断
 
@@ -181,6 +201,42 @@ Vite 开发服务运行在 `http://127.0.0.1:5173`，并将 `/api` 代理到 Pac
 ```bash
 npm run build
 ```
+
+## 项目结构
+
+```text
+SpeedAnalyzeAgent/
+├── src/packetmaster/                 # Python 主包
+│   ├── cli.py                        # pkm / packetmaster 命令入口
+│   ├── config.py                     # 环境变量与本地配置加载
+│   ├── config_local.example.py       # API Key 本地配置模板
+│   ├── graph.py                      # LangGraph 诊断流程
+│   ├── analyzer/                     # TShark 实报文与 mock 分析适配器
+│   ├── application/                  # 诊断应用服务
+│   ├── mcp/                          # MCP Server 与客户端
+│   ├── prompts/                      # 模型提示词
+│   ├── rag/                          # 知识导入、DashScope embedding、检索、评估、SQLite 存储
+│   └── web/                          # FastAPI、会话、Worker、报文注册、已构建静态资源
+├── webui/                            # React + TypeScript 前端工程
+│   ├── src/                          # 工作台、知识管理、API 客户端与样式
+│   ├── e2e/                          # Playwright 端到端测试
+│   └── vite.config.ts                # 前端构建与开发代理配置
+├── speed-analyze/scripts/            # 报文处理脚本及共享库
+├── tests/                            # 自动化测试
+│   ├── unit/                         # 单元测试
+│   ├── integration/                  # CLI 与真实处理链路集成测试
+│   ├── contract/                     # MCP 合约测试
+│   ├── performance/                  # 大报文与 RAG 容量门禁
+│   └── fixtures/                     # 测试数据
+├── docs/                             # 使用手册、规格、计划、评估模板
+├── samples/                          # 示例与合成测试数据
+├── scripts/                          # 开发辅助脚本
+├── artifacts/                        # 运行时产物、Web 数据库、知识库、上传报文（Git 忽略）
+├── pyproject.toml                    # Python 依赖、命令和工具配置
+└── requirements.txt                  # 开发环境安装入口
+```
+
+`src/packetmaster/config_local.py`、`artifacts/`、`webui/node_modules/`、`build/` 和测试缓存均属于本机生成内容，不应提交到 Git。
 
 ## 测试
 

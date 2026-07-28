@@ -1,4 +1,4 @@
-"""Web conversation orchestration with local-only capture path handling."""
+"""Web 会话编排：提取参数、脱敏消息，并将报文统一替换为内部引用。"""
 
 from __future__ import annotations
 
@@ -51,7 +51,7 @@ _ABSOLUTE_PATH = re.compile(
 
 
 class WebConversationService:
-    """Coordinate chat, pending parameters, capture references and task creation."""
+    """协调对话、待补全参数、报文引用与分析任务创建。"""
 
     def __init__(
         self,
@@ -107,6 +107,7 @@ class WebConversationService:
         content: str,
         capture_id: str | None = None,
     ) -> ConversationResult:
+        # 已选 capture_id 强制走诊断分支，避免普通闲聊路由丢失报文绑定。
         session = self._session(session_id)
         previous = self.intents.get(session_id)
         route = route_conversation(
@@ -125,6 +126,7 @@ class WebConversationService:
         )
 
     def confirm(self, session_id: str) -> AnalysisSummary:
+        # 使用会话和待处理记录派生稳定 ID；重复点击确认会返回同一任务。
         self._session(session_id)
         pending = self.intents.get(session_id)
         if pending is None:
@@ -204,6 +206,7 @@ class WebConversationService:
         capture_id: str | None,
         previous: PendingIntentRecord | None,
     ) -> ConversationResult:
+        # 文本中的路径仅在本机注册后使用，写入会话前始终替换和脱敏。
         extracted = extract_capture_paths(content)
         selected_capture = (
             self.captures.summary(capture_id) if capture_id is not None else None
@@ -237,6 +240,7 @@ class WebConversationService:
             local_values.setdefault(key, value)
         current = DiagnosisIntent(**local_values)
         intent = merge_intent(previous_domain, current)
+        # 正则规则优先；只有没有确定参数时才请求模型补充意图，降低不确定性。
         if not local_values and hasattr(self.model, "parse_intent"):
             try:
                 intent, _ = await self.model.parse_intent(safe_content, previous_domain)
@@ -383,6 +387,7 @@ def _parameter_message(parameters: DiagnosisParameters) -> str:
 
 
 def _redact(value: str) -> str:
+    # Web 数据库和 API 消息不能保留 API Key 或绝对本地路径。
     without_secrets = _SECRET.sub("<敏感信息已隐藏>", value)
     return _ABSOLUTE_PATH.sub("<本地路径已隐藏>", without_secrets)
 

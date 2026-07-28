@@ -1,3 +1,5 @@
+"""TShark 命令构建、跨平台进程控制与临时文件辅助函数。"""
+
 from __future__ import annotations
 
 import os

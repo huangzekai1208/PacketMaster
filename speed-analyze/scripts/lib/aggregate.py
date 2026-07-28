@@ -1,3 +1,5 @@
+"""将流式 TCP 字段聚合为吞吐、RTT、异常事件和流级摘要。"""
+
 from __future__ import annotations
 
 import ipaddress

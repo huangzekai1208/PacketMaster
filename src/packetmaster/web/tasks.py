@@ -1,4 +1,4 @@
-"""Transactional analysis task state and event persistence."""
+"""分析任务状态机与事件的 SQLite 事务持久化。"""
 
 from __future__ import annotations
 
@@ -35,6 +35,7 @@ _TERMINAL_STATUSES = {
     TaskStatus.INTERRUPTED,
 }
 _TRANSITIONS = {
+    # 所有合法迁移显式列出，阻止 Worker 或 API 跳过关键分析阶段。
     TaskStatus.DRAFT: {TaskStatus.AWAITING_CONFIRMATION},
     TaskStatus.AWAITING_CONFIRMATION: {
         TaskStatus.QUEUED,
@@ -91,6 +92,8 @@ class ClaimedAnalysis:
 
 
 class AnalysisTaskRepository:
+    """任务、Worker 心跳和 SSE 事件的唯一写入入口。"""
+
     def __init__(self, database: WebDatabase) -> None:
         self.database = database
 
@@ -106,6 +109,7 @@ class AnalysisTaskRepository:
         retry_of_analysis_id: str | None = None,
         now: datetime | None = None,
     ) -> AnalysisSummary:
+        # immediate 事务先锁定写入，确保一个会话在任意时刻至多有一个活动任务。
         identifier = analysis_id or uuid.uuid4().hex
         current = (now or datetime.now(UTC)).astimezone(UTC)
         timestamp = current.isoformat()
@@ -222,6 +226,7 @@ class AnalysisTaskRepository:
         report_path: str | None = None,
         now: datetime | None = None,
     ) -> AnalysisSummary:
+        # 更新任务、会话状态和 SSE 事件必须处于同一事务，页面才能观察一致状态。
         current_time = (now or datetime.now(UTC)).astimezone(UTC)
         timestamp = current_time.isoformat()
         with self.database.transaction(immediate=True) as connection:
@@ -292,6 +297,7 @@ class AnalysisTaskRepository:
     def claim_next(
         self, worker_id: str, *, now: datetime | None = None
     ) -> ClaimedAnalysis | None:
+        # 单 Worker 从队列原子领取任务，并立即切换为 validating 防止重复消费。
         current = (now or datetime.now(UTC)).astimezone(UTC)
         timestamp = current.isoformat()
         with self.database.transaction(immediate=True) as connection:
@@ -375,6 +381,7 @@ class AnalysisTaskRepository:
     def request_cancel(
         self, analysis_id: str, *, now: datetime | None = None
     ) -> AnalysisSummary:
+        # 已排队任务可直接取消；运行中任务设置协作式取消标志，由 Worker 终止执行。
         current = (now or datetime.now(UTC)).astimezone(UTC)
         timestamp = current.isoformat()
         with self.database.transaction(immediate=True) as connection:

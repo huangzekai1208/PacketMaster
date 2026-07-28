@@ -25,6 +25,7 @@ def test_active_mode_without_evaluation_gate_downgrades_to_shadow(
         rag_enabled=True,
         rag_mode="active",
         knowledge_database_path=tmp_path / "knowledge.sqlite",
+        embedding_api_key="secret",
     )
 
     runtime = build_rag_runtime(settings)
@@ -32,6 +33,35 @@ def test_active_mode_without_evaluation_gate_downgrades_to_shadow(
     assert runtime is not None
     assert runtime.mode is RagMode.SHADOW
     assert runtime.degradation_reason == "RAG_ACTIVE_GATE_NOT_PASSED"
+
+
+def test_dashscope_runtime_uses_configured_provider_identity(tmp_path: Path) -> None:
+    runtime = build_rag_runtime(
+        Settings(
+            rag_enabled=True,
+            knowledge_database_path=tmp_path / "knowledge.sqlite",
+            embedding_api_key="secret",
+        )
+    )
+
+    assert runtime is not None
+    assert runtime.store.embedding_model == "text-embedding-v4"
+    assert runtime.store.embedding_dimension == 1024
+
+
+def test_dashscope_runtime_degrades_when_key_is_missing(
+    tmp_path: Path,
+) -> None:
+    runtime = build_rag_runtime(
+        Settings(
+            rag_enabled=True,
+            knowledge_database_path=tmp_path / "knowledge.sqlite",
+            embedding_api_key=None,
+        )
+    )
+
+    assert runtime is not None
+    assert runtime.degradation_reason == "EMBEDDING_AUTH_MISSING"
 
 
 def test_active_mode_is_allowed_after_recorded_gate(tmp_path: Path) -> None:
@@ -52,6 +82,7 @@ def test_active_mode_is_allowed_after_recorded_gate(tmp_path: Path) -> None:
         rag_enabled=True,
         rag_mode="active",
         knowledge_database_path=path,
+        embedding_api_key="secret",
     )
 
     runtime = build_rag_runtime(settings)

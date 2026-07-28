@@ -1,4 +1,4 @@
-"""RAG contracts and provider boundaries for PacketMaster."""
+"""PacketMaster RAG 的公共契约、运行模式与 Provider 边界。"""
 
 from packetmaster.rag.contracts import (
     KnowledgeBundle,

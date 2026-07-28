@@ -1,3 +1,5 @@
+"""保存有界聚合结果与分页证据的 SQLite 存储工具。"""
+
 from __future__ import annotations
 
 import json

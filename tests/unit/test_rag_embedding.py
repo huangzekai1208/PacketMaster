@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import builtins
+import json
 import math
 from pathlib import Path
 
 import pytest
 
+import packetmaster.rag.embedding as embedding_module
+from packetmaster.config import Settings
 from packetmaster.errors import AppError
 from packetmaster.rag.contracts import KnowledgeQuery
 from packetmaster.rag.database import (
@@ -14,8 +16,9 @@ from packetmaster.rag.database import (
     StoredEmbedding,
 )
 from packetmaster.rag.embedding import (
+    DashScopeEmbeddingProvider,
     EmbeddingIndexer,
-    LocalEmbeddingProvider,
+    build_embedding_provider,
     encode_vector,
     normalize_vector,
 )
@@ -107,40 +110,102 @@ def test_vector_normalization_rejects_empty_zero_and_non_finite_values() -> None
             normalize_vector(vector, expected_dimension=2)
 
 
-def test_missing_optional_embedding_dependency_has_stable_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    original_import = builtins.__import__
-
-    def missing(name, *args, **kwargs):
-        if name == "sentence_transformers":
-            raise ImportError("not installed")
-        return original_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", missing)
-
-    with pytest.raises(AppError) as raised:
-        LocalEmbeddingProvider(dimension=2)._load()
-    assert raised.value.code == "RAG_DEPENDENCY_MISSING"
-
-
 @pytest.mark.asyncio
-async def test_local_e5_provider_adds_query_and_passage_prefixes(
+async def test_dashscope_provider_uses_compatible_api_and_response_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = LocalEmbeddingProvider(dimension=2)
-    captured: list[list[str]] = []
+    provider = DashScopeEmbeddingProvider(
+        "text-embedding-v4",
+        api_key="secret",
+        dimension=2,
+        base_url="https://example.invalid/compatible-mode/v1/",
+        timeout_seconds=1,
+        max_retries=0,
+    )
+    captured: dict[str, object] = {}
 
-    def fake_encode(texts):
-        captured.append(list(texts))
-        return [[1.0, 0.0] for _ in texts]
+    def fake_request(texts):
+        captured["texts"] = list(texts)
+        return [[0.0, 1.0], [1.0, 0.0]]
 
-    monkeypatch.setattr(provider, "_encode", fake_encode)
+    monkeypatch.setattr(provider, "_request", fake_request)
 
-    await provider.embed_documents(["知识正文"])
-    await provider.embed_query("查询内容")
+    result = await provider.embed_documents(["first", "second"])
 
-    assert captured == [["passage: 知识正文"], ["query: 查询内容"]]
+    assert provider.model_name == "text-embedding-v4"
+    assert provider.dimension == 2
+    assert provider._endpoint == "https://example.invalid/compatible-mode/v1/embeddings"
+    assert captured["texts"] == ["first", "second"]
+    assert result == [[0.0, 1.0], [1.0, 0.0]]
+
+
+def test_dashscope_request_uses_bearer_auth_and_orders_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DashScopeEmbeddingProvider(
+        "text-embedding-v4",
+        api_key="secret",
+        dimension=2,
+        base_url="https://example.invalid/compatible-mode/v1",
+        timeout_seconds=1,
+        max_retries=0,
+    )
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        @staticmethod
+        def read() -> bytes:
+            return json.dumps(
+                {
+                    "data": [
+                        {"index": 1, "embedding": [0.0, 1.0]},
+                        {"index": 0, "embedding": [1.0, 0.0]},
+                    ]
+                }
+            ).encode("utf-8")
+
+    def fake_urlopen(request, *, timeout):
+        captured["url"] = request.full_url
+        captured["authorization"] = request.get_header("Authorization")
+        captured["payload"] = json.loads(request.data)
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(embedding_module, "urlopen", fake_urlopen)
+
+    assert provider._request(["first", "second"]) == [[1.0, 0.0], [0.0, 1.0]]
+    assert captured == {
+        "url": "https://example.invalid/compatible-mode/v1/embeddings",
+        "authorization": "Bearer secret",
+        "payload": {"model": "text-embedding-v4", "input": ["first", "second"]},
+        "timeout": 1,
+    }
+
+
+def test_dashscope_provider_requires_an_api_key() -> None:
+    with pytest.raises(AppError) as raised:
+        DashScopeEmbeddingProvider(
+            "text-embedding-v4",
+            api_key=None,
+            dimension=1024,
+            base_url="https://example.invalid/v1",
+            timeout_seconds=1,
+            max_retries=0,
+        )
+    assert raised.value.code == "EMBEDDING_AUTH_MISSING"
+
+
+def test_embedding_provider_factory_uses_provider_defaults() -> None:
+    provider = build_embedding_provider(Settings(embedding_api_key="secret"))
+
+    assert isinstance(provider, DashScopeEmbeddingProvider)
+    assert (provider.model_name, provider.dimension) == ("text-embedding-v4", 1024)
 
 
 @pytest.mark.asyncio

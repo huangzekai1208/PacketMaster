@@ -1,4 +1,4 @@
-"""Versioned SQLite persistence and approved-knowledge retrieval."""
+"""带版本的 SQLite 知识持久化、FTS 检索与已发布知识读取。"""
 
 from __future__ import annotations
 
