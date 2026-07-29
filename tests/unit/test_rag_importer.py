@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import base64
 from pathlib import Path
 
 import pytest
@@ -209,3 +210,49 @@ def test_import_is_deterministic_for_same_content(tmp_path: Path) -> None:
     assert [chunk.model_dump() for chunk in first.chunks] == [
         chunk.model_dump() for chunk in second.chunks
     ]
+
+
+def test_markdown_import_embeds_local_images_and_reports_unsafe_references(
+    tmp_path: Path,
+) -> None:
+    document_dir = tmp_path / "docs"
+    document_dir.mkdir()
+    image_dir = document_dir / "images"
+    image_dir.mkdir()
+    image = image_dir / "diagram.png"
+    image.write_bytes(
+        base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL2dwAAAABJRU5ErkJggg=="
+        )
+    )
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(image.read_bytes())
+    source = document_dir / "image-runbook.md"
+    source.write_text(
+        """# 图文知识
+
+下载测速流程如下。
+
+![PON 口抓包拓扑](images/diagram.png)
+![远程图](https://example.com/diagram.png)
+![越界图](../outside.png)
+""",
+        encoding="utf-8",
+    )
+
+    preview = KnowledgeImporter().preview(source, _metadata())
+    chunk = next(item for item in preview.chunks if item.media)
+
+    assert chunk.content.find("图片：PON 口抓包拓扑") >= 0
+    assert len(chunk.media) == 1
+    media = chunk.media[0]
+    assert media.source_ref == "images/diagram.png"
+    assert media.mime_type == "image/png"
+    assert media.data_url.startswith("data:image/png;base64,")
+    assert str(tmp_path) not in media.source_ref
+    assert any("远程或内联" in warning for warning in preview.warnings)
+    assert any("越出 Markdown" in warning for warning in preview.warnings)
+
+    image.write_bytes(image.read_bytes() + b"changed")
+    changed = KnowledgeImporter().preview(source, _metadata())
+    assert changed.version.content_hash != preview.version.content_hash

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
+import mimetypes
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +21,7 @@ from packetmaster.rag.contracts import (
     KnowledgeApplicability,
     KnowledgeChunk,
     KnowledgeDocument,
+    KnowledgeImage,
     KnowledgeStatus,
     KnowledgeType,
     KnowledgeVersion,
@@ -26,6 +29,8 @@ from packetmaster.rag.contracts import (
 )
 
 _SUPPORTED_SUFFIXES = {".md", ".markdown", ".txt", ".json"}
+_IMAGE_PATTERN = re.compile(r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+['\"][^)]*['\"])?\)")
+_IMAGE_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
 _PROMPT_INJECTION_PATTERNS = (
     re.compile(r"ignore\s+(?:all\s+)?previous\s+instructions", re.IGNORECASE),
     re.compile(r"reveal\s+(?:the\s+)?system\s+prompt", re.IGNORECASE),
@@ -60,6 +65,16 @@ _SENSITIVE_KEY = re.compile(
 
 def _digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _image_mime_from_payload(payload: bytes) -> str | None:
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if payload.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if payload.startswith(b"RIFF") and payload[8:12] == b"WEBP":
+        return "image/webp"
+    return None
 
 
 def _placeholder(kind: str, value: str) -> str:
@@ -137,6 +152,7 @@ class KnowledgeImporter:
         target_chunk_chars: int = 800,
         max_chunk_chars: int = 1_500,
         overlap_chars: int = 100,
+        max_image_bytes: int = 5 * 1024 * 1024,
     ) -> None:
         if not 1 <= overlap_chars < target_chunk_chars <= max_chunk_chars <= 8_000:
             raise ValueError("invalid knowledge chunk limits")
@@ -144,6 +160,7 @@ class KnowledgeImporter:
         self.target_chunk_chars = target_chunk_chars
         self.max_chunk_chars = max_chunk_chars
         self.overlap_chars = overlap_chars
+        self.max_image_bytes = max_image_bytes
 
     def preview(self, path: Path, metadata: ImportMetadata) -> ImportPreview:
         source = path.expanduser()
@@ -156,6 +173,16 @@ class KnowledgeImporter:
             raw_text = source.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
             raise ValueError("knowledge files must use UTF-8 encoding") from exc
+        if source.suffix.lower() in {".md", ".markdown"}:
+            sections, warnings = self._markdown_sections_with_images(raw_text, source)
+            risks = [
+                "prompt_injection"
+                for pattern in _PROMPT_INJECTION_PATTERNS
+                if pattern.search(raw_text)
+            ][:1]
+            return self._preview_sections(
+                sections, metadata, warnings=warnings, risk_flags=risks
+            )
         return self.preview_text(raw_text, source.name, metadata)
 
     def preview_text(
@@ -178,8 +205,24 @@ class KnowledgeImporter:
             sections = self._markdown_sections(redact_text(raw_text))
         else:
             sections = self._text_sections(redact_text(raw_text))
+        return self._preview_sections(
+            [(headings, content, []) for headings, content in sections],
+            metadata,
+            case_profile=case_profile,
+            risk_flags=risks,
+        )
+
+    def _preview_sections(
+        self,
+        sections: list[tuple[list[str], str, list[KnowledgeImage]]],
+        metadata: ImportMetadata,
+        *,
+        warnings: list[str] | None = None,
+        case_profile: CaseProfile | None = None,
+        risk_flags: list[str] | None = None,
+    ) -> ImportPreview:
         chunks = self._chunks(sections, metadata)
-        canonical = "\n\n".join(chunk.content for chunk in chunks)
+        canonical = "\n\n".join(chunk.content_hash for chunk in chunks)
         version_id = f"{metadata.knowledge_id}:v{metadata.version_number}"
         document = KnowledgeDocument(
             knowledge_id=metadata.knowledge_id,
@@ -204,7 +247,7 @@ class KnowledgeImporter:
         normalized_chunks = [
             chunk.model_copy(update={"version_id": version_id}) for chunk in chunks
         ]
-        warnings = []
+        warnings = list(warnings or [])
         if len(chunks) >= 512:
             warnings.append("切片数量达到单文档上限")
         return ImportPreview(
@@ -213,8 +256,8 @@ class KnowledgeImporter:
             chunks=normalized_chunks,
             case_profile=case_profile,
             warnings=warnings,
-            risk_flags=risks,
-            requires_risk_acknowledgement=bool(risks),
+            risk_flags=risk_flags or [],
+            requires_risk_acknowledgement=bool(risk_flags),
         )
 
     def _json_sections(
@@ -277,6 +320,83 @@ class KnowledgeImporter:
             sections.append((list(headings), "\n".join(body).strip()))
         return sections or [([], value.strip())]
 
+    def _markdown_sections_with_images(
+        self, value: str, source: Path
+    ) -> tuple[list[tuple[list[str], str, list[KnowledgeImage]]], list[str]]:
+        headings: list[str] = []
+        sections: list[tuple[list[str], str, list[KnowledgeImage]]] = []
+        body: list[str] = []
+        images: list[KnowledgeImage] = []
+        warnings: list[str] = []
+
+        def flush() -> None:
+            if any(item.strip() for item in body):
+                sections.append((list(headings), "\n".join(body).strip(), list(images)))
+
+        for line in value.splitlines():
+            match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+            if match:
+                flush()
+                level = len(match.group(1))
+                headings = [*headings[: level - 1], match.group(2).strip()]
+                body, images = [], []
+                continue
+
+            def replace_image(image_match: re.Match[str]) -> str:
+                image = self._load_markdown_image(
+                    source, image_match.group(2), image_match.group(1), warnings
+                )
+                if image is None:
+                    return f"[图片引用：{redact_text(image_match.group(1))}]"
+                images.append(image)
+                return f"[图片：{image.alt_text or image.source_ref}；来源：{image.source_ref}]"
+
+            position = 0
+            rendered: list[str] = []
+            for image_match in _IMAGE_PATTERN.finditer(line):
+                rendered.append(redact_text(line[position : image_match.start()]))
+                rendered.append(replace_image(image_match))
+                position = image_match.end()
+            rendered.append(redact_text(line[position:]))
+            body.append("".join(rendered))
+        flush()
+        return sections or [([], value.strip(), [])], warnings
+
+    def _load_markdown_image(
+        self, source: Path, reference: str, alt_text: str, warnings: list[str]
+    ) -> KnowledgeImage | None:
+        if reference.startswith(("http://", "https://", "data:")):
+            warnings.append("未导入远程或内联图片；仅支持相对本地图片")
+            return None
+        root = source.parent.resolve()
+        candidate = (root / reference).resolve()
+        try:
+            relative = candidate.relative_to(root)
+        except ValueError:
+            warnings.append("已忽略越出 Markdown 目录的图片引用")
+            return None
+        if not candidate.is_file():
+            warnings.append(f"未找到图片：{relative.as_posix()}")
+            return None
+        mime_type, _ = mimetypes.guess_type(candidate.name)
+        if mime_type not in _IMAGE_MIME_TYPES:
+            warnings.append(f"不支持的图片格式：{relative.as_posix()}")
+            return None
+        payload = candidate.read_bytes()
+        if not payload or len(payload) > self.max_image_bytes:
+            warnings.append(f"图片大小超出限制：{relative.as_posix()}")
+            return None
+        if _image_mime_from_payload(payload) != mime_type:
+            warnings.append(f"图片内容与格式不匹配：{relative.as_posix()}")
+            return None
+        return KnowledgeImage(
+            source_ref=relative.as_posix(),
+            alt_text=redact_text(alt_text),
+            mime_type=mime_type,
+            data_url=(f"data:{mime_type};base64," + base64.b64encode(payload).decode("ascii")),
+            content_hash=hashlib.sha256(payload).hexdigest(),
+        )
+
     @staticmethod
     def _text_sections(value: str) -> list[tuple[list[str], str]]:
         paragraphs = [
@@ -288,14 +408,20 @@ class KnowledgeImporter:
 
     def _chunks(
         self,
-        sections: list[tuple[list[str], str]],
+        sections: list[tuple[list[str], str, list[KnowledgeImage]]],
         metadata: ImportMetadata,
     ) -> list[KnowledgeChunk]:
-        pieces: list[tuple[list[str], str]] = []
-        for headings, content in sections:
-            for piece in self._split_content(content):
+        pieces: list[tuple[list[str], str, list[KnowledgeImage]]] = []
+        for headings, content, images in sections:
+            for piece_index, piece in enumerate(self._split_content(content)):
                 if piece.strip():
-                    pieces.append((headings or [metadata.title], piece.strip()))
+                    pieces.append(
+                        (
+                            headings or [metadata.title],
+                            piece.strip(),
+                            images if piece_index == 0 else [],
+                        )
+                    )
         if not pieces:
             raise ValueError("knowledge document contains no usable content")
         if len(pieces) > 512:
@@ -314,10 +440,13 @@ class KnowledgeImporter:
                     else " / ".join(headings)
                 )[:512],
                 content=content,
-                content_hash=_digest(content),
+                media=images,
+                content_hash=_digest(
+                    content + "|" + "|".join(image.content_hash for image in images)
+                ),
                 status=KnowledgeStatus.DRAFT,
             )
-            for index, (headings, content) in enumerate(pieces)
+            for index, (headings, content, images) in enumerate(pieces)
         ]
 
     def _split_content(self, content: str) -> list[str]:

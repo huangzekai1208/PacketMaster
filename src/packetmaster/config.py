@@ -67,12 +67,12 @@ class Settings(BaseSettings):
         exclude=True,
         repr=False,
     )
-    # 当前只支持 DashScope text-embedding-v4，避免本地模型与索引维度不一致。
+    # 默认使用 DashScope 原生多模态向量模型；文本知识也通过同一模型索引。
     embedding_provider: Literal["dashscope"] = "dashscope"
     embedding_model: str = Field(
-        default="text-embedding-v4", min_length=1, max_length=256
+        default="qwen3-vl-embedding", min_length=1, max_length=256
     )
-    embedding_dimension: int = Field(default=1024, ge=1, le=4096)
+    embedding_dimension: int = Field(default=2560, ge=1, le=4096)
     embedding_api_key: SecretStr | None = Field(
         default=(
             SecretStr(LOCAL_EMBEDDING_API_KEY) if LOCAL_EMBEDDING_API_KEY else None
@@ -80,9 +80,17 @@ class Settings(BaseSettings):
         exclude=True,
         repr=False,
     )
-    # DashScope 的 OpenAI 兼容地址；通常不需要修改，私有网关时才覆盖。
+    # DashScope OpenAI 兼容地址，供 text-embedding-v4 等文本模型使用。
     embedding_base_url: str = Field(
         default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        min_length=1,
+    )
+    # qwen3-vl-embedding 使用 DashScope 原生多模态 Embedding 端点。
+    embedding_multimodal_base_url: str = Field(
+        default=(
+            "https://dashscope.aliyuncs.com/api/v1/services/embeddings/"
+            "multimodal-embedding/multimodal-embedding"
+        ),
         min_length=1,
     )
     embedding_timeout_seconds: float = Field(default=15, gt=0, le=60)

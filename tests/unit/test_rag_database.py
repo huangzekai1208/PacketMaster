@@ -12,6 +12,7 @@ from packetmaster.rag.contracts import (
     KnowledgeApplicability,
     KnowledgeChunk,
     KnowledgeDocument,
+    KnowledgeImage,
     KnowledgeQuery,
     KnowledgeStatus,
     KnowledgeVersion,
@@ -98,7 +99,7 @@ def test_knowledge_database_initializes_idempotently_with_fts5(tmp_path: Path) -
             "SELECT name FROM sqlite_master WHERE name = 'knowledge_chunks_fts'"
         ).fetchone()
 
-    assert version == 1
+    assert version == 2
     assert str(journal_mode).lower() == "wal"
     assert fts is not None
 
@@ -120,6 +121,69 @@ def test_save_draft_round_trips_without_entering_search(tmp_path: Path) -> None:
         KnowledgeQuery(query_id="query-1", query_text="零窗口"), limit=10
     )
     assert results == []
+
+
+def test_save_draft_round_trips_chunk_media(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    store = SQLiteKnowledgeStore(database)
+    document, version, chunks, case = _draft_models()
+    image = KnowledgeImage(
+        source_ref="images/topology.png",
+        alt_text="测速拓扑",
+        mime_type="image/png",
+        data_url="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ",
+        content_hash="d" * 64,
+    )
+    chunks[0] = chunks[0].model_copy(update={"media": [image]})
+
+    store.save_draft(document, version, chunks, case_profile=case)
+
+    assert store.get_chunks(version.version_id)[0].media == [image]
+
+
+def test_save_draft_accepts_new_version_without_replacing_current(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    store = SQLiteKnowledgeStore(database)
+    document, version, chunks, case = _draft_models()
+    store.save_draft(document, version, chunks, case_profile=case)
+    store.save_embeddings(
+        version.version_id,
+        [
+            StoredEmbedding(
+                chunk_id=chunk.chunk_id,
+                model_name="fake-embedding",
+                dimension=2,
+                vector=b"12345678",
+                content_hash=chunk.content_hash,
+            )
+            for chunk in chunks
+        ],
+    )
+    store.publish_version(version.version_id, approved_by="reviewer")
+
+    next_version = version.model_copy(
+        update={
+            "version_id": f"{document.knowledge_id}:v2",
+            "version_number": 2,
+            "content_hash": "e" * 64,
+        }
+    )
+    next_chunks = [
+        chunk.model_copy(
+            update={
+                "chunk_id": f"{document.knowledge_id}:v2:chunk-{chunk.chunk_index}",
+                "version_id": next_version.version_id,
+                "content_hash": "e" * 64,
+            }
+        )
+        for chunk in chunks
+    ]
+    store.save_draft(document, next_version, next_chunks, case_profile=case)
+
+    stored = store.get_document(document.knowledge_id)
+    assert stored is not None
+    assert stored.current_version_id == version.version_id
+    assert store.get_version(next_version.version_id) == next_version
 
 
 def test_publish_requires_complete_matching_embeddings(tmp_path: Path) -> None:

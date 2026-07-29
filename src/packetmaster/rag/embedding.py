@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 from packetmaster.errors import AppError
 from packetmaster.rag.base import EmbeddingProvider
+from packetmaster.rag.contracts import KnowledgeImage
 from packetmaster.rag.database import SQLiteKnowledgeStore, StoredEmbedding
 
 
@@ -159,9 +160,177 @@ class _RetryableEmbeddingError(Exception):
     pass
 
 
+class DashScopeMultimodalEmbeddingProvider:
+    """DashScope 原生 qwen3-vl-embedding Provider。
+
+    文本切片编码为一个 ``contents`` 项；带图片的 Markdown 切片以图文
+    ``contents`` 项编码。一节含多图时，对各图文向量做归一化均值聚合。
+    """
+
+    _MAX_CONTENTS_PER_REQUEST = 10
+
+    def __init__(
+        self,
+        model_name: str,
+        *,
+        api_key: str | None,
+        dimension: int,
+        base_url: str,
+        timeout_seconds: float,
+        max_retries: int,
+    ) -> None:
+        if not api_key:
+            raise AppError(
+                code="EMBEDDING_AUTH_MISSING",
+                message="DashScope Embedding API Key 未配置",
+                recoverable=True,
+                suggested_action="请配置 EMBEDDING_API_KEY 后重试。",
+            )
+        self._model_name = model_name
+        self._api_key = api_key
+        self._dimension = dimension
+        self._endpoint = base_url
+        self._timeout_seconds = timeout_seconds
+        self._max_retries = max_retries
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    def _request_contents(self, contents: Sequence[dict[str, str]]) -> list[list[float]]:
+        payload = json.dumps(
+            {
+                "model": self.model_name,
+                "input": {"contents": list(contents)},
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        request = Request(
+            self._endpoint,
+            data=payload,
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            if exc.code in {401, 403}:
+                raise AppError(
+                    code="EMBEDDING_AUTH_FAILED",
+                    message="DashScope Embedding 鉴权失败",
+                    recoverable=True,
+                    suggested_action="请检查 EMBEDDING_API_KEY 的有效性和模型权限。",
+                ) from exc
+            if exc.code == 429 or exc.code >= 500:
+                raise _RetryableEmbeddingError() from exc
+            raise AppError(
+                code="EMBEDDING_SERVICE_UNAVAILABLE",
+                message="DashScope 多模态 Embedding 服务请求失败",
+                recoverable=True,
+                suggested_action="请检查模型、输入格式或稍后重试。",
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
+            raise _RetryableEmbeddingError() from exc
+        try:
+            embeddings = body["output"]["embeddings"]
+            vectors = [[float(value) for value in item["embedding"]] for item in embeddings]
+            if len(vectors) != len(contents):
+                raise ValueError("embedding result count does not match input")
+            return [
+                normalize_vector(vector, expected_dimension=self.dimension)
+                for vector in vectors
+            ]
+        except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            raise AppError(
+                code="INVALID_EMBEDDING_OUTPUT",
+                message="DashScope 多模态 Embedding 返回了无效向量",
+                recoverable=True,
+                suggested_action="请检查模型、维度和多模态输入格式。",
+            ) from exc
+
+    async def _embed_contents(
+        self, contents: Sequence[dict[str, str]]
+    ) -> list[list[float]]:
+        vectors: list[list[float]] = []
+        for start in range(0, len(contents), self._MAX_CONTENTS_PER_REQUEST):
+            request_contents = contents[
+                start : start + self._MAX_CONTENTS_PER_REQUEST
+            ]
+            for attempt in range(self._max_retries + 1):
+                try:
+                    vectors.extend(
+                        await asyncio.to_thread(
+                            self._request_contents, request_contents
+                        )
+                    )
+                    break
+                except _RetryableEmbeddingError as exc:
+                    if attempt == self._max_retries:
+                        raise AppError(
+                            code="EMBEDDING_SERVICE_UNAVAILABLE",
+                            message="DashScope 多模态 Embedding 服务暂时不可用",
+                            recoverable=True,
+                            suggested_action="请稍后重试并检查网络、配额和服务状态。",
+                        ) from exc
+                    await asyncio.sleep(0.25 * (2**attempt))
+        return vectors
+
+    async def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        return await self._embed_contents([{"text": text} for text in texts])
+
+    async def embed_query(self, text: str) -> list[float]:
+        return (await self.embed_documents([text]))[0]
+
+    async def embed_multimodal_documents(
+        self, documents: Sequence[tuple[str, Sequence[KnowledgeImage]]]
+    ) -> list[list[float]]:
+        contents: list[dict[str, str]] = []
+        counts: list[int] = []
+        for text, images in documents:
+            media = list(images)
+            if not media:
+                contents.append({"text": text})
+                counts.append(1)
+                continue
+            contents.extend(
+                {"text": text, "image": image.data_url} for image in media
+            )
+            counts.append(len(media))
+        vectors = await self._embed_contents(contents)
+        combined: list[list[float]] = []
+        offset = 0
+        for count in counts:
+            group = vectors[offset : offset + count]
+            offset += count
+            combined.append(
+                normalize_vector(
+                    [sum(values) / count for values in zip(*group, strict=True)],
+                    expected_dimension=self.dimension,
+                )
+            )
+        return combined
+
+
 def build_embedding_provider(settings: Any) -> EmbeddingProvider:
     """构造 DashScope Provider，调用方不会获得或记录 API Key。"""
     key = settings.embedding_api_key
+    if settings.effective_embedding_model == "qwen3-vl-embedding":
+        return DashScopeMultimodalEmbeddingProvider(
+            settings.effective_embedding_model,
+            api_key=key.get_secret_value() if key else None,
+            dimension=settings.effective_embedding_dimension,
+            base_url=settings.embedding_multimodal_base_url,
+            timeout_seconds=settings.embedding_timeout_seconds,
+            max_retries=settings.embedding_max_retries,
+        )
     return DashScopeEmbeddingProvider(
         settings.effective_embedding_model,
         api_key=key.get_secret_value() if key else None,
@@ -178,7 +347,7 @@ class EmbeddingIndexer:
         store: SQLiteKnowledgeStore,
         provider: EmbeddingProvider,
         *,
-        batch_size: int = 32,
+        batch_size: int = 10,
     ) -> None:
         if not 1 <= batch_size <= 256:
             raise ValueError("embedding batch_size must be between 1 and 256")
@@ -211,8 +380,24 @@ class EmbeddingIndexer:
         try:
             for start in range(0, len(pending), self.batch_size):
                 batch = pending[start : start + self.batch_size]
-                texts = [chunk.content for chunk in batch]
-                vectors = await self.provider.embed_documents(texts)
+                if any(chunk.media for chunk in batch):
+                    embed_multimodal = getattr(
+                        self.provider, "embed_multimodal_documents", None
+                    )
+                    if not callable(embed_multimodal):
+                        raise AppError(
+                            code="EMBEDDING_MULTIMODAL_UNSUPPORTED",
+                            message="当前 Embedding 模型不支持图片知识切片",
+                            recoverable=True,
+                            suggested_action="请使用 qwen3-vl-embedding 重新索引。",
+                        )
+                    vectors = await embed_multimodal(
+                        [(chunk.content, chunk.media) for chunk in batch]
+                    )
+                else:
+                    vectors = await self.provider.embed_documents(
+                        [chunk.content for chunk in batch]
+                    )
                 if len(vectors) != len(batch):
                     raise ValueError("embedding result count does not match input")
                 records: list[StoredEmbedding] = []

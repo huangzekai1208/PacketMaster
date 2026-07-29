@@ -16,7 +16,7 @@ RAG 故障不会阻止基础诊断、Web 启动和无 RAG 问答。生产默认�
 python -m pip install -r requirements.txt
 ```
 
-默认且唯一的 Embedding Provider 为百炼 DashScope，默认模型为 `text-embedding-v4`、维度为 1024。配置 API Key：
+默认且唯一的 Embedding Provider 为百炼 DashScope，默认模型为 `qwen3-vl-embedding`、维度为 2560。该模型通过 DashScope 原生多模态 Embedding 端点调用，Markdown 文件中的本地图片会随相邻正文作为图文切片入库。配置 API Key：
 
 ```powershell
 $env:EMBEDDING_API_KEY = "..."
@@ -27,12 +27,14 @@ DashScope 会接收已经过导入脱敏的知识切片和检索查询。确认�
 ```powershell
 $env:EMBEDDING_PROVIDER = "dashscope"
 $env:EMBEDDING_API_KEY = "..."
-$env:EMBEDDING_MODEL = "text-embedding-v4"
-# v4 的本项目默认维度为 1024；只有在已验证模型规格时才覆盖。
-$env:EMBEDDING_DIMENSION = "1024"
+$env:EMBEDDING_MODEL = "qwen3-vl-embedding"
+# qwen3-vl-embedding 的本项目默认维度为 2560；只有在已验证模型规格时才覆盖。
+$env:EMBEDDING_DIMENSION = "2560"
 ```
 
-默认端点为 DashScope OpenAI 兼容地址。私有网关可设置 `EMBEDDING_BASE_URL`；可用 `EMBEDDING_TIMEOUT_SECONDS` 和 `EMBEDDING_MAX_RETRIES` 调整远程调用边界。不要把 `EMBEDDING_API_KEY` 写入 Git、知识源文件或诊断报告。
+`qwen3-vl-embedding` 默认使用 `EMBEDDING_MULTIMODAL_BASE_URL` 指定的 DashScope 原生端点；`EMBEDDING_BASE_URL` 保留给 OpenAI 兼容的文本模型。可用 `EMBEDDING_TIMEOUT_SECONDS` 和 `EMBEDDING_MAX_RETRIES` 调整远程调用边界。不要把 `EMBEDDING_API_KEY` 写入 Git、知识源文件或诊断报告。
+
+Markdown 图片边界：仅接受 Markdown 所在目录及其子目录中的相对 `PNG`、`JPEG`、`WebP` 引用，单图不超过 5 MiB。导入时图片以 data URL 随切片持久化，因而后续重建索引不依赖原始文件路径；绝对路径、远程 URL、`data:` URL、目录逃逸和不支持格式都会被跳过并在预览中提示。Web 文本上传不包含本机文件树，不能导入图片。
 
 ## 3. 配置
 

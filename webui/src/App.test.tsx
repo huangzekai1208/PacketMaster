@@ -79,6 +79,28 @@ it('发送普通消息时会在请求完成前立即显示在对话区', async (
   resolveMessage?.(new Response(JSON.stringify({ ok: true, data: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
 })
 
+it('报告完成后的追问也会在请求完成前立即显示在对话区', async () => {
+  let resolveQuestion: ((value: Response) => void) | undefined
+  vi.stubGlobal('EventSource', class { addEventListener() {} close() {} })
+  const completedSession = { ...session, status: 'completed', current_analysis_id: 'analysis-1' }
+  const analysis = { analysis_id: 'analysis-1', session_id: 'session-1', status: 'completed', stage_message: '', progress_fraction: 1, capture: { capture_id: 'capture-1', file_name: '测速.pcapng', size_bytes: 1024 }, standard_bandwidth_mbps: 100, actual_bandwidth_mbps: 80, target: 'download', created_at: '2026-07-26T00:00:00Z', updated_at: '2026-07-26T00:00:00Z', elapsed_seconds: 1 }
+  vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input)
+    if (path.includes('/api/analyses/analysis-1/chat') && init?.method === 'POST') return new Promise<Response>(resolve => { resolveQuestion = resolve })
+    const data = path.includes('/api/analyses/analysis-1/chat') ? { items: [], total: 0, offset: 0, limit: 100 } : path.includes('/api/analyses/analysis-1') ? { analysis, report_available: true, recoverable: false, suggested_action: '' } : path.includes('/api/health') ? { status: 'ok', model_configured: true, tshark_configured: true } : path.includes('/api/sessions/session-1') ? { session: completedSession, messages: { items: [], total: 0, offset: 0, limit: 100 }, parameters: null } : { items: [completedSession], total: 1, offset: 0, limit: 50 }
+    return Promise.resolve(new Response(JSON.stringify({ ok: true, data }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+  }))
+  render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
+
+  const input = await screen.findByPlaceholderText('围绕当前报告继续提问')
+  fireEvent.change(input, { target: { value: '请解释丢包原因' } })
+  fireEvent.click(screen.getByTitle('发送'))
+
+  expect(await screen.findByText('请解释丢包原因')).toBeInTheDocument()
+  expect(await screen.findByText('Thinking…')).toBeInTheDocument()
+  resolveQuestion?.(new Response(JSON.stringify({ ok: true, data: { turn_id: 'turn-1', analysis_id: 'analysis-1', question: '请解释丢包原因', answer: '这是正式回答。', citations: [], limitations: [], suggestions: [], created_at: '2026-07-26T00:00:01Z' } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+})
+
 it('选择报文后只添加附件，等待用户发送对话消息', async () => {
   const capture = { capture_id: 'capture-1', file_name: '测速.pcapng', size_bytes: 1024 }
   const requests: string[] = []

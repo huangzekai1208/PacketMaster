@@ -9,7 +9,7 @@ import pytest
 import packetmaster.rag.embedding as embedding_module
 from packetmaster.config import Settings
 from packetmaster.errors import AppError
-from packetmaster.rag.contracts import KnowledgeQuery
+from packetmaster.rag.contracts import KnowledgeImage, KnowledgeQuery
 from packetmaster.rag.database import (
     KnowledgeDatabase,
     SQLiteKnowledgeStore,
@@ -17,6 +17,7 @@ from packetmaster.rag.database import (
 )
 from packetmaster.rag.embedding import (
     DashScopeEmbeddingProvider,
+    DashScopeMultimodalEmbeddingProvider,
     EmbeddingIndexer,
     build_embedding_provider,
     encode_vector,
@@ -204,8 +205,115 @@ def test_dashscope_provider_requires_an_api_key() -> None:
 def test_embedding_provider_factory_uses_provider_defaults() -> None:
     provider = build_embedding_provider(Settings(embedding_api_key="secret"))
 
-    assert isinstance(provider, DashScopeEmbeddingProvider)
-    assert (provider.model_name, provider.dimension) == ("text-embedding-v4", 1024)
+    assert isinstance(provider, DashScopeMultimodalEmbeddingProvider)
+    assert (provider.model_name, provider.dimension) == ("qwen3-vl-embedding", 2560)
+
+
+def test_multimodal_provider_sends_text_and_image_in_native_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = DashScopeMultimodalEmbeddingProvider(
+        "qwen3-vl-embedding",
+        api_key="secret",
+        dimension=2,
+        base_url="https://example.invalid/multimodal-embedding",
+        timeout_seconds=1,
+        max_retries=0,
+    )
+    captured: dict[str, object] = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        @staticmethod
+        def read() -> bytes:
+            return json.dumps(
+                {"output": {"embeddings": [{"embedding": [1.0, 0.0]}]}}
+            ).encode("utf-8")
+
+    def fake_urlopen(request, *, timeout):
+        captured["url"] = request.full_url
+        captured["authorization"] = request.get_header("Authorization")
+        captured["payload"] = json.loads(request.data)
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(embedding_module, "urlopen", fake_urlopen)
+
+    assert provider._request_contents(
+        [{"text": "下载测速拓扑", "image": "data:image/png;base64,AAAA"}]
+    ) == [[1.0, 0.0]]
+    assert captured == {
+        "url": "https://example.invalid/multimodal-embedding",
+        "authorization": "Bearer secret",
+        "payload": {
+            "model": "qwen3-vl-embedding",
+            "input": {
+                "contents": [
+                    {"text": "下载测速拓扑", "image": "data:image/png;base64,AAAA"}
+                ]
+            },
+        },
+        "timeout": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_indexer_uses_multimodal_provider_for_chunk_media(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    document, version, chunks, case = _draft_models()
+    image = KnowledgeImage(
+        source_ref="images/topology.png",
+        alt_text="测速拓扑",
+        mime_type="image/png",
+        data_url="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ",
+        content_hash="d" * 64,
+    )
+    chunks[0] = chunks[0].model_copy(update={"media": [image]})
+    store.save_draft(document, version, chunks, case_profile=case)
+
+    class MultimodalProvider(FakeEmbeddingProvider):
+        multimodal_inputs: list[tuple[str, list[KnowledgeImage]]]
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.multimodal_inputs = []
+
+        async def embed_multimodal_documents(self, documents):
+            self.multimodal_inputs.extend(
+                (text, list(media)) for text, media in documents
+            )
+            return [[1.0, 0.0] for _ in documents]
+
+    provider = MultimodalProvider()
+    assert await EmbeddingIndexer(store, provider).index_version(version.version_id) == 2
+    assert provider.document_inputs == []
+    assert provider.multimodal_inputs[0] == (chunks[0].content, [image])
+
+
+@pytest.mark.asyncio
+async def test_indexer_rejects_media_when_provider_is_text_only(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    document, version, chunks, case = _draft_models()
+    image = KnowledgeImage(
+        source_ref="images/topology.png",
+        alt_text="测速拓扑",
+        mime_type="image/png",
+        data_url="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ",
+        content_hash="d" * 64,
+    )
+    chunks[0] = chunks[0].model_copy(update={"media": [image]})
+    store.save_draft(document, version, chunks, case_profile=case)
+
+    with pytest.raises(AppError) as raised:
+        await EmbeddingIndexer(store, FakeEmbeddingProvider()).index_version(
+            version.version_id
+        )
+    assert raised.value.code == "EMBEDDING_MULTIMODAL_UNSUPPORTED"
 
 
 @pytest.mark.asyncio

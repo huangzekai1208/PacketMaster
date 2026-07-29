@@ -6,6 +6,6 @@ MODEL_BASE_URL = "https://api.deepseek.com"
 MODEL_NAME = "deepseek-v4-flash"
 MODEL_STRUCTURED_OUTPUT_METHOD = "auto"
 
-# RAG 仅使用 DashScope text-embedding-v4；不要将真实 Key 写入 README 或提交到 Git。
+# RAG 默认使用 DashScope qwen3-vl-embedding；不要将真实 Key 写入 README 或提交到 Git。
 # 也可改用环境变量 EMBEDDING_API_KEY，环境变量优先级高于此处默认值。
 EMBEDDING_API_KEY = "replace-with-your-dashscope-api-key"

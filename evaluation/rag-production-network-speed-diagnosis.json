@@ -1,0 +1,2016 @@
+[
+  {
+    "case_id": "eval.speed.001",
+    "query": {
+      "query_id": "eval.speed.001",
+      "direction": "download",
+      "query_text": "现网宽带测速受哪些端到端环节影响？",
+      "keywords": [
+        "现网测速",
+        "链路"
+      ],
+      "candidate_causes": [
+        "多网元影响"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-2"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-2": 3
+    },
+    "expected_causes": [
+      "多网元影响"
+    ],
+    "rag_causes": [
+      "多网元影响"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-2"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-2"
+    ],
+    "forbidden_conclusions": [
+      "仅凭测速低就确认ONT故障"
+    ]
+  },
+  {
+    "case_id": "eval.speed.002",
+    "query": {
+      "query_id": "eval.speed.002",
+      "direction": "download",
+      "query_text": "为什么不能只根据ONT测速低就判定ONT有问题？",
+      "keywords": [
+        "ONT",
+        "定位"
+      ],
+      "candidate_causes": [
+        "端到端链路影响"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-2"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-2": 3
+    },
+    "expected_causes": [
+      "端到端链路影响"
+    ],
+    "rag_causes": [
+      "端到端链路影响"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-2"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-2"
+    ],
+    "forbidden_conclusions": [
+      "ONT必然是根因"
+    ]
+  },
+  {
+    "case_id": "eval.speed.003",
+    "query": {
+      "query_id": "eval.speed.003",
+      "direction": "download",
+      "query_text": "现网测速问题的第一条定位原则是什么？",
+      "keywords": [
+        "测速",
+        "网元"
+      ],
+      "candidate_causes": [
+        "全链路排查"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-2",
+      "runbook.network-speed-diagnosis:v2:chunk-3"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-2": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-3": 2
+    },
+    "expected_causes": [
+      "全链路排查"
+    ],
+    "rag_causes": [
+      "全链路排查"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-2"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-2",
+      "runbook.network-speed-diagnosis:v2:chunk-3"
+    ],
+    "forbidden_conclusions": [
+      "忽略服务器和网络侧"
+    ]
+  },
+  {
+    "case_id": "eval.speed.004",
+    "query": {
+      "query_id": "eval.speed.004",
+      "direction": "download",
+      "query_text": "开始定位前应收集哪些ONT资料？",
+      "keywords": [
+        "一键式",
+        "配置文件"
+      ],
+      "candidate_causes": [
+        "基础信息缺失"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-3"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-3": 3
+    },
+    "expected_causes": [
+      "基础信息缺失"
+    ],
+    "rag_causes": [
+      "基础信息缺失"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-3"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-3"
+    ],
+    "forbidden_conclusions": [
+      "无需收集配置文件"
+    ]
+  },
+  {
+    "case_id": "eval.speed.005",
+    "query": {
+      "query_id": "eval.speed.005",
+      "direction": "download",
+      "query_text": "如何区分TR143、LAN、WiFi和第三方插件测速？",
+      "keywords": [
+        "TR143",
+        "LAN",
+        "WiFi"
+      ],
+      "candidate_causes": [
+        "测速类型未确认"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-3"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-3": 3
+    },
+    "expected_causes": [
+      "测速类型未确认"
+    ],
+    "rag_causes": [
+      "测速类型未确认"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-3"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-3"
+    ],
+    "forbidden_conclusions": [
+      "所有测速都由ONT作客户端"
+    ]
+  },
+  {
+    "case_id": "eval.speed.006",
+    "query": {
+      "query_id": "eval.speed.006",
+      "direction": "download",
+      "query_text": "现网测速前需要向客户确认哪些结果和带宽信息？",
+      "keywords": [
+        "客户期望",
+        "带宽"
+      ],
+      "candidate_causes": [
+        "目标不明确"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-3"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-3": 3
+    },
+    "expected_causes": [
+      "目标不明确"
+    ],
+    "rag_causes": [
+      "目标不明确"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-3"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-3"
+    ],
+    "forbidden_conclusions": [
+      "无需了解客户开通带宽"
+    ]
+  },
+  {
+    "case_id": "eval.speed.007",
+    "query": {
+      "query_id": "eval.speed.007",
+      "direction": "download",
+      "query_text": "TR143测速不达标时首先检查哪些ONT状态？",
+      "keywords": [
+        "TR143",
+        "CPU",
+        "内存"
+      ],
+      "candidate_causes": [
+        "资源占用或版本限制"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-4",
+      "runbook.network-speed-diagnosis:v2:chunk-37"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-4": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-37": 2
+    },
+    "expected_causes": [
+      "资源占用或版本限制"
+    ],
+    "rag_causes": [
+      "资源占用或版本限制"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-4"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-4",
+      "runbook.network-speed-diagnosis:v2:chunk-37"
+    ],
+    "forbidden_conclusions": [
+      "忽略版本和CPU状态"
+    ]
+  },
+  {
+    "case_id": "eval.speed.008",
+    "query": {
+      "query_id": "eval.speed.008",
+      "direction": "download",
+      "query_text": "TR143下行测速对上行带宽有什么要求？",
+      "keywords": [
+        "TR143",
+        "上行带宽",
+        "ACK"
+      ],
+      "candidate_causes": [
+        "上行ACK带宽不足"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-4"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-4": 3
+    },
+    "expected_causes": [
+      "上行ACK带宽不足"
+    ],
+    "rag_causes": [
+      "上行ACK带宽不足"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-4"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-4"
+    ],
+    "forbidden_conclusions": [
+      "下行测速与上行无关"
+    ]
+  },
+  {
+    "case_id": "eval.speed.009",
+    "query": {
+      "query_id": "eval.speed.009",
+      "direction": "download",
+      "query_text": "TR143测速时为什么要检查TCONT和FEC？",
+      "keywords": [
+        "TCONT",
+        "FEC"
+      ],
+      "candidate_causes": [
+        "队列拥塞或FEC影响"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-4"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-4": 3
+    },
+    "expected_causes": [
+      "队列拥塞或FEC影响"
+    ],
+    "rag_causes": [
+      "队列拥塞或FEC影响"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-4"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-4"
+    ],
+    "forbidden_conclusions": [
+      "TCONT统计可单独证明DBA充足"
+    ]
+  },
+  {
+    "case_id": "eval.speed.010",
+    "query": {
+      "query_id": "eval.speed.010",
+      "direction": "download",
+      "query_text": "RMS测速抓包应优先在哪里抓取？",
+      "keywords": [
+        "RMS",
+        "PON口",
+        "抓包"
+      ],
+      "candidate_causes": [
+        "抓包点选择"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-5"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-5": 3
+    },
+    "expected_causes": [
+      "抓包点选择"
+    ],
+    "rag_causes": [
+      "抓包点选择"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-5"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-5"
+    ],
+    "forbidden_conclusions": [
+      "必须在用户LAN侧抓RMS报文"
+    ]
+  },
+  {
+    "case_id": "eval.speed.011",
+    "query": {
+      "query_id": "eval.speed.011",
+      "direction": "download",
+      "query_text": "TR143不达标抓包为什么要多次并记录测速结果？",
+      "keywords": [
+        "TR143",
+        "多次抓包"
+      ],
+      "candidate_causes": [
+        "样本代表性不足"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-5",
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-5": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-10": 2
+    },
+    "expected_causes": [
+      "样本代表性不足"
+    ],
+    "rag_causes": [
+      "样本代表性不足"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-5"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-5",
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "forbidden_conclusions": [
+      "单次抓包一定有代表性"
+    ]
+  },
+  {
+    "case_id": "eval.speed.012",
+    "query": {
+      "query_id": "eval.speed.012",
+      "direction": "download",
+      "query_text": "友商测速更好时应抓取什么报文进行比较？",
+      "keywords": [
+        "友商",
+        "对比抓包"
+      ],
+      "candidate_causes": [
+        "缺少同环境对比"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-5",
+      "runbook.network-speed-diagnosis:v2:chunk-6"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-5": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-6": 2
+    },
+    "expected_causes": [
+      "缺少同环境对比"
+    ],
+    "rag_causes": [
+      "缺少同环境对比"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-5"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-5",
+      "runbook.network-speed-diagnosis:v2:chunk-6"
+    ],
+    "forbidden_conclusions": [
+      "不需抓取友商测速流量"
+    ]
+  },
+  {
+    "case_id": "eval.speed.013",
+    "query": {
+      "query_id": "eval.speed.013",
+      "direction": "download",
+      "query_text": "友商结果优于我司时应对比哪些测速算法参数？",
+      "keywords": [
+        "友商",
+        "线程数",
+        "采样"
+      ],
+      "candidate_causes": [
+        "测速算法差异"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-6",
+      "runbook.network-speed-diagnosis:v2:chunk-35"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-6": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-35": 3
+    },
+    "expected_causes": [
+      "测速算法差异"
+    ],
+    "rag_causes": [
+      "测速算法差异"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-6"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-6",
+      "runbook.network-speed-diagnosis:v2:chunk-35"
+    ],
+    "forbidden_conclusions": [
+      "仅比较最终速率即可"
+    ]
+  },
+  {
+    "case_id": "eval.speed.014",
+    "query": {
+      "query_id": "eval.speed.014",
+      "direction": "download",
+      "query_text": "比较友商ONT测速时为什么需要TraceRoute？",
+      "keywords": [
+        "TraceRoute",
+        "友商"
+      ],
+      "candidate_causes": [
+        "测速路径不同"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-6"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-6": 3
+    },
+    "expected_causes": [
+      "测速路径不同"
+    ],
+    "rag_causes": [
+      "测速路径不同"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-6"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-6"
+    ],
+    "forbidden_conclusions": [
+      "同一客户环境必然同一路径"
+    ]
+  },
+  {
+    "case_id": "eval.speed.015",
+    "query": {
+      "query_id": "eval.speed.015",
+      "direction": "download",
+      "query_text": "友商测速好时LAN侧下载测试的目的是什么？",
+      "keywords": [
+        "LAN",
+        "下载",
+        "友商"
+      ],
+      "candidate_causes": [
+        "终端或路径差异"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-6",
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-6": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-10": 2
+    },
+    "expected_causes": [
+      "终端或路径差异"
+    ],
+    "rag_causes": [
+      "终端或路径差异"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-6"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-6",
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "forbidden_conclusions": [
+      "LAN下载和TR143必然完全等价"
+    ]
+  },
+  {
+    "case_id": "eval.speed.016",
+    "query": {
+      "query_id": "eval.speed.016",
+      "direction": "download",
+      "query_text": "TR143定位完成后怎样区分ONT自身问题和其他设备问题？",
+      "keywords": [
+        "TR143",
+        "PON口",
+        "根因"
+      ],
+      "candidate_causes": [
+        "需结合自检和报文"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-7",
+      "runbook.network-speed-diagnosis:v2:chunk-37"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-7": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-37": 2
+    },
+    "expected_causes": [
+      "需结合自检和报文"
+    ],
+    "rag_causes": [
+      "需结合自检和报文"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-7"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-7",
+      "runbook.network-speed-diagnosis:v2:chunk-37"
+    ],
+    "forbidden_conclusions": [
+      "PON口报文可脱离ONT状态单独定责"
+    ]
+  },
+  {
+    "case_id": "eval.speed.017",
+    "query": {
+      "query_id": "eval.speed.017",
+      "direction": "download",
+      "query_text": "LAN侧测速与RMS测速在ONT角色上有什么不同？",
+      "keywords": [
+        "LAN",
+        "RMS",
+        "转发"
+      ],
+      "candidate_causes": [
+        "ONT仅转发"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-8"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-8": 3
+    },
+    "expected_causes": [
+      "ONT仅转发"
+    ],
+    "rag_causes": [
+      "ONT仅转发"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-8"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-8"
+    ],
+    "forbidden_conclusions": [
+      "LAN测速时ONT一定是客户端"
+    ]
+  },
+  {
+    "case_id": "eval.speed.018",
+    "query": {
+      "query_id": "eval.speed.018",
+      "direction": "download",
+      "query_text": "LAN测速不达标除ONT外还应检查什么？",
+      "keywords": [
+        "LAN",
+        "PC",
+        "VPN"
+      ],
+      "candidate_causes": [
+        "PC性能或软件干扰"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-9"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-9": 3
+    },
+    "expected_causes": [
+      "PC性能或软件干扰"
+    ],
+    "rag_causes": [
+      "PC性能或软件干扰"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-9"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-9"
+    ],
+    "forbidden_conclusions": [
+      "LAN测速低只能是ONT转发能力不足"
+    ]
+  },
+  {
+    "case_id": "eval.speed.019",
+    "query": {
+      "query_id": "eval.speed.019",
+      "direction": "download",
+      "query_text": "LAN测速应在哪些位置抓包？",
+      "keywords": [
+        "LAN",
+        "PON口",
+        "PC"
+      ],
+      "candidate_causes": [
+        "三点抓包"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-10": 3
+    },
+    "expected_causes": [
+      "三点抓包"
+    ],
+    "rag_causes": [
+      "三点抓包"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "forbidden_conclusions": [
+      "只抓一个点就足以定位所有LAN问题"
+    ]
+  },
+  {
+    "case_id": "eval.speed.020",
+    "query": {
+      "query_id": "eval.speed.020",
+      "direction": "download",
+      "query_text": "LAN测速超过500M时PON与LAN口应怎样镜像抓包？",
+      "keywords": [
+        "500M",
+        "镜像",
+        "LAN"
+      ],
+      "candidate_causes": [
+        "抓包带宽限制"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-10": 3
+    },
+    "expected_causes": [
+      "抓包带宽限制"
+    ],
+    "rag_causes": [
+      "抓包带宽限制"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "forbidden_conclusions": [
+      "任何带宽都可共用一个镜像口"
+    ]
+  },
+  {
+    "case_id": "eval.speed.021",
+    "query": {
+      "query_id": "eval.speed.021",
+      "direction": "download",
+      "query_text": "三个抓包点如何帮助定位LAN测速问题边界？",
+      "keywords": [
+        "PON",
+        "LAN",
+        "PC"
+      ],
+      "candidate_causes": [
+        "链路区段定位"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-12",
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-12": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-10": 3
+    },
+    "expected_causes": [
+      "链路区段定位"
+    ],
+    "rag_causes": [
+      "链路区段定位"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-12"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-12",
+      "runbook.network-speed-diagnosis:v2:chunk-10"
+    ],
+    "forbidden_conclusions": [
+      "无需比较PON到LAN和LAN到PC区段"
+    ]
+  },
+  {
+    "case_id": "eval.speed.022",
+    "query": {
+      "query_id": "eval.speed.022",
+      "direction": "download",
+      "query_text": "仅WiFi测速不达标时第一步应做什么？",
+      "keywords": [
+        "WiFi",
+        "LAN"
+      ],
+      "candidate_causes": [
+        "先验证LAN侧"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-13"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-13": 3
+    },
+    "expected_causes": [
+      "先验证LAN侧"
+    ],
+    "rag_causes": [
+      "先验证LAN侧"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-13"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-13"
+    ],
+    "forbidden_conclusions": [
+      "直接认定无线模块故障"
+    ]
+  },
+  {
+    "case_id": "eval.speed.023",
+    "query": {
+      "query_id": "eval.speed.023",
+      "direction": "download",
+      "query_text": "WiFi测速不达标可能受哪些非ONT因素影响？",
+      "keywords": [
+        "WiFi",
+        "终端",
+        "干扰"
+      ],
+      "candidate_causes": [
+        "无线环境或终端能力"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-13",
+      "runbook.network-speed-diagnosis:v2:chunk-17"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-13": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-17": 3
+    },
+    "expected_causes": [
+      "无线环境或终端能力"
+    ],
+    "rag_causes": [
+      "无线环境或终端能力"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-13"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-13",
+      "runbook.network-speed-diagnosis:v2:chunk-17"
+    ],
+    "forbidden_conclusions": [
+      "WiFi低速必然是WiFi芯片缺陷"
+    ]
+  },
+  {
+    "case_id": "eval.speed.024",
+    "query": {
+      "query_id": "eval.speed.024",
+      "direction": "download",
+      "query_text": "WiFi测速的友商报文重点比较什么？",
+      "keywords": [
+        "WiFi",
+        "丢包",
+        "时延"
+      ],
+      "candidate_causes": [
+        "无线丢包或时延差异"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-16"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-16": 3
+    },
+    "expected_causes": [
+      "无线丢包或时延差异"
+    ],
+    "rag_causes": [
+      "无线丢包或时延差异"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-16"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-16"
+    ],
+    "forbidden_conclusions": [
+      "WiFi报文应只比较吞吐数值"
+    ]
+  },
+  {
+    "case_id": "eval.speed.025",
+    "query": {
+      "query_id": "eval.speed.025",
+      "direction": "download",
+      "query_text": "LAN达标但WiFi不达标的常见根因方向是什么？",
+      "keywords": [
+        "WiFi",
+        "LAN达标"
+      ],
+      "candidate_causes": [
+        "无线环境终端或协议能力"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-17"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-17": 3
+    },
+    "expected_causes": [
+      "无线环境终端或协议能力"
+    ],
+    "rag_causes": [
+      "无线环境终端或协议能力"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-17"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-17"
+    ],
+    "forbidden_conclusions": [
+      "LAN达标即可排除所有网络环境因素"
+    ]
+  },
+  {
+    "case_id": "eval.speed.026",
+    "query": {
+      "query_id": "eval.speed.026",
+      "direction": "download",
+      "query_text": "第三方插件测速首先检查哪些基础状态？",
+      "keywords": [
+        "第三方插件",
+        "CPU",
+        "内存"
+      ],
+      "candidate_causes": [
+        "资源或上行带宽异常"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-18",
+      "runbook.network-speed-diagnosis:v2:chunk-40"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-18": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-40": 3
+    },
+    "expected_causes": [
+      "资源或上行带宽异常"
+    ],
+    "rag_causes": [
+      "资源或上行带宽异常"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-18"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-18",
+      "runbook.network-speed-diagnosis:v2:chunk-40"
+    ],
+    "forbidden_conclusions": [
+      "插件测速无需检查上行带宽"
+    ]
+  },
+  {
+    "case_id": "eval.speed.027",
+    "query": {
+      "query_id": "eval.speed.027",
+      "direction": "download",
+      "query_text": "第三方插件测速抓包应如何保证可对比性？",
+      "keywords": [
+        "第三方插件",
+        "抓包",
+        "友商"
+      ],
+      "candidate_causes": [
+        "需多次抓达标和不达标样本"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-19"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-19": 3
+    },
+    "expected_causes": [
+      "需多次抓达标和不达标样本"
+    ],
+    "rag_causes": [
+      "需多次抓达标和不达标样本"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-19"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-19"
+    ],
+    "forbidden_conclusions": [
+      "插件测速不需要友商对比报文"
+    ]
+  },
+  {
+    "case_id": "eval.speed.028",
+    "query": {
+      "query_id": "eval.speed.028",
+      "direction": "download",
+      "query_text": "第三方插件测速中RTT很大可能说明什么？",
+      "keywords": [
+        "插件",
+        "RTT",
+        "内核"
+      ],
+      "candidate_causes": [
+        "ONT送报文进内核慢"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-20",
+      "runbook.network-speed-diagnosis:v2:chunk-40"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-20": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-40": 2
+    },
+    "expected_causes": [
+      "ONT送报文进内核慢"
+    ],
+    "rag_causes": [
+      "ONT送报文进内核慢"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-20"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-20",
+      "runbook.network-speed-diagnosis:v2:chunk-40"
+    ],
+    "forbidden_conclusions": [
+      "RTT大已证明服务器性能不足"
+    ]
+  },
+  {
+    "case_id": "eval.speed.029",
+    "query": {
+      "query_id": "eval.speed.029",
+      "direction": "download",
+      "query_text": "插件测速ACK接收窗口过小会造成什么后果？",
+      "keywords": [
+        "ACK",
+        "接收窗口",
+        "插件"
+      ],
+      "candidate_causes": [
+        "服务器发包受窗口限制"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-20"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-20": 3
+    },
+    "expected_causes": [
+      "服务器发包受窗口限制"
+    ],
+    "rag_causes": [
+      "服务器发包受窗口限制"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-20"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-20"
+    ],
+    "forbidden_conclusions": [
+      "接收窗口不影响发送端速率"
+    ]
+  },
+  {
+    "case_id": "eval.speed.030",
+    "query": {
+      "query_id": "eval.speed.030",
+      "direction": "download",
+      "query_text": "TCP测速中ACK报文的基本作用是什么？",
+      "keywords": [
+        "TCP",
+        "ACK"
+      ],
+      "candidate_causes": [
+        "确认接收数据"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-23"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-23": 3
+    },
+    "expected_causes": [
+      "确认接收数据"
+    ],
+    "rag_causes": [
+      "确认接收数据"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-23"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-23"
+    ],
+    "forbidden_conclusions": [
+      "TCP发送端不依赖接收确认"
+    ]
+  },
+  {
+    "case_id": "eval.speed.031",
+    "query": {
+      "query_id": "eval.speed.031",
+      "direction": "download",
+      "query_text": "如何在Wireshark中确定测速线程数和服务器五元组？",
+      "keywords": [
+        "Conversations",
+        "会话图"
+      ],
+      "candidate_causes": [
+        "使用会话统计"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-24"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-24": 3
+    },
+    "expected_causes": [
+      "使用会话统计"
+    ],
+    "rag_causes": [
+      "使用会话统计"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-24"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-24"
+    ],
+    "forbidden_conclusions": [
+      "只能靠人工逐包数线程"
+    ]
+  },
+  {
+    "case_id": "eval.speed.032",
+    "query": {
+      "query_id": "eval.speed.032",
+      "direction": "download",
+      "query_text": "怎样查看测速过程中的速率变化曲线？",
+      "keywords": [
+        "I/O Graph",
+        "速率图"
+      ],
+      "candidate_causes": [
+        "使用流量图"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-25"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-25": 3
+    },
+    "expected_causes": [
+      "使用流量图"
+    ],
+    "rag_causes": [
+      "使用流量图"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-25"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-25"
+    ],
+    "forbidden_conclusions": [
+      "会话图可替代所有速率时序分析"
+    ]
+  },
+  {
+    "case_id": "eval.speed.033",
+    "query": {
+      "query_id": "eval.speed.033",
+      "direction": "download",
+      "query_text": "Wireshark中用什么功能快速查看异常报文统计？",
+      "keywords": [
+        "Expert Information",
+        "异常"
+      ],
+      "candidate_causes": [
+        "使用专家信息"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-26"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-26": 3
+    },
+    "expected_causes": [
+      "使用专家信息"
+    ],
+    "rag_causes": [
+      "使用专家信息"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-26"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-26"
+    ],
+    "forbidden_conclusions": [
+      "专家信息就是TCP协议的最终事实"
+    ]
+  },
+  {
+    "case_id": "eval.speed.034",
+    "query": {
+      "query_id": "eval.speed.034",
+      "direction": "download",
+      "query_text": "抓包中缺少一段序列号报文有哪些可能？",
+      "keywords": [
+        "序列号",
+        "抓漏包",
+        "丢包"
+      ],
+      "candidate_causes": [
+        "抓漏包或真实丢包或乱序"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-27"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-27": 3
+    },
+    "expected_causes": [
+      "抓漏包或真实丢包或乱序"
+    ],
+    "rag_causes": [
+      "抓漏包或真实丢包或乱序"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-27"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-27"
+    ],
+    "forbidden_conclusions": [
+      "缺序列号必然是真实丢包"
+    ]
+  },
+  {
+    "case_id": "eval.speed.035",
+    "query": {
+      "query_id": "eval.speed.035",
+      "direction": "download",
+      "query_text": "重复ACK和SACK如何帮助判断数据报文丢失？",
+      "keywords": [
+        "重复ACK",
+        "SACK",
+        "丢包"
+      ],
+      "candidate_causes": [
+        "接收端请求重传"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-27"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-27": 3
+    },
+    "expected_causes": [
+      "接收端请求重传"
+    ],
+    "rag_causes": [
+      "接收端请求重传"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-27"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-27"
+    ],
+    "forbidden_conclusions": [
+      "任何重复ACK都能精确定位丢包设备"
+    ]
+  },
+  {
+    "case_id": "eval.speed.036",
+    "query": {
+      "query_id": "eval.speed.036",
+      "direction": "download",
+      "query_text": "数据包丢失对测速影响应如何评估？",
+      "keywords": [
+        "丢包率",
+        "对比分析"
+      ],
+      "candidate_causes": [
+        "需定量并比较达标样本"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-27"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-27": 3
+    },
+    "expected_causes": [
+      "需定量并比较达标样本"
+    ],
+    "rag_causes": [
+      "需定量并比较达标样本"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-27"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-27"
+    ],
+    "forbidden_conclusions": [
+      "发现一个丢包即可量化全部性能损失"
+    ]
+  },
+  {
+    "case_id": "eval.speed.037",
+    "query": {
+      "query_id": "eval.speed.037",
+      "direction": "download",
+      "query_text": "ACK丢包为什么会导致发送端停发和超时重传？",
+      "keywords": [
+        "ACK丢包",
+        "超时重传"
+      ],
+      "candidate_causes": [
+        "发送端无法确认接收"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-28"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-28": 3
+    },
+    "expected_causes": [
+      "发送端无法确认接收"
+    ],
+    "rag_causes": [
+      "发送端无法确认接收"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-28"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-28"
+    ],
+    "forbidden_conclusions": [
+      "ACK丢失不影响发送窗口"
+    ]
+  },
+  {
+    "case_id": "eval.speed.038",
+    "query": {
+      "query_id": "eval.speed.038",
+      "direction": "download",
+      "query_text": "快速重传与超时重传的区别是什么？",
+      "keywords": [
+        "快速重传",
+        "超时重传"
+      ],
+      "candidate_causes": [
+        "触发条件不同"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-28"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-28": 3
+    },
+    "expected_causes": [
+      "触发条件不同"
+    ],
+    "rag_causes": [
+      "触发条件不同"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-28"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-28"
+    ],
+    "forbidden_conclusions": [
+      "两类重传具有相同触发条件"
+    ]
+  },
+  {
+    "case_id": "eval.speed.039",
+    "query": {
+      "query_id": "eval.speed.039",
+      "direction": "download",
+      "query_text": "怎样从报文区分乱序和真正丢包？",
+      "keywords": [
+        "乱序",
+        "重传"
+      ],
+      "candidate_causes": [
+        "后续到达且未触发快速重传"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-29"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-29": 3
+    },
+    "expected_causes": [
+      "后续到达且未触发快速重传"
+    ],
+    "rag_causes": [
+      "后续到达且未触发快速重传"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-29"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-29"
+    ],
+    "forbidden_conclusions": [
+      "所有迟到报文都等同于丢包"
+    ]
+  },
+  {
+    "case_id": "eval.speed.040",
+    "query": {
+      "query_id": "eval.speed.040",
+      "direction": "download",
+      "query_text": "乱序率达到什么程度通常会影响测速？",
+      "keywords": [
+        "乱序率",
+        "0.1%"
+      ],
+      "candidate_causes": [
+        "乱序率过高"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-29"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-29": 3
+    },
+    "expected_causes": [
+      "乱序率过高"
+    ],
+    "rag_causes": [
+      "乱序率过高"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-29"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-29"
+    ],
+    "forbidden_conclusions": [
+      "任意乱序率都必然无影响"
+    ]
+  },
+  {
+    "case_id": "eval.speed.041",
+    "query": {
+      "query_id": "eval.speed.041",
+      "direction": "download",
+      "query_text": "测速报文中的RTT应怎样理解和分析？",
+      "keywords": [
+        "RTT",
+        "时延分布"
+      ],
+      "candidate_causes": [
+        "应分析整体时延分布"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-30"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-30": 3
+    },
+    "expected_causes": [
+      "应分析整体时延分布"
+    ],
+    "rag_causes": [
+      "应分析整体时延分布"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-30"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-30"
+    ],
+    "forbidden_conclusions": [
+      "单个RTT值可直接定义异常"
+    ]
+  },
+  {
+    "case_id": "eval.speed.042",
+    "query": {
+      "query_id": "eval.speed.042",
+      "direction": "download",
+      "query_text": "WiFi和LAN测速的PON口RTT通常如何对比？",
+      "keywords": [
+        "WiFi",
+        "LAN",
+        "RTT"
+      ],
+      "candidate_causes": [
+        "WiFi时延波动更大"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-30"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-30": 3
+    },
+    "expected_causes": [
+      "WiFi时延波动更大"
+    ],
+    "rag_causes": [
+      "WiFi时延波动更大"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-30"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-30"
+    ],
+    "forbidden_conclusions": [
+      "WiFi和LAN的RTT波动必然相同"
+    ]
+  },
+  {
+    "case_id": "eval.speed.043",
+    "query": {
+      "query_id": "eval.speed.043",
+      "direction": "download",
+      "query_text": "无丢包乱序且RTT小但速率低时还应检查什么？",
+      "keywords": [
+        "来包间隔",
+        "低速"
+      ],
+      "candidate_causes": [
+        "网络侧来包间隔过大"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-31",
+      "runbook.network-speed-diagnosis:v2:chunk-33"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-31": 3,
+      "runbook.network-speed-diagnosis:v2:chunk-33": 2
+    },
+    "expected_causes": [
+      "网络侧来包间隔过大"
+    ],
+    "rag_causes": [
+      "网络侧来包间隔过大"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-31"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-31",
+      "runbook.network-speed-diagnosis:v2:chunk-33"
+    ],
+    "forbidden_conclusions": [
+      "无丢包和小RTT即可排除网络侧问题"
+    ]
+  },
+  {
+    "case_id": "eval.speed.044",
+    "query": {
+      "query_id": "eval.speed.044",
+      "direction": "download",
+      "query_text": "如何检查TCP接收窗口是否限制测速？",
+      "keywords": [
+        "接收窗口",
+        "窗口尺寸"
+      ],
+      "candidate_causes": [
+        "接收窗口不足或频繁缩小"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-32"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-32": 3
+    },
+    "expected_causes": [
+      "接收窗口不足或频繁缩小"
+    ],
+    "rag_causes": [
+      "接收窗口不足或频繁缩小"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-32"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-32"
+    ],
+    "forbidden_conclusions": [
+      "不抓握手包也能得到实际窗口大小"
+    ]
+  },
+  {
+    "case_id": "eval.speed.045",
+    "query": {
+      "query_id": "eval.speed.045",
+      "direction": "download",
+      "query_text": "分析一份测速不达标报文时应系统检查哪些因素？",
+      "keywords": [
+        "测速",
+        "丢包",
+        "乱序",
+        "时延"
+      ],
+      "candidate_causes": [
+        "多因素联合影响"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-33"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-33": 3
+    },
+    "expected_causes": [
+      "多因素联合影响"
+    ],
+    "rag_causes": [
+      "多因素联合影响"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-33"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-33"
+    ],
+    "forbidden_conclusions": [
+      "测速低速只能由一个因素造成"
+    ]
+  },
+  {
+    "case_id": "eval.speed.046",
+    "query": {
+      "query_id": "eval.speed.046",
+      "direction": "download",
+      "query_text": "release版本在测速分析方面有哪些可优化的能力？",
+      "keywords": [
+        "release",
+        "SACK",
+        "PIE"
+      ],
+      "candidate_causes": [
+        "缺少SACK和PIE统计能力"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-34"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-34": 3
+    },
+    "expected_causes": [
+      "缺少SACK和PIE统计能力"
+    ],
+    "rag_causes": [
+      "缺少SACK和PIE统计能力"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-34"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-34"
+    ],
+    "forbidden_conclusions": [
+      "优化项已经自动解决所有现网低速"
+    ]
+  },
+  {
+    "case_id": "eval.speed.047",
+    "query": {
+      "query_id": "eval.speed.047",
+      "direction": "download",
+      "query_text": "摸底友商测速算法时应收集哪些关键参数？",
+      "keywords": [
+        "友商",
+        "线程数",
+        "ACK频率"
+      ],
+      "candidate_causes": [
+        "算法参数未知"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-35"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-35": 3
+    },
+    "expected_causes": [
+      "算法参数未知"
+    ],
+    "rag_causes": [
+      "算法参数未知"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-35"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-35"
+    ],
+    "forbidden_conclusions": [
+      "只需记录友商最终测速值"
+    ]
+  },
+  {
+    "case_id": "eval.speed.048",
+    "query": {
+      "query_id": "eval.speed.048",
+      "direction": "download",
+      "query_text": "采集友商ONT测速报文前应确认哪些抓包能力？",
+      "keywords": [
+        "友商ONT",
+        "PON镜像",
+        "握手"
+      ],
+      "candidate_causes": [
+        "抓包能力或覆盖不完整"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-36"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-36": 3
+    },
+    "expected_causes": [
+      "抓包能力或覆盖不完整"
+    ],
+    "rag_causes": [
+      "抓包能力或覆盖不完整"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-36"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-36"
+    ],
+    "forbidden_conclusions": [
+      "没有PON镜像就无法进行任何替代抓包"
+    ]
+  },
+  {
+    "case_id": "eval.speed.049",
+    "query": {
+      "query_id": "eval.speed.049",
+      "direction": "download",
+      "query_text": "TR143客户投诉友商更快时的标准定位步骤是什么？",
+      "keywords": [
+        "TR143",
+        "友商",
+        "案例"
+      ],
+      "candidate_causes": [
+        "需检查资源报文算法和路径"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-37"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-37": 3
+    },
+    "expected_causes": [
+      "需检查资源报文算法和路径"
+    ],
+    "rag_causes": [
+      "需检查资源报文算法和路径"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-37"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-37"
+    ],
+    "forbidden_conclusions": [
+      "友商更快即表示我司ONT缺陷"
+    ]
+  },
+  {
+    "case_id": "eval.speed.050",
+    "query": {
+      "query_id": "eval.speed.050",
+      "direction": "download",
+      "query_text": "第三方插件测速低速时应怎样定位和优化？",
+      "keywords": [
+        "第三方插件",
+        "内核加速",
+        "TCP窗口"
+      ],
+      "candidate_causes": [
+        "内核处理慢或TCP窗口参数不当"
+      ],
+      "knowledge_types": [
+        "runbook"
+      ]
+    },
+    "relevant_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-40"
+    ],
+    "relevance_grades": {
+      "runbook.network-speed-diagnosis:v2:chunk-40": 3
+    },
+    "expected_causes": [
+      "内核处理慢或TCP窗口参数不当"
+    ],
+    "rag_causes": [
+      "内核处理慢或TCP窗口参数不当"
+    ],
+    "answer_citation_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-40"
+    ],
+    "applicable_chunk_ids": [
+      "runbook.network-speed-diagnosis:v2:chunk-40"
+    ],
+    "forbidden_conclusions": [
+      "插件低速一定无需分析报文"
+    ]
+  }
+]

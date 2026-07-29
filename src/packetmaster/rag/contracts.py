@@ -124,6 +124,7 @@ class KnowledgeChunk(RagContract):
     heading_path: list[str] = Field(default_factory=list, max_length=16)
     source_location: str = Field(default="", max_length=512)
     content: str = Field(min_length=1, max_length=8_000)
+    media: list["KnowledgeImage"] = Field(default_factory=list, max_length=16)
     content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     status: KnowledgeStatus = KnowledgeStatus.DRAFT
 
@@ -139,6 +140,23 @@ class KnowledgeChunk(RagContract):
     def reject_local_source_path(cls, value: str) -> str:
         if value and is_absolute_path(value):
             raise ValueError("source_location must not contain a local absolute path")
+        return value
+
+
+class KnowledgeImage(RagContract):
+    """随 Markdown 切片持久化的本地图片，不暴露绝对路径。"""
+
+    source_ref: str = Field(min_length=1, max_length=512)
+    alt_text: str = Field(default="", max_length=1_000)
+    mime_type: str = Field(pattern=r"^image/(?:png|jpeg|webp)$")
+    data_url: str = Field(min_length=32, max_length=8_000_000)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("source_ref")
+    @classmethod
+    def reject_absolute_source_ref(cls, value: str) -> str:
+        if is_absolute_path(value) or value.startswith(("http://", "https://")):
+            raise ValueError("image source_ref must be a relative local reference")
         return value
 
 

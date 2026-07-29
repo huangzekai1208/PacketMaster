@@ -58,7 +58,7 @@ $env:MODEL_STRUCTURED_OUTPUT_METHOD = "auto"
 
 ### DashScope Embedding 配置
 
-RAG 仅使用阿里云百炼 DashScope 的 `text-embedding-v4`，不再提供本地 embedding 模型回退。将百炼 API Key 写入忽略的本地配置文件，或用环境变量覆盖：
+RAG 默认使用阿里云百炼 DashScope 的原生多模态模型 `qwen3-vl-embedding`（2560 维），不再提供本地 embedding 模型回退。Markdown 文件可导入同目录或子目录的相对 PNG、JPEG、WebP 图片（单图最多 5 MiB）；图片与所在章节首个切片的正文会做图文联合 Embedding。远程 URL、绝对路径、`data:` 图片及越出 Markdown 目录的引用会被忽略并提示警告。Web 的纯文本上传无法携带本机图片，请使用 CLI 文件导入。
 
 ```python
 # src/packetmaster/config_local.py
@@ -67,7 +67,8 @@ EMBEDDING_API_KEY = "sk-..."
 
 ```bash
 export EMBEDDING_API_KEY="sk-..."
-export EMBEDDING_MODEL="text-embedding-v4"
+export EMBEDDING_MODEL="qwen3-vl-embedding"
+export EMBEDDING_DIMENSION="2560"
 ```
 
 模型 API Key 和 Embedding API Key 都不会写入日志、Web API 响应或诊断报告。

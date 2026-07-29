@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { EChartsOption } from 'echarts'
 import { Activity, BarChart3, BookOpen, ChevronLeft, ChevronRight, FileSearch, FileUp, Menu, MessageSquare, Network, PanelRight, Plus, RefreshCw, Send, Square, X } from 'lucide-react'
 import { ChangeEvent, CSSProperties, FormEvent, lazy, PointerEvent as ReactPointerEvent, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { Analysis, api, ApiFailure, Capture, Evidence, formatBytes, isReportReady, isRunning, KnowledgeCitation, Metrics, Parameters, Session, SessionDetail, TaskStatus } from './api'
+import { Analysis, api, ApiFailure, Capture, ChatTurn, Evidence, formatBytes, isReportReady, isRunning, KnowledgeCitation, Metrics, Page, Parameters, Session, SessionDetail, TaskStatus } from './api'
 import { KnowledgeManagement } from './KnowledgeManagement'
 const Chart = lazy(() => import('./Chart'))
 
@@ -94,10 +94,26 @@ function ChatView({ sessionId, detail, analysis, pendingCapture, captureUploadin
   const [draft, setDraft] = useState(() => localStorage.getItem(`packetmaster.draft.${sessionId}`) ?? '')
   const bottom = useRef<HTMLDivElement>(null)
   const history = useQuery({ queryKey: ['chat-history', analysis?.analysis_id], queryFn: () => api.chatHistory(analysis!.analysis_id), enabled: Boolean(analysis && isReportReady(analysis.status)) })
-  const send = useMutation<unknown, Error, ChatSendInput, { previous?: SessionDetail }>({
+  const send = useMutation<ChatTurn | { parameters?: Parameters }, Error, ChatSendInput, { previous?: SessionDetail; previousHistory?: Page<ChatTurn> }>({
     mutationFn: ({ content, capture }) => analysis && isReportReady(analysis.status) ? api.chat(analysis.analysis_id, content) : api.send(sessionId, content, capture?.capture_id),
     onMutate: async ({ content, capture }) => {
-      if (analysis && isReportReady(analysis.status)) return {}
+      if (analysis && isReportReady(analysis.status)) {
+        const historyKey = ['chat-history', analysis.analysis_id]
+        await client.cancelQueries({ queryKey: historyKey })
+        const previousHistory = client.getQueryData<Page<ChatTurn>>(historyKey)
+        // 追问接口同样先展示问题；正式回答返回后会替换这条临时记录。
+        client.setQueryData<Page<ChatTurn>>(historyKey, current => {
+          const page = current ?? { items: [], total: 0, offset: 0, limit: 100 }
+          return {
+            ...page,
+            items: [...page.items, { turn_id: `pending-${Date.now()}`, analysis_id: analysis.analysis_id, question: content, answer: '', citations: [], limitations: [], suggestions: [], created_at: new Date().toISOString() }],
+            total: page.total + 1,
+          }
+        })
+        setDraft('')
+        localStorage.removeItem(`packetmaster.draft.${sessionId}`)
+        return { previousHistory }
+      }
       await client.cancelQueries({ queryKey: ['session', sessionId] })
       const previous = client.getQueryData<SessionDetail>(['session', sessionId])
       if (previous) {
@@ -117,9 +133,19 @@ function ChatView({ sessionId, detail, analysis, pendingCapture, captureUploadin
       return { previous }
     },
     onError: (_error, input, context) => {
+      if (analysis && isReportReady(analysis.status)) {
+        client.setQueryData(['chat-history', analysis.analysis_id], context?.previousHistory)
+      }
       if (context?.previous) client.setQueryData(['session', sessionId], context.previous)
       setDraft(input.draft)
       onRestoreCapture(input.capture)
+    },
+    onSuccess: (result) => {
+      if (!analysis || !isReportReady(analysis.status) || !('turn_id' in result)) return
+      client.setQueryData<Page<ChatTurn>>(['chat-history', analysis.analysis_id], current => current ? {
+        ...current,
+        items: current.items.map(turn => turn.turn_id.startsWith('pending-') ? result : turn),
+      } : current)
     },
     onSettled: () => { refresh(); history.refetch() },
   })
@@ -134,7 +160,7 @@ function ChatView({ sessionId, detail, analysis, pendingCapture, captureUploadin
     if ((!value && !pendingCapture) || send.isPending) return
     send.mutate({ content: value || '请使用已附加的报文进行测速诊断', draft: value, capture: pendingCapture })
   }
-  return <section className="chat-view"><div className="messages" aria-live="polite">{detail?.messages.items.map(message => <article key={message.message_id} className={`message message-${message.message_type}`}><p>{message.content}</p></article>)}{send.isPending && <ReplyPending />}{analysis && isRunning(analysis.status) && <Progress analysis={analysis} refresh={refresh} />}{history.data?.items.map(turn => <article className="qa" key={turn.turn_id}><div className="question">{turn.question}</div><div className="answer"><p>{turn.answer}</p><KnowledgeReferences value={turn.knowledge_citations ?? []} compact />{turn.limitations.length > 0 && <details><summary>回答限制</summary><ul>{turn.limitations.map(item => <li key={item}>{item}</li>)}</ul></details>}</div></article>)}{detail?.parameters?.ready_for_confirmation && !analysis && <div className="confirm-panel"><div><b>诊断参数已完整</b><span>确认后任务将在独立 Worker 中运行</span></div><ParameterGrid value={detail.parameters} /><button className="primary" onClick={() => confirm.mutate()} disabled={confirm.isPending}>{confirm.isPending ? '正在创建任务' : '开始分析'}</button></div>}{send.error && <ErrorNotice error={send.error} />}{captureError && <ErrorNotice error={captureError} />}<div ref={bottom} /></div><form onSubmit={submit}>{pendingCapture && <div className="capture-attachment"><FileSearch /><span><b>{pendingCapture.file_name}</b><small>{formatBytes(pendingCapture.size_bytes)}</small></span><button type="button" className="icon" onClick={onClearCapture} aria-label="移除报文附件"><X /></button></div>}<div className="composer"><button type="button" className="icon" onClick={onCapture} disabled={captureUploading} title="加载报文"><FileUp /></button><textarea value={draft} onChange={event => setDraft(event.target.value.slice(0, 2000))} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} placeholder={analysis && isReportReady(analysis.status) ? '围绕当前报告继续提问' : '描述诊断任务或直接提问'} aria-label="对话输入" /><span className="counter">{draft.length}/2000</span><button className="icon send" type="submit" disabled={(!draft.trim() && !pendingCapture) || send.isPending} title="发送"><Send /></button></div></form></section>
+  return <section className="chat-view"><div className="messages" aria-live="polite">{detail?.messages.items.map(message => <article key={message.message_id} className={`message message-${message.message_type}`}><p>{message.content}</p></article>)}{history.data?.items.map(turn => <article className="qa" key={turn.turn_id}><div className="question">{turn.question}</div>{turn.answer && <div className="answer"><p>{turn.answer}</p><KnowledgeReferences value={turn.knowledge_citations ?? []} compact />{turn.limitations.length > 0 && <details><summary>回答限制</summary><ul>{turn.limitations.map(item => <li key={item}>{item}</li>)}</ul></details>}</div>}</article>)}{send.isPending && <ReplyPending />}{analysis && isRunning(analysis.status) && <Progress analysis={analysis} refresh={refresh} />}{detail?.parameters?.ready_for_confirmation && !analysis && <div className="confirm-panel"><div><b>诊断参数已完整</b><span>确认后任务将在独立 Worker 中运行</span></div><ParameterGrid value={detail.parameters} /><button className="primary" onClick={() => confirm.mutate()} disabled={confirm.isPending}>{confirm.isPending ? '正在创建任务' : '开始分析'}</button></div>}{send.error && <ErrorNotice error={send.error} />}{captureError && <ErrorNotice error={captureError} />}<div ref={bottom} /></div><form onSubmit={submit}>{pendingCapture && <div className="capture-attachment"><FileSearch /><span><b>{pendingCapture.file_name}</b><small>{formatBytes(pendingCapture.size_bytes)}</small></span><button type="button" className="icon" onClick={onClearCapture} aria-label="移除报文附件"><X /></button></div>}<div className="composer"><button type="button" className="icon" onClick={onCapture} disabled={captureUploading} title="加载报文"><FileUp /></button><textarea value={draft} onChange={event => setDraft(event.target.value.slice(0, 2000))} onKeyDown={event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit() } }} placeholder={analysis && isReportReady(analysis.status) ? '围绕当前报告继续提问' : '描述诊断任务或直接提问'} aria-label="对话输入" /><span className="counter">{draft.length}/2000</span><button className="icon send" type="submit" disabled={(!draft.trim() && !pendingCapture) || send.isPending} title="发送"><Send /></button></div></form></section>
 }
 
 function ReplyPending() {

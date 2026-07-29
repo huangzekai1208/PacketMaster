@@ -1,0 +1,15 @@
+{
+  "case_count": 50,
+  "recall_at_5": 0.66,
+  "mrr": 0.5416666666666666,
+  "ndcg_at_5": 0.5721808868043302,
+  "citation_accuracy": 1.0,
+  "applicability_accuracy": 1.0,
+  "baseline_cause_coverage": 0.0,
+  "rag_cause_coverage": 1.0,
+  "cause_coverage_delta": 1.0,
+  "unsupported_conclusion_rate": 0.0,
+  "p95_latency_seconds": 0.4417500412091613,
+  "average_context_bytes": 1636.9,
+  "production_ready": false
+}

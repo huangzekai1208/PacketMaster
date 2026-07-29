@@ -15,6 +15,7 @@ from packetmaster.rag.contracts import (
     CaseProfile,
     KnowledgeChunk,
     KnowledgeDocument,
+    KnowledgeImage,
     KnowledgeQuery,
     KnowledgeStatus,
     KnowledgeType,
@@ -22,7 +23,7 @@ from packetmaster.rag.contracts import (
     RetrievalCandidate,
 )
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 MAX_APPROVED_CHUNKS = 25_000
 _MIGRATION_1 = """
 CREATE TABLE knowledge_documents (
@@ -124,6 +125,10 @@ CREATE VIRTUAL TABLE knowledge_chunks_fts USING fts5(
 );
 """
 
+_MIGRATION_2 = """
+ALTER TABLE knowledge_chunks ADD COLUMN media_json TEXT NOT NULL DEFAULT '[]';
+"""
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -180,6 +185,11 @@ class KnowledgeDatabase:
                     with connection:
                         connection.executescript(_MIGRATION_1)
                         connection.execute("PRAGMA user_version = 1")
+                    version = 1
+                if version < 2:
+                    with connection:
+                        connection.executescript(_MIGRATION_2)
+                        connection.execute("PRAGMA user_version = 2")
                 self._check_fts5(connection)
         except sqlite3.OperationalError as exc:
             if "fts5" in str(exc).lower() or "tokenizer" in str(exc).lower():
@@ -283,28 +293,54 @@ class SQLiteKnowledgeStore:
         now = _timestamp(_now())
         try:
             with self.database.transaction(immediate=True) as connection:
-                connection.execute(
-                    """
-                    INSERT INTO knowledge_documents (
-                        knowledge_id, title, knowledge_type, language, authority,
-                        status, summary, applicability_json, current_version_id,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        document.knowledge_id,
-                        document.title,
-                        document.knowledge_type.value,
-                        document.language,
-                        document.authority.value,
-                        document.status.value,
-                        document.summary,
-                        _json(document.applicability),
-                        document.current_version_id,
-                        now,
-                        now,
-                    ),
-                )
+                existing = connection.execute(
+                    "SELECT knowledge_id FROM knowledge_documents WHERE knowledge_id = ?",
+                    (document.knowledge_id,),
+                ).fetchone()
+                if existing is None:
+                    connection.execute(
+                        """
+                        INSERT INTO knowledge_documents (
+                            knowledge_id, title, knowledge_type, language, authority,
+                            status, summary, applicability_json, current_version_id,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            document.knowledge_id,
+                            document.title,
+                            document.knowledge_type.value,
+                            document.language,
+                            document.authority.value,
+                            document.status.value,
+                            document.summary,
+                            _json(document.applicability),
+                            document.current_version_id,
+                            now,
+                            now,
+                        ),
+                    )
+                else:
+                    # Importing a later version must preserve the active version
+                    # until the new draft has embeddings and is explicitly approved.
+                    connection.execute(
+                        """
+                        UPDATE knowledge_documents
+                        SET title = ?, knowledge_type = ?, language = ?, authority = ?,
+                            summary = ?, applicability_json = ?, updated_at = ?
+                        WHERE knowledge_id = ?
+                        """,
+                        (
+                            document.title,
+                            document.knowledge_type.value,
+                            document.language,
+                            document.authority.value,
+                            document.summary,
+                            _json(document.applicability),
+                            now,
+                            document.knowledge_id,
+                        ),
+                    )
                 connection.execute(
                     """
                     INSERT INTO knowledge_versions (
@@ -335,8 +371,8 @@ class SQLiteKnowledgeStore:
                     INSERT INTO knowledge_chunks (
                         chunk_id, knowledge_id, version_id, chunk_index,
                         heading_path_json, source_location, content, content_hash,
-                        status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        status, media_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         (
@@ -349,6 +385,7 @@ class SQLiteKnowledgeStore:
                             chunk.content,
                             chunk.content_hash,
                             chunk.status.value,
+                            _json([media.model_dump(mode="json") for media in chunk.media]),
                         )
                         for chunk in chunks
                     ],
@@ -937,6 +974,7 @@ class SQLiteKnowledgeStore:
             heading_path=json.loads(row["heading_path_json"]),
             source_location=row["source_location"],
             content=row["content"],
+            media=json.loads(row["media_json"]),
             content_hash=row["content_hash"],
             status=row["status"],
         )

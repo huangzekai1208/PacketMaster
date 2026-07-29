@@ -105,6 +105,8 @@ def import_command(
         )
         if preview.risk_flags:
             typer.echo("风险标记：" + "、".join(preview.risk_flags))
+        for warning in preview.warnings:
+            typer.echo("导入警告：" + warning)
         if preview.requires_risk_acknowledgement and not ack_risk:
             raise AppError(
                 code="KNOWLEDGE_RISK_ACK_REQUIRED",
