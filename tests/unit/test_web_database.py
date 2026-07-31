@@ -35,7 +35,7 @@ def test_database_initialization_is_versioned_idempotent_and_uses_wal(
             )
         }
 
-    assert version == 6
+    assert version == 7
     assert journal_mode == "wal"
     assert {
         "sessions",
@@ -46,6 +46,19 @@ def test_database_initialization_is_versioned_idempotent_and_uses_wal(
         "chat_turns",
         "session_intents",
     } <= tables
+
+
+def test_schema_migration_renames_legacy_default_sessions(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    session = SessionRepository(database).create(title="新诊断")
+    with database.transaction(immediate=True) as connection:
+        connection.execute("PRAGMA user_version = 6")
+
+    database.initialize()
+
+    restored = SessionRepository(database).get(session.session_id)
+    assert restored is not None
+    assert restored.title == "新会话"
 
 
 def test_pending_intent_survives_repository_recreation(tmp_path: Path) -> None:

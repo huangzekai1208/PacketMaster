@@ -88,7 +88,7 @@ class DiagnosisParameters(WebContract):
 
 class SessionSummary(WebContract):
     session_id: PublicId
-    title: str = Field(default="新诊断", min_length=1, max_length=120)
+    title: str = Field(default="新会话", min_length=1, max_length=120)
     status: TaskStatus = TaskStatus.DRAFT
     current_analysis_id: PublicId | None = None
     created_at: datetime
@@ -281,7 +281,7 @@ class KnowledgeEvaluationStatus(WebContract):
 
 
 class CreateSessionRequest(WebContract):
-    title: str = Field(default="新诊断", min_length=1, max_length=120)
+    title: str = Field(default="新会话", min_length=1, max_length=120)
 
 
 class RegisterCaptureRequest(WebContract):

@@ -50,6 +50,14 @@ _ABSOLUTE_PATH = re.compile(
     r"(?i)(?<!\w)(?:[a-z]:[\\/]|/users/|/home/|/private/|/tmp/|~[/\\])"
     r"[^\n，。；,;!?]*"
 )
+_TITLE_PREFIX = re.compile(
+    r"^(?:你好[，,。!！\s]*|请问[，,：:\s]*|请帮我|帮我|麻烦(?:帮我)?|"
+    r"我想(?:了解|知道|问一下)|请(?:分析|解释|看看|检查)|分析(?:一下)?)"
+)
+_LOW_INFORMATION = re.compile(
+    r"^(?:你好|您好|嗨|hi|hello|谢谢|好的|可以|确认|继续|重试|\d+(?:\.\d+)?[a-z]*)[。.!！]?$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -82,7 +90,7 @@ class WebConversationService:
         self.model = model
         self.rag_runtime = rag_runtime
 
-    def create_session(self, *, title: str = "新诊断") -> SessionSummary:
+    def create_session(self, *, title: str = "新会话") -> SessionSummary:
         return self.sessions.create(title=title)
 
     def list_sessions(
@@ -130,12 +138,17 @@ class WebConversationService:
         if capture_id is not None and session.current_analysis_id is None:
             route = ConversationRoute.DIAGNOSIS
         if route is ConversationRoute.GENERAL:
-            return await self._general(session_id, content)
-        if route is ConversationRoute.ANALYSIS_QUESTION:
-            return self._analysis_question(session_id, content)
-        return await self._diagnosis(
-            session_id, content=content, capture_id=capture_id, previous=previous
-        )
+            result = await self._general(session_id, content)
+        elif route is ConversationRoute.ANALYSIS_QUESTION:
+            result = self._analysis_question(session_id, content)
+        else:
+            result = await self._diagnosis(
+                session_id, content=content, capture_id=capture_id, previous=previous
+            )
+        title = _conversation_title(content, has_capture=capture_id is not None)
+        if title is not None:
+            self.sessions.set_title_if_default(session_id, title)
+        return result
 
     def confirm(self, session_id: str) -> AnalysisSummary:
         # 使用会话和待处理记录派生稳定 ID；重复点击确认会返回同一任务。
@@ -450,6 +463,26 @@ def _parameter_message(parameters: DiagnosisParameters) -> str:
         f"实际带宽 {parameters.actual_bandwidth_mbps:g} Mbps，分析{direction}方向。"
         "请确认后启动分析。"
     )
+
+
+def _conversation_title(value: str, *, has_capture: bool = False) -> str | None:
+    cleaned = re.sub(r"\s+", " ", _redact(value)).strip()
+    if _LOW_INFORMATION.fullmatch(cleaned):
+        return "报文测速诊断" if has_capture else None
+    for _ in range(3):
+        shortened = _TITLE_PREFIX.sub("", cleaned).strip(" ，,：:。.!！?？")
+        if shortened == cleaned:
+            break
+        cleaned = shortened
+    cleaned = cleaned.replace("<本地路径已隐藏>", "报文文件")
+    cleaned = cleaned.replace("<敏感信息已隐藏>", "")
+    cleaned = re.split(r"[\n。！？!?；;]", cleaned, maxsplit=1)[0]
+    cleaned = cleaned.strip(" ，,：:。.!！?？-_")
+    if not cleaned or _LOW_INFORMATION.fullmatch(cleaned):
+        return "报文测速诊断" if has_capture else None
+    if has_capture and len(cleaned) < 4:
+        return "报文测速诊断"
+    return cleaned if len(cleaned) <= 28 else cleaned[:27].rstrip() + "…"
 
 
 def _redact(value: str) -> str:

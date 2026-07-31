@@ -62,6 +62,29 @@ def test_general_question_does_not_enter_diagnosis(tmp_path: Path) -> None:
     assert result.assistant_message.content.startswith("TCP 是")
     assert AnalysisTaskRepository(database).count_for_session(session.session_id) == 0
     assert model.questions == ["TCP 是什么？"]
+    assert SessionRepository(database).get(session.session_id).title == "TCP 是什么"
+
+
+def test_session_waits_for_meaningful_content_before_generating_title(
+    tmp_path: Path,
+) -> None:
+    service, database = _service(tmp_path)
+    session = service.create_session()
+
+    assert session.title == "新会话"
+    asyncio.run(service.submit_message(session.session_id, content="你好"))
+    assert SessionRepository(database).get(session.session_id).title == "新会话"
+
+    asyncio.run(
+        service.submit_message(
+            session.session_id, content="请帮我分析 TCP 接收窗口为什么限制吞吐？"
+        )
+    )
+
+    assert (
+        SessionRepository(database).get(session.session_id).title
+        == "TCP 接收窗口为什么限制吞吐"
+    )
 
 
 def test_general_chat_redacts_secrets_and_absolute_paths_before_storage_and_model(

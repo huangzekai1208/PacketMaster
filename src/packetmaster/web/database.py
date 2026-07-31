@@ -22,7 +22,7 @@ from packetmaster.web.contracts import (
     WebMessage,
 )
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 _MIGRATIONS = {
     1: """
         CREATE TABLE sessions (
@@ -157,6 +157,9 @@ _MIGRATIONS = {
         ALTER TABLE messages ADD COLUMN rag_citations_json TEXT
             NOT NULL DEFAULT '[]';
     """,
+    7: """
+        UPDATE sessions SET title = '新会话' WHERE title = '新诊断';
+    """,
 }
 
 
@@ -231,7 +234,7 @@ class SessionRepository:
     def create(
         self,
         *,
-        title: str = "新诊断",
+        title: str = "新会话",
         session_id: str | None = None,
         now: datetime | None = None,
     ) -> SessionSummary:
@@ -294,6 +297,17 @@ class SessionRepository:
                 recoverable=True,
                 suggested_action="请保留该会话，已完成任务的清理将在后续版本提供。",
             ) from exc
+        return cursor.rowcount > 0
+
+    def set_title_if_default(self, session_id: str, title: str) -> bool:
+        with self.database.transaction(immediate=True) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE sessions SET title = ?
+                WHERE session_id = ? AND title IN ('新会话', '新诊断')
+                """,
+                (title, session_id),
+            )
         return cursor.rowcount > 0
 
     def set_status(
