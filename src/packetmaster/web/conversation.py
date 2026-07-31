@@ -62,6 +62,7 @@ class WebConversationService:
         captures: CaptureRegistry,
         tasks: AnalysisTaskRepository,
         model: Any,
+        rag_runtime: Any | None = None,
     ) -> None:
         self.sessions = sessions
         self.messages = messages
@@ -69,6 +70,7 @@ class WebConversationService:
         self.captures = captures
         self.tasks = tasks
         self.model = model
+        self.rag_runtime = rag_runtime
 
     def create_session(self, *, title: str = "新诊断") -> SessionSummary:
         return self.sessions.create(title=title)
@@ -173,13 +175,32 @@ class WebConversationService:
             message_type=MessageType.USER,
             content=safe_content,
         )
-        answer = await self.model.general_chat(safe_content, "", history)
+        knowledge = await self._general_knowledge(safe_content)
+        if knowledge is None:
+            answer = await self.model.general_chat(safe_content, "", history)
+        else:
+            answer = await self.model.general_chat(
+                safe_content, "", history, knowledge=knowledge
+            )
         assistant = self.messages.append(
             session_id=session_id,
             message_type=MessageType.ASSISTANT,
             content=_redact(answer.answer),
         )
         return ConversationResult(route="general", assistant_message=assistant)
+
+    async def _general_knowledge(self, question: str):
+        if self.rag_runtime is None:
+            return None
+        try:
+            query = self.rag_runtime.query_builder.build_general_chat(question)
+            if query is None:
+                return None
+            bundle = await self.rag_runtime.retriever.retrieve(query)
+            return bundle if self.rag_runtime.mode.value == "active" else None
+        except Exception:
+            # General conversation remains available when knowledge retrieval degrades.
+            return None
 
     def _analysis_question(
         self, session_id: str, content: str

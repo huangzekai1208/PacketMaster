@@ -46,6 +46,7 @@ export const api = {
   health: () => request<{ status: string; model_configured: boolean; tshark_configured: boolean }>('/api/health'),
   sessions: () => request<Page<Session>>('/api/sessions?limit=50'),
   createSession: () => request<Session>('/api/sessions', { method: 'POST', body: '{}' }),
+  deleteSession: (id: string) => request<{ deleted: boolean }>(`/api/sessions/${id}`, { method: 'DELETE' }),
   session: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),
   send: (id: string, content: string, capture_id?: string) => request<{ parameters?: Parameters }>(`/api/sessions/${id}/messages`, { method: 'POST', body: JSON.stringify({ content, capture_id }) }),
   register: (path: string) => request<Capture>('/api/captures/register', { method: 'POST', body: JSON.stringify({ path }) }),

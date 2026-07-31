@@ -134,3 +134,21 @@ def test_chat_query_builder_uses_bounded_question_and_hides_sensitive_data() -> 
     serialized = query.model_dump_json()
     assert "SECRET" not in serialized
     assert "private.pcapng" not in serialized
+
+
+def test_general_chat_query_builder_is_deterministic_and_redacts_sensitive_data() -> None:
+    builder = KnowledgeQueryBuilder()
+
+    first = builder.build_general_chat(
+        "token=SECRET，TCP 零窗口如何处理？参考 /Users/operator/private.pcapng"
+    )
+    second = builder.build_general_chat(
+        "token=SECRET，TCP 零窗口如何处理？参考 /Users/operator/private.pcapng"
+    )
+
+    assert first is not None and second is not None
+    assert first.analysis_id is None
+    assert first.query_id == second.query_id
+    serialized = first.model_dump_json()
+    assert "SECRET" not in serialized
+    assert "private.pcapng" not in serialized

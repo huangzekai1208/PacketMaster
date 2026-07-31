@@ -297,6 +297,7 @@ class DiagnosisModel:
         user_text: str,
         conversation_summary: str = "",
         turns: list[Any] | None = None,
+        knowledge: KnowledgeBundle | None = None,
     ) -> GeneralChatAnswer:
         """Answer ordinary conversation without requiring an active analysis."""
         payload = {
@@ -306,6 +307,7 @@ class DiagnosisModel:
                 turn.model_dump(mode="json") if hasattr(turn, "model_dump") else turn
                 for turn in (turns or [])[-8:]
             ],
+            "retrieved_knowledge": knowledge.model_dump(mode="json") if knowledge else None,
         }
         result = await self._invoke(GeneralChatAnswer, "general_chat.md", payload)
         return GeneralChatAnswer.model_validate(result)

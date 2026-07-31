@@ -161,6 +161,20 @@ def test_chat_graph_caps_evidence_at_two_rounds() -> None:
     assert "轮次上限" in result["answer"].limitations[-1]
 
 
+def test_chat_graph_retrieves_for_concrete_report_questions() -> None:
+    runtime = _rag_runtime()
+    session = _session()
+    session.question = "第几帧发生重传？"
+
+    asyncio.run(
+        build_chat_graph(
+            mcp_client=FakeMCPClient(), diagnosis_model=_ChatModel(), rag_runtime=runtime
+        ).ainvoke({"session": session})
+    )
+
+    assert runtime.retriever.calls == 1
+
+
 def test_chat_graph_rejects_cross_analysis_evidence_request() -> None:
     class _CrossAnalysisModel(_ChatModel):
         async def answer_question(self, context):
@@ -202,7 +216,7 @@ def test_chat_graph_retrieves_knowledge_for_protocol_mechanism_question() -> Non
     assert result["answer"].knowledge_citations[0]["source_name"] == "RFC"
 
 
-def test_chat_graph_keeps_concrete_flow_question_on_packet_evidence_path() -> None:
+def test_chat_graph_retrieves_knowledge_alongside_concrete_packet_evidence() -> None:
     session = _session()
     session.question = "当前哪条流发生 Zero Window？"
     runtime = _rag_runtime()
@@ -214,7 +228,7 @@ def test_chat_graph_keeps_concrete_flow_question_on_packet_evidence_path() -> No
 
     result = asyncio.run(graph.ainvoke({"session": session}))
 
-    assert runtime.retriever.calls == 0
+    assert runtime.retriever.calls == 1
     assert result["answer"].answer.startswith("零窗口事件")
 
 

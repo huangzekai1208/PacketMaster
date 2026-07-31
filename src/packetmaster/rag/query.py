@@ -79,6 +79,23 @@ def _rtt_bin(value: float) -> str:
 
 
 class KnowledgeQueryBuilder:
+    def build_general_chat(self, question: str) -> KnowledgeQuery | None:
+        """Build a bounded query for a conversation without an analysis report."""
+        safe_question = _safe_question(question)
+        if not safe_question:
+            return None
+        identity = json.dumps(
+            {"scope": "general_chat", "question": safe_question},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return KnowledgeQuery(
+            query_id="ragq-"
+            + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16],
+            query_text=f"用户问题 {safe_question}",
+        )
+
     def build_chat(self, context: ChatModelContext) -> KnowledgeQuery | None:
         question = _safe_question(context.question)
         if not question:

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 from packetmaster.domain import GeneralChatAnswer, Target
+from packetmaster.rag.contracts import KnowledgeBundle, RagMode, RetrievalCandidate
+from packetmaster.rag.query import KnowledgeQueryBuilder
 from packetmaster.web.captures import CaptureRegistry, CaptureRepository
 from packetmaster.web.contracts import MissingParameter, TaskStatus
 from packetmaster.web.conversation import WebConversationService
@@ -19,13 +22,17 @@ from packetmaster.web.tasks import AnalysisTaskRepository
 class _Model:
     def __init__(self) -> None:
         self.questions: list[str] = []
+        self.knowledge: list[KnowledgeBundle | None] = []
 
-    async def general_chat(self, user_text, conversation_summary="", turns=None):
+    async def general_chat(
+        self, user_text, conversation_summary="", turns=None, knowledge=None
+    ):
         self.questions.append(user_text)
+        self.knowledge.append(knowledge)
         return GeneralChatAnswer(answer="TCP 是一种面向连接的传输层协议。")
 
 
-def _service(tmp_path: Path, model=None):
+def _service(tmp_path: Path, model=None, rag_runtime=None):
     database = WebDatabase(tmp_path / "web.sqlite")
     database.initialize()
     return WebConversationService(
@@ -37,6 +44,7 @@ def _service(tmp_path: Path, model=None):
         ),
         tasks=AnalysisTaskRepository(database),
         model=model or _Model(),
+        rag_runtime=rag_runtime,
     ), database
 
 
@@ -78,6 +86,47 @@ def test_general_chat_redacts_secrets_and_absolute_paths_before_storage_and_mode
     assert local_path not in persisted
     assert secret not in model.questions[0]
     assert local_path not in model.questions[0]
+
+
+def test_general_chat_retrieves_and_injects_active_knowledge(tmp_path: Path) -> None:
+    candidate = RetrievalCandidate(
+        knowledge_id="rfc.window",
+        version_id="rfc.window:v1",
+        chunk_id="rfc.window:v1:c1",
+        title="TCP 窗口机制",
+        knowledge_type="standard",
+        authority="high",
+        source_name="RFC",
+        content="接收窗口会限制在途未确认数据量。",
+    )
+
+    class Retriever:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def retrieve(self, query):
+            self.calls += 1
+            return KnowledgeBundle(
+                query_id=query.query_id,
+                results=[candidate],
+                total_content_bytes=len(candidate.content.encode("utf-8")),
+            )
+
+    retriever = Retriever()
+    runtime = SimpleNamespace(
+        mode=RagMode.ACTIVE,
+        query_builder=KnowledgeQueryBuilder(),
+        retriever=retriever,
+    )
+    model = _Model()
+    service, _ = _service(tmp_path, model, runtime)
+    session = service.create_session()
+
+    asyncio.run(service.submit_message(session.session_id, content="TCP 窗口如何影响吞吐？"))
+
+    assert retriever.calls == 1
+    assert model.knowledge[0] is not None
+    assert model.knowledge[0].results[0].chunk_id == candidate.chunk_id
 
 
 def test_complete_parameters_wait_for_confirmation_and_default_download(

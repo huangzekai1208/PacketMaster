@@ -107,6 +107,7 @@ def create_app(
         ),
         tasks=AnalysisTaskRepository(database),
         model=conversation_model or DiagnosisModel(settings=runtime),
+        rag_runtime=build_rag_runtime(runtime),
     )
     app.state.conversation = conversation
     tasks = AnalysisTaskRepository(database)
@@ -115,7 +116,7 @@ def create_app(
         reads=analysis_reads,
         turns=ChatTurnRepository(database),
         model=conversation.model,
-        rag_runtime=build_rag_runtime(runtime),
+        rag_runtime=conversation.rag_runtime,
     )
     app.state.analysis_reads = analysis_reads
     app.state.analysis_chat = analysis_chat

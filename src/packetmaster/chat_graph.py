@@ -105,43 +105,6 @@ def _safe_evidence_layers(evidence: list[EvidenceResponse]) -> list[dict[str, An
     ]
 
 
-def _question_needs_knowledge(question: str) -> bool:
-    text = question.casefold()
-    knowledge_markers = (
-        "为什么",
-        "原理",
-        "机制",
-        "如何",
-        "怎么",
-        "建议",
-        "处置",
-        "处理",
-        "优化",
-        "相似",
-        "案例",
-        "经验",
-        "规范",
-        "rfc",
-        "拥塞控制",
-        "window scaling",
-    )
-    concrete_markers = (
-        "哪一帧",
-        "哪些帧",
-        "帧号",
-        "哪条流",
-        "哪些流",
-        "时间点",
-        "当前哪个",
-        "当前多少",
-    )
-    if any(marker in text for marker in concrete_markers) and not any(
-        marker in text for marker in knowledge_markers
-    ):
-        return False
-    return any(marker in text for marker in knowledge_markers)
-
-
 def build_chat_graph(
     *, mcp_client: Any, diagnosis_model: Any, rag_runtime: Any | None = None
 ):
@@ -199,9 +162,7 @@ def build_chat_graph(
     async def retrieve_question_knowledge(
         state: ChatGraphState,
     ) -> dict[str, Any]:
-        if rag_runtime is None or not _question_needs_knowledge(
-            state["session"].question or ""
-        ):
+        if rag_runtime is None:
             return {
                 "trace": _trace(
                     state, "retrieve_question_knowledge", status="skipped"

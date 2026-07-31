@@ -11,6 +11,45 @@ const emptyImport: KnowledgeImportRequest = {
   file_name: '', content: '', knowledge_id: '', title: '', knowledge_type: 'runbook', authority: 'medium', source_name: '', source_location: '', language: 'zh-CN', summary: '', version: 1, ack_risk: false,
 }
 
+const fileStem = (name: string) => name.replace(/\.[^.]+$/, '').trim()
+
+const stableFileId = (value: string) => {
+  const slug = value.toLowerCase().replace(/[^a-z0-9._:-]+/g, '.').replace(/^\.+|\.+$/g, '')
+  if (slug) return `knowledge.${slug}`.slice(0, 128)
+  let hash = 0
+  for (const character of value) hash = ((hash * 31) + character.codePointAt(0)!) >>> 0
+  return `knowledge.import.${hash.toString(36)}`
+}
+
+const suggestedSummary = (content: string) => content.split(/\r?\n/)
+  .map(line => line.trim())
+  .find(line => line && !line.startsWith('#') && !line.startsWith('![') && !line.startsWith('```'))
+  ?.slice(0, 240) ?? ''
+
+const suggestedImport = (file: File, content: string): KnowledgeImportRequest => {
+  const stem = fileStem(file.name)
+  const markdownTitle = content.match(/^#\s+(.+?)\s*$/m)?.[1]?.trim()
+  let jsonTitle = ''
+  if (file.name.toLowerCase().endsWith('.json')) {
+    try {
+      const value = JSON.parse(content)
+      jsonTitle = typeof value?.title === 'string' ? value.title.trim() : ''
+    } catch { /* The server remains responsible for JSON validation. */ }
+  }
+  const type: KnowledgeType = /(?:案例|case)/i.test(`${stem}\n${content.slice(0, 1000)}`) ? 'case' : 'runbook'
+  return {
+    ...emptyImport,
+    file_name: file.name,
+    content,
+    knowledge_id: stableFileId(stem || file.name),
+    title: markdownTitle || jsonTitle || stem || file.name,
+    knowledge_type: type,
+    authority: type === 'case' ? 'medium_high' : 'medium',
+    source_name: file.name,
+    summary: suggestedSummary(content),
+  }
+}
+
 export function KnowledgeManagement() {
   // active 门禁只读展示，前端不具备修改或绕过评估结果的能力。
   const client = useQueryClient()
@@ -30,7 +69,7 @@ export function KnowledgeManagement() {
   const counts = useMemo(() => ({ approved: list.data?.items.filter(item => item.status === 'approved').length ?? 0, draft: list.data?.items.filter(item => item.status === 'draft').length ?? 0 }), [list.data])
   const update = <K extends keyof KnowledgeImportRequest>(key: K, value: KnowledgeImportRequest[K]) => setForm(current => ({ ...current, [key]: value }))
   // File API 只读取用户选择的文本；不发送或保存浏览器本地绝对路径。
-  const chooseFile = (event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => { update('file_name', file.name); update('content', String(reader.result ?? '')); if (!form.title) update('title', file.name.replace(/\.[^.]+$/, '')); if (!form.knowledge_id) update('knowledge_id', file.name.replace(/\.[^.]+$/, '').toLowerCase().replace(/[^a-z0-9._:-]+/g, '.').replace(/^\.+|\.+$/g, '')) }; reader.readAsText(file, 'utf-8') }
+  const chooseFile = (event: ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => { setForm(suggestedImport(file, String(reader.result ?? ''))); preview.reset() }; reader.readAsText(file, 'utf-8') }
   return <section className="knowledge-workspace">
     <div className="knowledge-head"><div><h1>知识库</h1><p>审核后发布的知识用于补充 TCP 诊断，不替代当前报文证据。</p></div><button className="command" onClick={() => setPreviewOpen(true)}><FilePlus2 />导入知识</button></div>
     <div className="knowledge-metrics"><Metric label="已发布" value={String(counts.approved)} /><Metric label="草稿" value={String(counts.draft)} /><Metric label="Active 门禁" value={evaluation.data?.active_gate_passed ? '已通过' : '未通过'} tone={evaluation.data?.active_gate_passed ? 'good' : 'warn'} /><Metric label="当前模式" value={evaluation.data ? `${evaluation.data.effective_mode}` : '读取中'} /></div>
@@ -50,7 +89,7 @@ function KnowledgeDetailPanel({ detail, approve, disable, reindex }: { detail: A
 function ImportDialog({ form, update, chooseFile, preview, submit, close }: { form: KnowledgeImportRequest; update: <K extends keyof KnowledgeImportRequest>(key: K, value: KnowledgeImportRequest[K]) => void; chooseFile: (event: ChangeEvent<HTMLInputElement>) => void; preview: UseMutationResult<KnowledgePreview, Error, void, unknown>; submit: UseMutationResult<KnowledgeMutation, Error, void, unknown>; close: () => void }) {
   const fileInput = useRef<HTMLInputElement>(null)
   const ready = Boolean(form.file_name && form.content && form.knowledge_id && form.title && form.source_name)
-  return <div className="modal-backdrop" role="presentation"><div className="modal knowledge-import" role="dialog" aria-modal="true" aria-label="导入知识"><div className="modal-head"><h2>导入知识草稿</h2><button className="icon" onClick={close} aria-label="关闭"><XCircle /></button></div><div className="knowledge-file-picker"><span>知识文件</span><input ref={fileInput} className="visually-hidden" type="file" accept=".md,.markdown,.txt,.json,text/plain,application/json" onChange={chooseFile} /><button type="button" className="secondary" onClick={() => fileInput.current?.click()}><FilePlus2 />选择本地文件</button><small>{form.file_name || '支持 .md、.markdown、.txt 和 .json 文件'}</small></div><div className="import-grid"><label>知识 ID<input value={form.knowledge_id} onChange={event => update('knowledge_id', event.target.value)} /></label><label>标题<input value={form.title} onChange={event => update('title', event.target.value)} /></label><label>类型<select value={form.knowledge_type} onChange={event => update('knowledge_type', event.target.value as KnowledgeType)}><option value="standard">标准</option><option value="vendor">厂商资料</option><option value="runbook">运行手册</option><option value="case">历史案例</option></select></label><label>权威性<select value={form.authority} onChange={event => update('authority', event.target.value as AuthorityLevel)}><option value="high">高</option><option value="medium_high">中高</option><option value="medium">中</option><option value="low">低</option></select></label><label>来源名称<input value={form.source_name} onChange={event => update('source_name', event.target.value)} /></label><label>来源章节<input value={form.source_location} onChange={event => update('source_location', event.target.value)} /></label></div><label>摘要<textarea value={form.summary} onChange={event => update('summary', event.target.value)} /></label><div className="modal-actions"><button className="secondary" disabled={!ready || preview.isPending} onClick={() => preview.mutate()}>{preview.isPending ? '正在预览' : '生成预览'}</button>{preview.data && <button className="primary" disabled={submit.isPending || (preview.data.requires_risk_acknowledgement && !form.ack_risk)} onClick={() => submit.mutate()}>{submit.isPending ? '正在保存' : '保存草稿'}</button>}</div>{preview.error && <Error value={preview.error} />}{preview.data && <div className="import-preview"><p><b>{preview.data.version_id}</b> · {preview.data.chunk_count} 个切片</p>{preview.data.requires_risk_acknowledgement && <label className="risk"><ShieldAlert />检测到风险内容<input type="checkbox" checked={form.ack_risk} onChange={event => update('ack_risk', event.target.checked)} />我已审核并确认导入</label>}{preview.data.chunks.map(chunk => <details key={chunk.chunk_id}><summary>{chunk.heading_path.join(' / ') || chunk.chunk_id}</summary><p>{chunk.content}</p></details>)}</div>}</div></div>
+  return <div className="modal-backdrop" role="presentation"><div className="modal knowledge-import" role="dialog" aria-modal="true" aria-label="导入知识"><div className="modal-head"><h2>导入知识草稿</h2><button className="icon" onClick={close} aria-label="关闭"><XCircle /></button></div><div className="knowledge-file-picker"><span>知识文件</span><input ref={fileInput} aria-label="知识文件" className="visually-hidden" type="file" accept=".md,.markdown,.txt,.json,text/plain,application/json" onChange={chooseFile} /><button type="button" className="secondary" onClick={() => fileInput.current?.click()}><FilePlus2 />选择本地文件</button><small>{form.file_name || '支持 .md、.markdown、.txt 和 .json 文件'}</small></div><div className="import-grid"><label>知识 ID<input value={form.knowledge_id} onChange={event => update('knowledge_id', event.target.value)} /></label><label>标题<input value={form.title} onChange={event => update('title', event.target.value)} /></label><label>类型<select value={form.knowledge_type} onChange={event => update('knowledge_type', event.target.value as KnowledgeType)}><option value="standard">标准</option><option value="vendor">厂商资料</option><option value="runbook">运行手册</option><option value="case">历史案例</option></select></label><label>权威性<select value={form.authority} onChange={event => update('authority', event.target.value as AuthorityLevel)}><option value="high">高</option><option value="medium_high">中高</option><option value="medium">中</option><option value="low">低</option></select></label><label>来源名称<input value={form.source_name} onChange={event => update('source_name', event.target.value)} /></label><label>来源章节<input value={form.source_location} onChange={event => update('source_location', event.target.value)} /></label></div><label>摘要<textarea value={form.summary} onChange={event => update('summary', event.target.value)} /></label><div className="modal-actions"><button className="secondary" disabled={!ready || preview.isPending} onClick={() => preview.mutate()}>{preview.isPending ? '正在预览' : '生成预览'}</button>{preview.data && <button className="primary" disabled={submit.isPending || (preview.data.requires_risk_acknowledgement && !form.ack_risk)} onClick={() => submit.mutate()}>{submit.isPending ? '正在保存' : '保存草稿'}</button>}</div>{preview.error && <Error value={preview.error} />}{preview.data && <div className="import-preview"><p><b>{preview.data.version_id}</b> · {preview.data.chunk_count} 个切片</p>{preview.data.requires_risk_acknowledgement && <label className="risk"><ShieldAlert />检测到风险内容<input type="checkbox" checked={form.ack_risk} onChange={event => update('ack_risk', event.target.checked)} />我已审核并确认导入</label>}{preview.data.chunks.map(chunk => <details key={chunk.chunk_id}><summary>{chunk.heading_path.join(' / ') || chunk.chunk_id}</summary><p>{chunk.content}</p></details>)}</div>}</div></div>
 }
 
 function Metric({ label, value, tone = '' }: { label: string; value: string; tone?: string }) { return <div className={`metric ${tone}`}><label>{label}</label><b>{value}</b></div> }

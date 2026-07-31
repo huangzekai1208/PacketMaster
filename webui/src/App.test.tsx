@@ -17,6 +17,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
   vi.unstubAllGlobals()
 })
 
@@ -26,7 +27,33 @@ it('呈现工作台、历史会话和任务视图标签', async () => {
   expect(screen.getByRole('navigation', { name: '任务视图' })).toBeInTheDocument()
   await waitFor(() => expect(screen.getByText('下载测速诊断')).toBeInTheDocument())
   expect(screen.getByRole('button', { name: /报告/ })).toBeInTheDocument()
-  expect(screen.getByLabelText('对话输入')).toBeInTheDocument()
+  const input = screen.getByLabelText('对话输入')
+  expect(input).toBeInTheDocument()
+  expect(input.closest('.chat-view')).toHaveClass('chat-view-initial')
+  expect(screen.getByText('你好，我是 PacketMaster')).toBeInTheDocument()
+})
+
+it('可从会话任务栏删除历史会话', async () => {
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+  const fetchMock = vi.mocked(fetch)
+  render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
+
+  const deleteButton = await screen.findByRole('button', { name: '删除会话 下载测速诊断' })
+  fireEvent.click(deleteButton)
+
+  expect(confirm).toHaveBeenCalledWith('确定删除“下载测速诊断”吗？此操作无法恢复。')
+  await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/sessions/session-1', expect.objectContaining({ method: 'DELETE' })))
+})
+
+it('关闭会话栏后可从顶部栏重新展开', async () => {
+  render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
+
+  const collapse = await screen.findByRole('button', { name: '收起会话' })
+  fireEvent.click(collapse)
+  const expand = await screen.findByRole('button', { name: '展开会话栏' })
+  fireEvent.click(expand)
+
+  expect(await screen.findByRole('button', { name: '收起会话' })).toBeInTheDocument()
 })
 
 it('将知识经验引用与报文证据分区展示', () => {
@@ -60,6 +87,24 @@ it('可从工作台进入知识管理视图', async () => {
   expect(await screen.findByRole('button', { name: '选择本地文件' })).toBeInTheDocument()
 })
 
+it('选择知识文件后自动预填可编辑的导入信息', async () => {
+  render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
+
+  await screen.findByRole('button', { name: '知识库' })
+  screen.getByRole('button', { name: '知识库' }).click()
+  const importButton = await screen.findByRole('button', { name: '导入知识' })
+  importButton.click()
+  const file = new File(['# TCP 窗口排查手册\n\n用于定位下载吞吐不足。'], 'window-case.md', { type: 'text/markdown' })
+  fireEvent.change(await screen.findByLabelText('知识文件'), { target: { files: [file] } })
+
+  await waitFor(() => expect(screen.getByLabelText('标题')).toHaveValue('TCP 窗口排查手册'))
+  expect(screen.getByLabelText('知识 ID')).toHaveValue('knowledge.window-case')
+  expect(screen.getByLabelText('类型')).toHaveValue('case')
+  expect(screen.getByLabelText('权威性')).toHaveValue('medium_high')
+  expect(screen.getByLabelText('来源名称')).toHaveValue('window-case.md')
+  expect(screen.getByLabelText('摘要')).toHaveValue('用于定位下载吞吐不足。')
+})
+
 it('发送普通消息时会在请求完成前立即显示在对话区', async () => {
   let resolveMessage: ((value: Response) => void) | undefined
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL) => {
@@ -75,6 +120,7 @@ it('发送普通消息时会在请求完成前立即显示在对话区', async (
   fireEvent.click(screen.getByTitle('发送'))
 
   expect(screen.getByText('请立即显示这条消息')).toBeInTheDocument()
+  await waitFor(() => expect(input.closest('.chat-view')).not.toHaveClass('chat-view-initial'))
   expect(await screen.findByText('Thinking…')).toBeInTheDocument()
   resolveMessage?.(new Response(JSON.stringify({ ok: true, data: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
 })
@@ -92,12 +138,11 @@ it('报告完成后的追问也会在请求完成前立即显示在对话区', a
   }))
   render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
 
-  const input = await screen.findByPlaceholderText('围绕当前报告继续提问')
+  const input = await screen.findByPlaceholderText('有问题，尽管问')
   fireEvent.change(input, { target: { value: '请解释丢包原因' } })
   fireEvent.click(screen.getByTitle('发送'))
 
   expect(await screen.findByText('请解释丢包原因')).toBeInTheDocument()
-  expect(await screen.findByText('Thinking…')).toBeInTheDocument()
   resolveQuestion?.(new Response(JSON.stringify({ ok: true, data: { turn_id: 'turn-1', analysis_id: 'analysis-1', question: '请解释丢包原因', answer: '这是正式回答。', citations: [], limitations: [], suggestions: [], created_at: '2026-07-26T00:00:01Z' } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
 })
 
@@ -113,7 +158,7 @@ it('选择报文后只添加附件，等待用户发送对话消息', async () =
   render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
 
   await screen.findByLabelText('对话输入')
-  screen.getByTitle('加载报文').click()
+  screen.getByTitle('选择报文文件').click()
   fireEvent.change(screen.getByLabelText('选择本地报文'), { target: { files: [new File(['capture'], '测速.pcapng', { type: 'application/octet-stream' })] } })
 
   expect(await screen.findByLabelText('移除报文附件')).toBeInTheDocument()

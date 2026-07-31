@@ -284,17 +284,36 @@ def _intent_clarification(intent) -> str | None:
 
 
 def _answer_general_chat(
-    session: ChatSession, settings: Settings, question: str
+    session: ChatSession, settings: Settings, question: str, rag_runtime=None
 ) -> str:
     session.state.question = question
     model = DiagnosisModel(settings=settings)
-    answer = asyncio.run(
-        model.general_chat(
+
+    async def answer_with_knowledge():
+        knowledge = None
+        if rag_runtime is not None:
+            try:
+                query = rag_runtime.query_builder.build_general_chat(question)
+                if query is not None:
+                    bundle = await rag_runtime.retriever.retrieve(query)
+                    if rag_runtime.mode.value == "active":
+                        knowledge = bundle
+            except Exception:
+                pass
+        if knowledge is None:
+            return await model.general_chat(
+                question,
+                session.state.conversation_summary,
+                session.state.conversation_turns,
+            )
+        return await model.general_chat(
             question,
             session.state.conversation_summary,
             session.state.conversation_turns,
+            knowledge=knowledge,
         )
-    )
+
+    answer = asyncio.run(answer_with_knowledge())
     session.append_turn(question, answer.answer)
     return answer.answer
 
@@ -304,6 +323,7 @@ def chat() -> None:
     """启动 PacketMaster 持续对话诊断。"""
 
     settings = Settings.load()
+    rag_runtime = build_rag_runtime(settings)
     session = ChatSession(
         ChatSessionState(session_id=create_request_id()),
         ArtifactManager(settings.artifact_root, settings.artifact_ttl_hours),
@@ -372,7 +392,7 @@ def chat() -> None:
             )
             if route is ConversationRoute.GENERAL:
                 try:
-                    typer.echo(_answer_general_chat(session, settings, raw))
+                    typer.echo(_answer_general_chat(session, settings, raw, rag_runtime))
                 except Exception as exc:
                     typer.echo(f"对话暂时失败，请稍后重试：{exc}")
                 continue
