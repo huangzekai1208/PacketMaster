@@ -76,9 +76,19 @@ main { grid-area: main; min-width: 0; background: #fff; display: grid; grid-temp
 .conversation-welcome p { margin: 0; color: var(--muted); font-size: 14px; }
 .messages { overflow-y: auto; padding: 22px 16px; }
 .message { max-width: none; margin: 0 0 18px; display: flex; }
-.message p { max-width: min(78%, 620px); margin: 0; padding: 10px 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 8px; }
+.message-body { max-width: min(78%, 620px); }
+.message p { margin: 0; padding: 10px 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; border-radius: 8px; }
 .message-user { justify-content: flex-end; }.message-user p { color: #173b34; background: #e5f1ed; border: 1px solid #c9dfd7; border-bottom-right-radius: 2px; }
 .message:not(.message-user) { justify-content: flex-start; }.message:not(.message-user) p { background: #fff; border: 1px solid #e0e6e7; border-bottom-left-radius: 2px; }
+.rag-message-trace { margin: 8px 2px 0; font-size: 11px; color: var(--muted); }
+.rag-message-trace > div { display: flex; align-items: center; gap: 8px; }
+.rag-message-trace > div > b { color: #3f6f5a; }
+.rag-message-trace.degraded > div > b { color: #9a552e; }
+.rag-message-trace ul { display: grid; gap: 5px; margin: 7px 0 0; padding: 7px 0 0; border-top: 1px solid var(--line); list-style: none; }
+.rag-message-trace li { display: grid; grid-template-columns: minmax(100px,1fr) minmax(120px,1.25fr) auto; align-items: baseline; gap: 8px; }
+.rag-message-trace li b, .rag-message-trace code { min-width: 0; overflow-wrap: anywhere; }
+.rag-message-trace code { color: #536168; font-size: 10px; }
+.rag-message-trace li span { white-space: nowrap; }
 .message-pending p { display: flex; align-items: center; gap: 8px; color: #66747a; font-style: italic; }.message-pending svg { width: 15px; animation: spin 1s linear infinite; }
 .message-clarification p, .message-confirmation p { border-left: 3px solid #cf7b43 !important; }
 .composer { margin: 0 clamp(12px,4vw,52px) 14px; height: 54px; min-height: 54px; display: grid; grid-template-columns: 44px minmax(0,1fr) 44px; align-items: center; gap: 6px; padding: 4px; border: 1px solid #bbc5c8; background: #fff; box-shadow: 0 4px 18px rgba(28,40,45,.08); border-radius: 999px; }

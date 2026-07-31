@@ -24,6 +24,7 @@ from packetmaster.rag.embedding import (
 )
 from packetmaster.rag.evaluation import RagEvaluator, load_evaluation_cases
 from packetmaster.rag.importer import ImportMetadata, KnowledgeImporter
+from packetmaster.rag.reranking import build_reranker
 from packetmaster.rag.retrieval import HybridKnowledgeRetriever
 
 knowledge_app = typer.Typer(help="管理 PacketMaster RAG 知识库")
@@ -129,9 +130,7 @@ def import_command(
 @knowledge_app.command(name="list")
 def list_command(
     status: Annotated[KnowledgeStatus | None, typer.Option("--status")] = None,
-    knowledge_type: Annotated[
-        KnowledgeType | None, typer.Option("--type")
-    ] = None,
+    knowledge_type: Annotated[KnowledgeType | None, typer.Option("--type")] = None,
     offset: Annotated[int, typer.Option("--offset", min=0)] = 0,
     limit: Annotated[int, typer.Option("--limit", min=1, max=100)] = 50,
 ) -> None:
@@ -235,8 +234,7 @@ def health_command() -> None:
             )
             approved = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM knowledge_documents "
-                    "WHERE status = 'approved'"
+                    "SELECT COUNT(*) FROM knowledge_documents WHERE status = 'approved'"
                 ).fetchone()[0]
             )
             generation = connection.execute(
@@ -267,8 +265,12 @@ def evaluate_command(
         retriever = HybridKnowledgeRetriever(
             store,
             provider,
+            reranker=build_reranker(settings),
             keyword_top_k=settings.rag_keyword_top_k,
             vector_top_k=settings.rag_vector_top_k,
+            vector_timeout_seconds=settings.rag_vector_timeout_seconds,
+            reranker_candidate_top_k=settings.reranker_candidate_top_k,
+            reranker_timeout_seconds=settings.reranker_timeout_seconds,
             final_top_k=settings.rag_final_top_k,
             max_context_bytes=settings.rag_max_context_bytes,
             timeout_seconds=settings.rag_timeout_seconds,

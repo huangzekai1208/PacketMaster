@@ -6,7 +6,7 @@ import asyncio
 from collections import defaultdict
 
 from packetmaster.errors import AppError
-from packetmaster.rag.base import EmbeddingProvider, KnowledgeStore
+from packetmaster.rag.base import EmbeddingProvider, KnowledgeStore, Reranker
 from packetmaster.rag.contracts import (
     AuthorityLevel,
     CaseProfile,
@@ -30,8 +30,12 @@ class HybridKnowledgeRetriever:
         store: KnowledgeStore,
         embedding_provider: EmbeddingProvider,
         *,
+        reranker: Reranker | None = None,
         keyword_top_k: int = 20,
         vector_top_k: int = 20,
+        vector_timeout_seconds: float = 1.25,
+        reranker_candidate_top_k: int = 20,
+        reranker_timeout_seconds: float = 1.5,
         final_top_k: int = 8,
         max_context_bytes: int = 24_576,
         timeout_seconds: float = 2.0,
@@ -40,14 +44,25 @@ class HybridKnowledgeRetriever:
     ) -> None:
         if not 1 <= keyword_top_k <= 100 or not 1 <= vector_top_k <= 100:
             raise ValueError("retrieval candidate limits must be between 1 and 100")
+        if not 1 <= reranker_candidate_top_k <= 100:
+            raise ValueError("reranker candidate limit must be between 1 and 100")
         if not 1 <= final_top_k <= 8 or max_context_bytes < 1:
             raise ValueError("invalid final retrieval limits")
-        if timeout_seconds <= 0 or rrf_k < 1:
+        if (
+            timeout_seconds <= 0
+            or vector_timeout_seconds <= 0
+            or reranker_timeout_seconds <= 0
+            or rrf_k < 1
+        ):
             raise ValueError("timeout and rrf_k must be positive")
         self.store = store
         self.embedding_provider = embedding_provider
+        self.reranker = reranker
         self.keyword_top_k = keyword_top_k
         self.vector_top_k = vector_top_k
+        self.vector_timeout_seconds = vector_timeout_seconds
+        self.reranker_candidate_top_k = reranker_candidate_top_k
+        self.reranker_timeout_seconds = reranker_timeout_seconds
         self.final_top_k = final_top_k
         self.max_context_bytes = min(max_context_bytes, 24_576)
         self.timeout_seconds = timeout_seconds
@@ -72,7 +87,7 @@ class HybridKnowledgeRetriever:
         keyword_task = asyncio.create_task(
             self.store.keyword_search(query, limit=self.keyword_top_k)
         )
-        vector_task = asyncio.create_task(self._vector_search(query))
+        vector_task = asyncio.create_task(self._bounded_vector_search(query))
         keyword_result, vector_result = await asyncio.gather(
             keyword_task, vector_task, return_exceptions=True
         )
@@ -96,7 +111,14 @@ class HybridKnowledgeRetriever:
         else:
             vector = vector_result
         merged = self._merge(keyword, vector, query)
-        selected, truncated = self._select(merged)
+        if self.reranker is None:
+            candidates = merged[: self.reranker_candidate_top_k]
+        else:
+            candidates = sorted(
+                merged, key=lambda item: (-item.fusion_score, item.chunk_id)
+            )[: self.reranker_candidate_top_k]
+        ranked = await self._rerank(query, candidates, warnings)
+        selected, truncated = self._select(ranked)
         total_bytes = sum(len(item.content.encode("utf-8")) for item in selected)
         return KnowledgeBundle(
             query_id=query.query_id,
@@ -106,13 +128,55 @@ class HybridKnowledgeRetriever:
             warnings=warnings,
         )
 
-    async def _vector_search(
+    async def _rerank(
+        self,
+        query: KnowledgeQuery,
+        candidates: list[RetrievalCandidate],
+        warnings: list[str],
+    ) -> list[RetrievalCandidate]:
+        if self.reranker is None or len(candidates) < 2:
+            return candidates
+        documents = [f"{item.title}\n{item.content}" for item in candidates]
+        try:
+            results = await asyncio.wait_for(
+                self.reranker.rerank(
+                    query.query_text, documents, top_n=len(documents)
+                ),
+                timeout=self.reranker_timeout_seconds,
+            )
+        except TimeoutError:
+            warnings.append("模型重排序降级：RERANK_TIMEOUT")
+            return candidates
+        except Exception as exc:
+            if isinstance(exc, AppError):
+                warnings.append(f"模型重排序降级：{exc.code}")
+            else:
+                warnings.append("模型重排序降级：RERANK_FAILED")
+            return candidates
+        return [
+            candidates[index].model_copy(update={"rerank_score": score})
+            for index, score in results
+        ]
+
+    async def _vector_search(self, query: KnowledgeQuery) -> list[RetrievalCandidate]:
+        vector = await self.embedding_provider.embed_query(query.query_text)
+        return await self.store.vector_search(query, vector, limit=self.vector_top_k)
+
+    async def _bounded_vector_search(
         self, query: KnowledgeQuery
     ) -> list[RetrievalCandidate]:
-        vector = await self.embedding_provider.embed_query(query.query_text)
-        return await self.store.vector_search(
-            query, vector, limit=self.vector_top_k
+        try:
+            return await asyncio.wait_for(
+                self._vector_search(query), timeout=self.vector_timeout_seconds
             )
+        except TimeoutError as exc:
+            raise AppError(
+                code="VECTOR_RETRIEVAL_TIMEOUT",
+                message="向量检索超时",
+                recoverable=True,
+                suggested_action="本次将退化到 BM25 召回，请检查 Embedding 服务。",
+            ) from exc
+
     def _merge(
         self,
         keyword: list[RetrievalCandidate],
@@ -140,15 +204,15 @@ class HybridKnowledgeRetriever:
                 if rank is not None
             )
             case_boost = self._case_similarity(item, query)
-            # 这里是可解释的规则排序，不是额外调用 Cross-Encoder 的模型 reranker。
-            rerank = fusion + _AUTHORITY_BOOST[item.authority] + case_boost
+            # RRF 后先应用确定性业务加权，模型 reranker 再处理截断后的候选池。
+            pre_rerank = fusion + _AUTHORITY_BOOST[item.authority] + case_boost
             merged.append(
                 item.model_copy(
                     update={
                         "keyword_rank": keyword_rank,
                         "vector_rank": vector_rank,
                         "fusion_score": fusion,
-                        "rerank_score": rerank,
+                        "rerank_score": pre_rerank,
                     }
                 )
             )
@@ -156,9 +220,7 @@ class HybridKnowledgeRetriever:
         return merged
 
     @staticmethod
-    def _environment_matches(
-        item: RetrievalCandidate, query: KnowledgeQuery
-    ) -> bool:
+    def _environment_matches(item: RetrievalCandidate, query: KnowledgeQuery) -> bool:
         tags = {
             key.casefold(): value.casefold()
             for key, value in query.environment_tags.items()
@@ -166,8 +228,7 @@ class HybridKnowledgeRetriever:
         operating_system = tags.get("operating_system")
         if operating_system and item.applicability.operating_systems:
             allowed = {
-                value.casefold()
-                for value in item.applicability.operating_systems
+                value.casefold() for value in item.applicability.operating_systems
             }
             if operating_system not in allowed:
                 return False
@@ -199,9 +260,7 @@ class HybridKnowledgeRetriever:
         if profile.direction is query.direction:
             score += 0.08
         if query.achievement_ratio_pct is not None:
-            distance = abs(
-                profile.achievement_ratio_pct - query.achievement_ratio_pct
-            )
+            distance = abs(profile.achievement_ratio_pct - query.achievement_ratio_pct)
             score += max(0.0, 0.08 * (1 - distance / 100))
         shared = set(profile.tcp_features) & set(query.global_features)
         if shared:
@@ -229,18 +288,14 @@ class HybridKnowledgeRetriever:
                 ordered.append(item)
         ordered.extend(item for item in candidates if item not in ordered)
         selected: list[RetrievalCandidate] = []
-        parent_counts: dict[str, int] = defaultdict(int)
         total_bytes = 0
         for item in ordered:
             if len(selected) >= self.final_top_k:
                 break
-            if parent_counts[item.knowledge_id] >= 2:
-                continue
             size = len(item.content.encode("utf-8"))
             if total_bytes + size > self.max_context_bytes:
                 continue
             selected.append(item)
-            parent_counts[item.knowledge_id] += 1
             total_bytes += size
         truncated = len(selected) < len(candidates)
         return selected, truncated

@@ -26,6 +26,16 @@ class EmbeddingProvider(Protocol):
 
 
 @runtime_checkable
+class Reranker(Protocol):
+    @property
+    def model_name(self) -> str: ...
+
+    async def rerank(
+        self, query: str, documents: Sequence[str], *, top_n: int
+    ) -> list[tuple[int, float]]: ...
+
+
+@runtime_checkable
 class KnowledgeStore(Protocol):
     async def keyword_search(
         self, query: KnowledgeQuery, *, limit: int

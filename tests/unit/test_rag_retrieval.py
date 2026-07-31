@@ -72,6 +72,19 @@ class FakeProvider:
         return [[1.0, 0.0] for _ in texts]
 
 
+class FakeReranker:
+    model_name = "fake-reranker"
+
+    def __init__(self, order: list[int] | None = None) -> None:
+        self.order = order
+        self.calls: list[tuple[str, list[str], int]] = []
+
+    async def rerank(self, query, documents, *, top_n):
+        self.calls.append((query, list(documents), top_n))
+        order = self.order or list(range(len(documents)))
+        return [(index, 1.0 - rank * 0.01) for rank, index in enumerate(order)]
+
+
 @pytest.mark.asyncio
 async def test_hybrid_retrieval_uses_rrf_and_merges_duplicate_chunks() -> None:
     shared = _candidate("window:v1:shared")
@@ -158,7 +171,7 @@ async def test_case_similarity_boosts_matching_case() -> None:
 
 
 @pytest.mark.asyncio
-async def test_final_results_enforce_parent_count_and_byte_budget() -> None:
+async def test_final_results_enforce_byte_budget() -> None:
     same_parent = [
         _candidate(
             f"parent:v1:c{index}",
@@ -179,9 +192,109 @@ async def test_final_results_enforce_parent_count_and_byte_budget() -> None:
         KnowledgeQuery(query_id="q1", query_text="窗口限制")
     )
 
-    assert sum(item.knowledge_id == "parent" for item in bundle.results) <= 2
     assert bundle.total_content_bytes <= 250
     assert bundle.truncated is True
+
+
+@pytest.mark.asyncio
+async def test_model_reranks_rrf_candidate_pool_before_final_selection() -> None:
+    candidates = [
+        _candidate(
+            f"doc-{index}:v1:c1",
+            authority="low" if index == 0 else "high",
+        )
+        for index in range(5)
+    ]
+    reranker = FakeReranker(order=[2, 1, 0])
+    retriever = HybridKnowledgeRetriever(
+        FakeStore(candidates, []),
+        FakeProvider(),
+        reranker=reranker,
+        reranker_candidate_top_k=3,
+        final_top_k=3,
+    )
+
+    bundle = await retriever.retrieve(
+        KnowledgeQuery(query_id="q1", query_text="TCP 首部字段")
+    )
+
+    assert [item.chunk_id for item in bundle.results] == [
+        candidates[2].chunk_id,
+        candidates[1].chunk_id,
+        candidates[0].chunk_id,
+    ]
+    assert len(reranker.calls[0][1]) == 3
+    assert reranker.calls[0][2] == 3
+    assert bundle.results[0].rerank_score == 1.0
+
+
+@pytest.mark.asyncio
+async def test_reranker_failure_falls_back_to_rrf_with_warning() -> None:
+    class FailingReranker(FakeReranker):
+        async def rerank(self, query, documents, *, top_n):
+            raise AppError(
+                code="RERANK_SERVICE_UNAVAILABLE",
+                message="failed",
+                recoverable=True,
+                suggested_action="fallback",
+            )
+
+    first = _candidate("first:v1:c1")
+    second = _candidate("second:v1:c1")
+    retriever = HybridKnowledgeRetriever(
+        FakeStore([first, second], [first, second]),
+        FakeProvider(),
+        reranker=FailingReranker(),
+    )
+
+    bundle = await retriever.retrieve(
+        KnowledgeQuery(query_id="q1", query_text="窗口限制")
+    )
+
+    assert [item.chunk_id for item in bundle.results] == [
+        first.chunk_id,
+        second.chunk_id,
+    ]
+    assert bundle.warnings == ["模型重排序降级：RERANK_SERVICE_UNAVAILABLE"]
+
+
+@pytest.mark.asyncio
+async def test_reranker_timeout_falls_back_before_total_retrieval_timeout() -> None:
+    class SlowReranker(FakeReranker):
+        async def rerank(self, query, documents, *, top_n):
+            await asyncio.sleep(0.05)
+            return await super().rerank(query, documents, top_n=top_n)
+
+    candidates = [_candidate("first:v1:c1"), _candidate("second:v1:c1")]
+    retriever = HybridKnowledgeRetriever(
+        FakeStore(candidates, candidates),
+        FakeProvider(),
+        reranker=SlowReranker(),
+        reranker_timeout_seconds=0.001,
+        timeout_seconds=0.1,
+    )
+
+    bundle = await retriever.retrieve(
+        KnowledgeQuery(query_id="q1", query_text="窗口限制")
+    )
+
+    assert bundle.results
+    assert bundle.warnings == ["模型重排序降级：RERANK_TIMEOUT"]
+
+
+@pytest.mark.asyncio
+async def test_same_knowledge_can_fill_requested_final_slots_after_reranking() -> None:
+    candidates = [
+        _candidate(f"parent:v1:c{index}", knowledge_id="parent") for index in range(6)
+    ]
+    retriever = HybridKnowledgeRetriever(
+        FakeStore(candidates, []), FakeProvider(), final_top_k=5
+    )
+
+    bundle = await retriever.retrieve(KnowledgeQuery(query_id="q1", query_text="TCP"))
+
+    assert len(bundle.results) == 5
+    assert {item.knowledge_id for item in bundle.results} == {"parent"}
 
 
 @pytest.mark.asyncio
@@ -205,6 +318,28 @@ async def test_vector_failure_degrades_to_keyword_with_warning() -> None:
 
     assert bundle.results
     assert "VECTOR_FAILED" in bundle.warnings[0]
+
+
+@pytest.mark.asyncio
+async def test_vector_timeout_degrades_to_keyword_with_warning() -> None:
+    class SlowProvider(FakeProvider):
+        async def embed_query(self, text):
+            await asyncio.sleep(0.05)
+            return await super().embed_query(text)
+
+    retriever = HybridKnowledgeRetriever(
+        FakeStore([_candidate("rfc:v1:c1")], []),
+        SlowProvider(),
+        vector_timeout_seconds=0.001,
+        timeout_seconds=0.1,
+    )
+
+    bundle = await retriever.retrieve(
+        KnowledgeQuery(query_id="q1", query_text="窗口限制")
+    )
+
+    assert bundle.results
+    assert bundle.warnings == ["向量检索降级：VECTOR_RETRIEVAL_TIMEOUT"]
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 from packetmaster.chat import ConversationRoute, route_conversation
@@ -29,6 +30,7 @@ from packetmaster.web.contracts import (
     MessageType,
     MissingParameter,
     Page,
+    RagMessageCitation,
     SessionDetail,
     SessionSummary,
     TaskStatus,
@@ -48,6 +50,14 @@ _ABSOLUTE_PATH = re.compile(
     r"(?i)(?<!\w)(?:[a-z]:[\\/]|/users/|/home/|/private/|/tmp/|~[/\\])"
     r"[^\n，。；,;!?]*"
 )
+
+
+@dataclass(frozen=True)
+class _GeneralKnowledgeTrace:
+    bundle: Any | None = None
+    status: str | None = None
+    reason: str = ""
+    citations: list[RagMessageCitation] = field(default_factory=list)
 
 
 class WebConversationService:
@@ -176,31 +186,66 @@ class WebConversationService:
             content=safe_content,
         )
         knowledge = await self._general_knowledge(safe_content)
-        if knowledge is None:
+        if knowledge.bundle is None:
             answer = await self.model.general_chat(safe_content, "", history)
         else:
             answer = await self.model.general_chat(
-                safe_content, "", history, knowledge=knowledge
+                safe_content, "", history, knowledge=knowledge.bundle
             )
         assistant = self.messages.append(
             session_id=session_id,
             message_type=MessageType.ASSISTANT,
             content=_redact(answer.answer),
+            rag_status=knowledge.status,
+            rag_reason=knowledge.reason,
+            rag_citations=knowledge.citations,
         )
         return ConversationResult(route="general", assistant_message=assistant)
 
     async def _general_knowledge(self, question: str):
         if self.rag_runtime is None:
-            return None
+            return _GeneralKnowledgeTrace()
         try:
             query = self.rag_runtime.query_builder.build_general_chat(question)
             if query is None:
-                return None
+                return _GeneralKnowledgeTrace()
             bundle = await self.rag_runtime.retriever.retrieve(query)
-            return bundle if self.rag_runtime.mode.value == "active" else None
-        except Exception:
+            warnings = list(bundle.warnings)
+            is_active = self.rag_runtime.mode.value == "active"
+            degraded = bool(warnings) or not bundle.results or not is_active
+            reranker_degraded = any("重排序降级" in warning for warning in warnings)
+            reranker = getattr(self.rag_runtime.retriever, "reranker", None)
+            citations = [
+                RagMessageCitation(
+                    knowledge_id=item.knowledge_id,
+                    title=item.title,
+                    chunk_id=item.chunk_id,
+                    reranker_score=(
+                        item.rerank_score
+                        if reranker is not None and not reranker_degraded
+                        else None
+                    ),
+                )
+                for item in bundle.results
+            ]
+            if warnings:
+                reason = "；".join(warnings)
+            elif not bundle.results:
+                reason = "RAG_NO_RESULTS"
+            elif not is_active:
+                reason = "RAG_MODE_NOT_ACTIVE"
+            else:
+                reason = ""
+            return _GeneralKnowledgeTrace(
+                bundle=bundle if is_active and bundle.results else None,
+                status="degraded" if degraded else "used",
+                reason=reason,
+                citations=citations,
+            )
+        except Exception as exc:
             # General conversation remains available when knowledge retrieval degrades.
-            return None
+            reason = exc.code if isinstance(exc, AppError) else "RAG_RETRIEVAL_FAILED"
+            return _GeneralKnowledgeTrace(status="degraded", reason=reason)
 
     def _analysis_question(
         self, session_id: str, content: str

@@ -95,6 +95,13 @@ class SessionSummary(WebContract):
     updated_at: datetime
 
 
+class RagMessageCitation(WebContract):
+    knowledge_id: PublicId
+    title: str = Field(min_length=1, max_length=256)
+    chunk_id: str = Field(min_length=1, max_length=256)
+    reranker_score: float | None = Field(default=None, ge=0)
+
+
 class WebMessage(WebContract):
     message_id: PublicId
     session_id: PublicId
@@ -103,6 +110,9 @@ class WebMessage(WebContract):
     created_at: datetime
     analysis_id: PublicId | None = None
     evidence_count: int = Field(default=0, ge=0)
+    rag_status: Literal["used", "degraded"] | None = None
+    rag_reason: str = Field(default="", max_length=2_000)
+    rag_citations: list[RagMessageCitation] = Field(default_factory=list, max_length=8)
 
 
 class AnalysisSummary(WebContract):

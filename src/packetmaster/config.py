@@ -21,12 +21,32 @@ except ModuleNotFoundError as exc:
     LOCAL_MODEL_NAME = "gpt-4.1-mini"
     LOCAL_STRUCTURED_OUTPUT_METHOD = "auto"
     LOCAL_EMBEDDING_API_KEY: str | None = None
+    LOCAL_RERANK_API_KEY: str | None = None
+    LOCAL_RAG_ENABLED = False
+    LOCAL_RAG_MODE = RagMode.SHADOW
+    LOCAL_RAG_KEYWORD_TOP_K = 20
+    LOCAL_RAG_VECTOR_TOP_K = 20
+    LOCAL_RERANKER_ENABLED = True
+    LOCAL_RERANKER_CANDIDATE_TOP_K = 20
+    LOCAL_RAG_FINAL_TOP_K = 8
 else:
     LOCAL_MODEL_API_KEY = _local_config.MODEL_API_KEY
     LOCAL_MODEL_BASE_URL = _local_config.MODEL_BASE_URL
     LOCAL_MODEL_NAME = _local_config.MODEL_NAME
     LOCAL_STRUCTURED_OUTPUT_METHOD = _local_config.MODEL_STRUCTURED_OUTPUT_METHOD
     LOCAL_EMBEDDING_API_KEY = getattr(_local_config, "EMBEDDING_API_KEY", None)
+    LOCAL_RERANK_API_KEY = getattr(_local_config, "RERANK_API_KEY", None)
+    LOCAL_RAG_ENABLED = bool(getattr(_local_config, "RAG_ENABLED", False))
+    LOCAL_RAG_MODE = RagMode(getattr(_local_config, "RAG_MODE", RagMode.SHADOW))
+    LOCAL_RAG_KEYWORD_TOP_K = int(getattr(_local_config, "RAG_KEYWORD_TOP_K", 20))
+    LOCAL_RAG_VECTOR_TOP_K = int(getattr(_local_config, "RAG_VECTOR_TOP_K", 20))
+    LOCAL_RERANKER_ENABLED = bool(
+        getattr(_local_config, "RERANKER_ENABLED", True)
+    )
+    LOCAL_RERANKER_CANDIDATE_TOP_K = int(
+        getattr(_local_config, "RERANKER_CANDIDATE_TOP_K", 20)
+    )
+    LOCAL_RAG_FINAL_TOP_K = int(getattr(_local_config, "RAG_FINAL_TOP_K", 8))
 
 
 class Settings(BaseSettings):
@@ -54,14 +74,12 @@ class Settings(BaseSettings):
     max_inspection_rounds: int = Field(default=3, ge=1, le=3)
     # Web 仅绑定 loopback。上传报文会被复制至 artifact_root/web-captures。
     web_database_path: Path = Path("artifacts/packetmaster-web.sqlite")
-    web_allowed_capture_roots: list[Path] = Field(
-        default_factory=lambda: [Path.cwd()]
-    )
+    web_allowed_capture_roots: list[Path] = Field(default_factory=lambda: [Path.cwd()])
     web_host: Literal["127.0.0.1"] = "127.0.0.1"
     web_port: int = Field(default=8765, ge=1024, le=65535)
     # RAG 默认关闭；active 模式还必须通过持久化的正式评估门禁。
-    rag_enabled: bool = False
-    rag_mode: RagMode = RagMode.SHADOW
+    rag_enabled: bool = LOCAL_RAG_ENABLED
+    rag_mode: RagMode = LOCAL_RAG_MODE
     knowledge_database_path: Path = Field(
         default=Path("artifacts/knowledge/packetmaster-knowledge.sqlite"),
         exclude=True,
@@ -95,11 +113,29 @@ class Settings(BaseSettings):
     )
     embedding_timeout_seconds: float = Field(default=15, gt=0, le=60)
     embedding_max_retries: int = Field(default=2, ge=0, le=5)
-    rag_keyword_top_k: int = Field(default=20, ge=1, le=100)
-    rag_vector_top_k: int = Field(default=20, ge=1, le=100)
-    rag_final_top_k: int = Field(default=8, ge=1, le=8)
+    reranker_enabled: bool = LOCAL_RERANKER_ENABLED
+    reranker_model: str = Field(default="qwen3-rerank", min_length=1, max_length=256)
+    reranker_api_key: SecretStr | None = Field(
+        default=(SecretStr(LOCAL_RERANK_API_KEY) if LOCAL_RERANK_API_KEY else None),
+        exclude=True,
+        repr=False,
+    )
+    reranker_base_url: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-api/v1",
+        min_length=1,
+    )
+    reranker_candidate_top_k: int = Field(
+        default=LOCAL_RERANKER_CANDIDATE_TOP_K, ge=1, le=100
+    )
+    reranker_timeout_seconds: float = Field(default=1.5, gt=0, le=30)
+    reranker_max_retries: int = Field(default=0, ge=0, le=3)
+    reranker_max_document_chars: int = Field(default=3_500, ge=256, le=12_000)
+    rag_keyword_top_k: int = Field(default=LOCAL_RAG_KEYWORD_TOP_K, ge=1, le=100)
+    rag_vector_top_k: int = Field(default=LOCAL_RAG_VECTOR_TOP_K, ge=1, le=100)
+    rag_vector_timeout_seconds: float = Field(default=1.25, gt=0, le=30)
+    rag_final_top_k: int = Field(default=LOCAL_RAG_FINAL_TOP_K, ge=1, le=8)
     rag_max_context_bytes: int = Field(default=24_576, ge=1_024, le=24_576)
-    rag_timeout_seconds: float = Field(default=2.0, gt=0, le=30)
+    rag_timeout_seconds: float = Field(default=3.0, gt=0, le=30)
     rag_max_chunks: int = Field(default=25_000, ge=1, le=25_000)
 
     @property
@@ -113,6 +149,10 @@ class Settings(BaseSettings):
     @property
     def effective_embedding_dimension(self) -> int:
         return self.embedding_dimension
+
+    @property
+    def effective_reranker_api_key(self) -> SecretStr | None:
+        return self.reranker_api_key or self.embedding_api_key
 
     @classmethod
     def load(cls) -> Settings:

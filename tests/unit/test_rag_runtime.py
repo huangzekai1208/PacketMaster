@@ -47,6 +47,7 @@ def test_dashscope_runtime_uses_configured_provider_identity(tmp_path: Path) -> 
     assert runtime is not None
     assert runtime.store.embedding_model == "qwen3-vl-embedding"
     assert runtime.store.embedding_dimension == 2560
+    assert runtime.retriever.reranker.model_name == "qwen3-rerank"
 
 
 def test_dashscope_runtime_degrades_when_key_is_missing(

@@ -16,12 +16,13 @@ from packetmaster.errors import AppError
 from packetmaster.web.contracts import (
     ChatTurnResult,
     MessageType,
+    RagMessageCitation,
     SessionSummary,
     TaskStatus,
     WebMessage,
 )
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 _MIGRATIONS = {
     1: """
         CREATE TABLE sessions (
@@ -148,6 +149,12 @@ _MIGRATIONS = {
     """,
     5: """
         ALTER TABLE chat_turns ADD COLUMN knowledge_citations_json TEXT
+            NOT NULL DEFAULT '[]';
+    """,
+    6: """
+        ALTER TABLE messages ADD COLUMN rag_status TEXT;
+        ALTER TABLE messages ADD COLUMN rag_reason TEXT NOT NULL DEFAULT '';
+        ALTER TABLE messages ADD COLUMN rag_citations_json TEXT
             NOT NULL DEFAULT '[]';
     """,
 }
@@ -327,6 +334,9 @@ class MessageRepository:
         message_id: str | None = None,
         analysis_id: str | None = None,
         evidence_count: int = 0,
+        rag_status: str | None = None,
+        rag_reason: str = "",
+        rag_citations: list[RagMessageCitation] | None = None,
         now: datetime | None = None,
     ) -> WebMessage:
         identifier = message_id or uuid.uuid4().hex
@@ -340,14 +350,18 @@ class MessageRepository:
             created_at=current,
             analysis_id=analysis_id,
             evidence_count=evidence_count,
+            rag_status=rag_status,
+            rag_reason=rag_reason,
+            rag_citations=rag_citations or [],
         )
         with self.database.transaction(immediate=True) as connection:
             connection.execute(
                 """
                 INSERT INTO messages (
                     message_id, session_id, message_type, content, created_at,
-                    analysis_id, evidence_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    analysis_id, evidence_count, rag_status, rag_reason,
+                    rag_citations_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     identifier,
@@ -357,6 +371,12 @@ class MessageRepository:
                     encoded,
                     analysis_id,
                     evidence_count,
+                    rag_status,
+                    rag_reason,
+                    json.dumps(
+                        [item.model_dump(mode="json") for item in rag_citations or []],
+                        ensure_ascii=False,
+                    ),
                 ),
             )
             connection.execute(
@@ -580,6 +600,12 @@ def _message(row: sqlite3.Row) -> WebMessage:
         created_at=_datetime(row["created_at"]),
         analysis_id=row["analysis_id"],
         evidence_count=row["evidence_count"],
+        rag_status=row["rag_status"],
+        rag_reason=row["rag_reason"],
+        rag_citations=[
+            RagMessageCitation.model_validate(item)
+            for item in json.loads(row["rag_citations_json"])
+        ],
     )
 
 

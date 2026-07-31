@@ -98,11 +98,13 @@ def test_general_chat_retrieves_and_injects_active_knowledge(tmp_path: Path) -> 
         authority="high",
         source_name="RFC",
         content="接收窗口会限制在途未确认数据量。",
+        rerank_score=0.9412,
     )
 
     class Retriever:
         def __init__(self) -> None:
             self.calls = 0
+            self.reranker = object()
 
         async def retrieve(self, query):
             self.calls += 1
@@ -119,14 +121,93 @@ def test_general_chat_retrieves_and_injects_active_knowledge(tmp_path: Path) -> 
         retriever=retriever,
     )
     model = _Model()
-    service, _ = _service(tmp_path, model, runtime)
+    service, database = _service(tmp_path, model, runtime)
     session = service.create_session()
 
-    asyncio.run(service.submit_message(session.session_id, content="TCP 窗口如何影响吞吐？"))
+    result = asyncio.run(
+        service.submit_message(session.session_id, content="TCP 窗口如何影响吞吐？")
+    )
 
     assert retriever.calls == 1
     assert model.knowledge[0] is not None
     assert model.knowledge[0].results[0].chunk_id == candidate.chunk_id
+    assert result.assistant_message.rag_status == "used"
+    assert result.assistant_message.rag_citations[0].title == "TCP 窗口机制"
+    assert result.assistant_message.rag_citations[0].chunk_id == candidate.chunk_id
+    assert result.assistant_message.rag_citations[0].reranker_score == 0.9412
+    stored, _ = MessageRepository(database).list(session_id=session.session_id)
+    assert stored[-1].rag_citations == result.assistant_message.rag_citations
+
+
+def test_general_chat_reports_rag_degradation_without_blocking_answer(
+    tmp_path: Path,
+) -> None:
+    class Retriever:
+        reranker = object()
+
+        async def retrieve(self, query):
+            raise RuntimeError("service unavailable")
+
+    runtime = SimpleNamespace(
+        mode=RagMode.ACTIVE,
+        query_builder=KnowledgeQueryBuilder(),
+        retriever=Retriever(),
+    )
+    model = _Model()
+    service, _ = _service(tmp_path, model, runtime)
+    session = service.create_session()
+
+    result = asyncio.run(
+        service.submit_message(session.session_id, content="TCP 序列号为什么从零开始？")
+    )
+
+    assert result.assistant_message.content.startswith("TCP 是")
+    assert result.assistant_message.rag_status == "degraded"
+    assert result.assistant_message.rag_reason == "RAG_RETRIEVAL_FAILED"
+    assert result.assistant_message.rag_citations == []
+    assert model.knowledge == [None]
+
+
+def test_general_chat_does_not_label_rrf_score_as_reranker_score(
+    tmp_path: Path,
+) -> None:
+    candidate = RetrievalCandidate(
+        knowledge_id="rfc.window",
+        version_id="rfc.window:v1",
+        chunk_id="rfc.window:v1:c1",
+        title="TCP 窗口机制",
+        knowledge_type="standard",
+        authority="high",
+        source_name="RFC",
+        content="接收窗口会限制在途未确认数据量。",
+        rerank_score=0.08,
+    )
+
+    class Retriever:
+        reranker = object()
+
+        async def retrieve(self, query):
+            return KnowledgeBundle(
+                query_id=query.query_id,
+                results=[candidate],
+                total_content_bytes=len(candidate.content.encode("utf-8")),
+                warnings=["模型重排序降级：RERANK_TIMEOUT"],
+            )
+
+    runtime = SimpleNamespace(
+        mode=RagMode.ACTIVE,
+        query_builder=KnowledgeQueryBuilder(),
+        retriever=Retriever(),
+    )
+    service, _ = _service(tmp_path, _Model(), runtime)
+    session = service.create_session()
+
+    result = asyncio.run(
+        service.submit_message(session.session_id, content="TCP 窗口如何影响吞吐？")
+    )
+
+    assert result.assistant_message.rag_status == "degraded"
+    assert result.assistant_message.rag_citations[0].reranker_score is None
 
 
 def test_complete_parameters_wait_for_confirmation_and_default_download(

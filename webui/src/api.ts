@@ -4,7 +4,8 @@ export type Target = 'download' | 'upload' | 'both'
 
 export interface Session { session_id: string; title: string; status: TaskStatus; current_analysis_id?: string; created_at: string; updated_at: string }
 export interface Capture { capture_id: string; file_name: string; size_bytes: number }
-export interface Message { message_id: string; session_id: string; message_type: string; content: string; created_at: string; analysis_id?: string; evidence_count: number }
+export interface RagMessageCitation { knowledge_id: string; title: string; chunk_id: string; reranker_score?: number }
+export interface Message { message_id: string; session_id: string; message_type: string; content: string; created_at: string; analysis_id?: string; evidence_count: number; rag_status?: 'used' | 'degraded'; rag_reason?: string; rag_citations?: RagMessageCitation[] }
 export interface Parameters { capture?: Capture; standard_bandwidth_mbps?: number; actual_bandwidth_mbps?: number; target: Target; missing: string[]; assumptions: string[]; ambiguities: string[]; ready_for_confirmation: boolean }
 export interface Analysis { analysis_id: string; session_id: string; status: TaskStatus; stage_message: string; progress_fraction?: number; capture: Capture; standard_bandwidth_mbps: number; actual_bandwidth_mbps: number; target: Target; created_at: string; updated_at: string; elapsed_seconds: number; processed_packets?: number; error_code?: string }
 export interface SessionDetail { session: Session; messages: Page<Message>; parameters?: Parameters }

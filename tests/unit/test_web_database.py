@@ -4,7 +4,7 @@ from pathlib import Path
 
 from packetmaster.domain import Target
 from packetmaster.web.captures import CaptureRegistry, CaptureRepository
-from packetmaster.web.contracts import MessageType
+from packetmaster.web.contracts import MessageType, RagMessageCitation
 from packetmaster.web.database import (
     MessageRepository,
     PendingIntentRepository,
@@ -35,7 +35,7 @@ def test_database_initialization_is_versioned_idempotent_and_uses_wal(
             )
         }
 
-    assert version == 5
+    assert version == 6
     assert journal_mode == "wal"
     assert {
         "sessions",
@@ -108,6 +108,34 @@ def test_sessions_and_messages_persist_with_stable_pagination(tmp_path: Path) ->
     assert page[0].session_id == "session-1"
     assert message_total == 2
     assert message_page[0].message_id == "message-2"
+
+
+def test_message_rag_trace_survives_repository_recreation(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    SessionRepository(database).create(session_id="session-1")
+    MessageRepository(database).append(
+        session_id="session-1",
+        message_id="message-rag",
+        message_type=MessageType.ASSISTANT,
+        content="相对序列号只是显示方式。",
+        rag_status="used",
+        rag_citations=[
+            RagMessageCitation(
+                knowledge_id="wireshark.tcp",
+                title="Wireshark TCP 分析",
+                chunk_id="wireshark.tcp:v1:c3",
+                reranker_score=0.9321,
+            )
+        ],
+    )
+
+    restored, _ = MessageRepository(WebDatabase(database.path)).list(
+        session_id="session-1"
+    )
+
+    assert restored[0].rag_status == "used"
+    assert restored[0].rag_citations[0].title == "Wireshark TCP 分析"
+    assert restored[0].rag_citations[0].reranker_score == 0.9321
 
 
 def test_concurrent_message_writes_are_serialized(tmp_path: Path) -> None:

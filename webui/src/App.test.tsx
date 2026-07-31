@@ -2,7 +2,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { App, KnowledgeReferences } from './App'
+import { App, KnowledgeReferences, RagMessageTrace } from './App'
 
 const session = { session_id: 'session-1', title: '下载测速诊断', status: 'draft', created_at: '2026-07-26T00:00:00Z', updated_at: '2026-07-26T00:00:00Z' }
 
@@ -71,6 +71,51 @@ it('将知识经验引用与报文证据分区展示', () => {
   expect(screen.getByRole('region', { name: '知识经验引用' })).toBeInTheDocument()
   expect(screen.getByText('TCP 窗口机制')).toBeInTheDocument()
   expect(screen.getByText(/rfc.window:v1/)).toBeInTheDocument()
+})
+
+it('展示普通对话使用的 RAG 引用和 reranker 相关度', () => {
+  render(<RagMessageTrace message={{
+    message_id: 'message-1',
+    session_id: 'session-1',
+    message_type: 'assistant',
+    content: '相对序列号只是显示方式。',
+    created_at: '2026-07-31T00:00:00Z',
+    evidence_count: 0,
+    rag_status: 'used',
+    rag_citations: [{
+      knowledge_id: 'wireshark.tcp',
+      title: 'Wireshark TCP 分析',
+      chunk_id: 'wireshark.tcp:v1:c3',
+      reranker_score: 0.9321,
+    }],
+  }} />)
+
+  expect(screen.getByRole('region', { name: 'RAG 检索状态' })).toBeInTheDocument()
+  expect(screen.getByText('RAG 已使用')).toBeInTheDocument()
+  expect(screen.getByText('Wireshark TCP 分析')).toBeInTheDocument()
+  expect(screen.getByText('wireshark.tcp:v1:c3')).toBeInTheDocument()
+  expect(screen.getByText('相关度 0.9321')).toBeInTheDocument()
+})
+
+it('展示 RAG 降级且不伪造 reranker 分数', () => {
+  render(<RagMessageTrace message={{
+    message_id: 'message-2',
+    session_id: 'session-1',
+    message_type: 'assistant',
+    content: '仍然返回普通回答。',
+    created_at: '2026-07-31T00:00:00Z',
+    evidence_count: 0,
+    rag_status: 'degraded',
+    rag_reason: '模型重排序降级：RERANK_TIMEOUT',
+    rag_citations: [{
+      knowledge_id: 'wireshark.tcp',
+      title: 'Wireshark TCP 分析',
+      chunk_id: 'wireshark.tcp:v1:c3',
+    }],
+  }} />)
+
+  expect(screen.getByText('RAG 已降级')).toBeInTheDocument()
+  expect(screen.getByText('相关度不可用')).toBeInTheDocument()
 })
 
 it('可从工作台进入知识管理视图', async () => {

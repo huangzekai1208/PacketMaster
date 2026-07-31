@@ -1,6 +1,6 @@
 # PacketMaster RAG V1 使用与运维手册
 
-更新日期：2026-07-27
+更新日期：2026-07-31
 
 ## 1. 适用范围
 
@@ -34,6 +34,8 @@ $env:EMBEDDING_DIMENSION = "2560"
 
 `qwen3-vl-embedding` 默认使用 `EMBEDDING_MULTIMODAL_BASE_URL` 指定的 DashScope 原生端点；`EMBEDDING_BASE_URL` 保留给 OpenAI 兼容的文本模型。可用 `EMBEDDING_TIMEOUT_SECONDS` 和 `EMBEDDING_MAX_RETRIES` 调整远程调用边界。不要把 `EMBEDDING_API_KEY` 写入 Git、知识源文件或诊断报告。
 
+默认启用百炼 `qwen3-rerank` 对 RRF 融合后的 Top 20 文本候选重排。它默认复用 `EMBEDDING_API_KEY`；只有凭据不同时才配置 `RERANK_API_KEY`。该模型不直接接收知识图片，多模态切片在重排阶段使用标题、正文和图片替代文本。重排服务异常时自动回退到 RRF 顺序，并在检索结果中记录降级 warning。
+
 Markdown 图片边界：仅接受 Markdown 所在目录及其子目录中的相对 `PNG`、`JPEG`、`WebP` 引用，单图不超过 5 MiB。导入时图片以 data URL 随切片持久化，因而后续重建索引不依赖原始文件路径；绝对路径、远程 URL、`data:` URL、目录逃逸和不支持格式都会被跳过并在预览中提示。Web 文本上传不包含本机文件树，不能导入图片。
 
 ## 3. 配置
@@ -44,9 +46,14 @@ $env:RAG_ENABLED = "true"
 $env:RAG_MODE = "shadow"
 $env:RAG_KEYWORD_TOP_K = "20"
 $env:RAG_VECTOR_TOP_K = "20"
+$env:RAG_VECTOR_TIMEOUT_SECONDS = "1.25"
+$env:RERANKER_ENABLED = "true"
+$env:RERANKER_MODEL = "qwen3-rerank"
+$env:RERANKER_CANDIDATE_TOP_K = "20"
+$env:RERANKER_TIMEOUT_SECONDS = "1.5"
 $env:RAG_FINAL_TOP_K = "8"
 $env:RAG_MAX_CONTEXT_BYTES = "24576"
-$env:RAG_TIMEOUT_SECONDS = "2"
+$env:RAG_TIMEOUT_SECONDS = "3"
 ```
 
 模式语义：
@@ -119,10 +126,13 @@ pkm knowledge reindex rfc.tcp-window:v1 --force
 | --- | --- | --- |
 | `EMBEDDING_AUTH_MISSING` | 未配置 DashScope API Key | 配置 `EMBEDDING_API_KEY` |
 | `EMBEDDING_SERVICE_UNAVAILABLE` | DashScope 网络、限流或服务异常 | 检查网络、配额和服务状态后重试 |
+| `RERANK_AUTH_FAILED` | DashScope Reranker 鉴权失败 | 检查 `RERANK_API_KEY`、模型权限和地域 |
+| `RERANK_SERVICE_UNAVAILABLE` | Reranker 超时、限流或服务异常 | 本次自动回退 RRF；检查网络、配额和服务状态 |
+| `INVALID_RERANK_OUTPUT` | Reranker 返回格式无效 | 检查模型 ID 和兼容 API 地址 |
 | `RAG_DATABASE_LOCKED` | 短时写锁冲突 | 等待其他管理命令结束后重试 |
 | `RAG_DATABASE_UNAVAILABLE` | DB 损坏或不可读 | 保持基础诊断，按备份恢复 |
 | `RAG_CAPACITY_EXCEEDED` | 正式切片超过 25,000 | 停用冗余知识或评估 Qdrant Server |
-| `RAG_RETRIEVAL_TIMEOUT` | 检索超过 2 秒 | 检查磁盘、模型和索引规模 |
+| `RAG_RETRIEVAL_TIMEOUT` | 检索超过总超时 | 检查磁盘、Embedding、Reranker 和索引规模 |
 
 ## 6. 离线评估与 active 门禁
 

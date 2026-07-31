@@ -73,6 +73,19 @@ export EMBEDDING_DIMENSION="2560"
 
 模型 API Key 和 Embedding API Key 都不会写入日志、Web API 响应或诊断报告。
 
+### DashScope Reranker 配置
+
+RAG 默认启用百炼 `qwen3-rerank`。它复用 `EMBEDDING_API_KEY`，仅在需要不同凭据时配置 `RERANK_API_KEY`：
+
+```bash
+export RERANKER_ENABLED="true"
+export RERANKER_MODEL="qwen3-rerank"
+export RERANKER_CANDIDATE_TOP_K="20"
+export RAG_FINAL_TOP_K="8"
+```
+
+`qwen3-rerank` 是文本重排模型。多模态知识的图片参与 `qwen3-vl-embedding` 召回，重排阶段使用切片标题、正文和图片替代文本。
+
 ## Web 工作台
 
 Web 模式默认只监听 `127.0.0.1`，启动 API、单 Worker 和已构建的 React 页面：
@@ -144,7 +157,7 @@ pkm knowledge health
 
 `active` 不是只改环境变量即可启用。必须先用不少于 50 条正式脱敏样本执行 `pkm knowledge evaluate` 并达到质量门槛；否则启动时自动降级为 `shadow`。完整知识管理、备份恢复、评估和离线部署步骤见 [RAG 使用与运维手册](docs/rag-operations.md)。
 
-当前检索使用 FTS5 关键词检索和 DashScope 向量检索并行召回，再用 RRF、适用环境过滤、权威性与案例相似度进行确定性排序。它没有接入独立 Cross-Encoder 或外部 reranker 模型。
+当前检索使用 FTS5/BM25 与 DashScope 向量检索并行召回，经过环境过滤和 RRF 融合后取 Top 20，再由百炼 `qwen3-rerank` 重排，最终按 `RAG_FINAL_TOP_K`（默认 8）和上下文预算交给模型。Reranker 超时、限流或服务异常时自动回退到 RRF 排序。
 
 ## CLI 诊断
 

@@ -11,6 +11,7 @@ from packetmaster.rag.contracts import RagMode
 from packetmaster.rag.database import KnowledgeDatabase, SQLiteKnowledgeStore
 from packetmaster.rag.embedding import build_embedding_provider
 from packetmaster.rag.query import KnowledgeQueryBuilder
+from packetmaster.rag.reranking import build_reranker
 from packetmaster.rag.retrieval import HybridKnowledgeRetriever
 from packetmaster.rag.validation import KnowledgeCitationValidator
 
@@ -85,8 +86,12 @@ def build_rag_runtime(settings: Settings) -> RagRuntime | None:
     retriever = HybridKnowledgeRetriever(
         store,
         provider,
+        reranker=build_reranker(settings),
         keyword_top_k=settings.rag_keyword_top_k,
         vector_top_k=settings.rag_vector_top_k,
+        vector_timeout_seconds=settings.rag_vector_timeout_seconds,
+        reranker_candidate_top_k=settings.reranker_candidate_top_k,
+        reranker_timeout_seconds=settings.reranker_timeout_seconds,
         final_top_k=settings.rag_final_top_k,
         max_context_bytes=settings.rag_max_context_bytes,
         timeout_seconds=settings.rag_timeout_seconds,
