@@ -1,4 +1,5 @@
 import asyncio
+import json
 import signal
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -74,6 +75,10 @@ def test_worker_persists_recoverable_failure(tmp_path: Path) -> None:
                 message="模型调用失败",
                 recoverable=True,
                 suggested_action="重试任务。",
+                details={
+                    "exception_type": "TimeoutError",
+                    "path": "/private/tmp/secret-capture.pcap",
+                },
             )
 
     worker = AnalysisWorker(repository, Service, worker_id="worker-1")
@@ -82,6 +87,11 @@ def test_worker_persists_recoverable_failure(tmp_path: Path) -> None:
     task = repository.get("analysis-1")
     assert task.status is TaskStatus.FAILED
     assert task.error_code == "MODEL_CALL_FAILED"
+    private = repository.private_details("analysis-1")
+    assert private is not None
+    assert json.loads(str(private["error_details_json"])) == {
+        "exception_type": "TimeoutError"
+    }
 
 
 def test_only_one_worker_can_claim_a_queued_task(tmp_path: Path) -> None:

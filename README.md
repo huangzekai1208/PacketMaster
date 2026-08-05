@@ -56,6 +56,28 @@ $env:MODEL_STRUCTURED_OUTPUT_METHOD = "auto"
 
 `auto` 会为 DeepSeek 兼容服务选择 `json_mode`，其他服务默认使用 `json_schema`。也可显式设置 `json_mode`、`json_schema` 或 `function_calling`。
 
+### LLM 调用可观测性
+
+默认记录诊断、普通对话、诊断追问、评测生成和 Judge 的脱敏调用元数据，
+包括模型名、Prompt SHA-256、输出 Schema、延迟、重试、错误码和 Provider
+返回的 Token usage。记录不包含用户消息、Prompt 正文、模型回答、API Key、
+原始报文或 Payload；Provider 不返回 usage 时保持未知，不做字符数估算。
+
+可选配置模型单价，用于估算调用成本：
+
+```bash
+export MODEL_INPUT_COST_PER_MILLION_USD="0.28"
+export MODEL_OUTPUT_COST_PER_MILLION_USD="0.42"
+export LLM_OBSERVABILITY_ENABLED="true"
+```
+
+单次报文诊断记录位于对应任务目录的 `llm_calls.jsonl`；Web 和 CLI 对话的
+全局记录位于 `artifacts/llm-observability/llm_calls.jsonl`。Web 聚合摘要接口为：
+
+```text
+GET /api/llm-observability/summary?limit=10000
+```
+
 ### DashScope Embedding 配置
 
 RAG 默认使用阿里云百炼 DashScope 的原生多模态模型 `qwen3-vl-embedding`（2560 维），不再提供本地 embedding 模型回退。Markdown 文件可导入同目录或子目录的相对 PNG、JPEG、WebP 图片（单图最多 5 MiB）；图片与所在章节首个切片的正文会做图文联合 Embedding。远程 URL、绝对路径、`data:` 图片及越出 Markdown 目录的引用会被忽略并提示警告。Web 的纯文本上传无法携带本机图片，请使用 CLI 文件导入。

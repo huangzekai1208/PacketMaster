@@ -23,7 +23,7 @@ from packetmaster.rag.contracts import (
     RetrievalCandidate,
 )
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 MAX_APPROVED_CHUNKS = 25_000
 _MIGRATION_1 = """
 CREATE TABLE knowledge_documents (
@@ -129,6 +129,103 @@ _MIGRATION_2 = """
 ALTER TABLE knowledge_chunks ADD COLUMN media_json TEXT NOT NULL DEFAULT '[]';
 """
 
+_MIGRATION_3 = """
+BEGIN IMMEDIATE;
+CREATE TABLE evaluation_runs (
+    run_id TEXT PRIMARY KEY,
+    run_class TEXT NOT NULL,
+    state TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    outcome TEXT,
+    dataset_fingerprint TEXT NOT NULL,
+    system_fingerprint TEXT NOT NULL,
+    identity_json TEXT NOT NULL,
+    run_json TEXT NOT NULL,
+    total_cases INTEGER NOT NULL,
+    completed_cases INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX evaluation_runs_state_idx
+    ON evaluation_runs(state, stage, updated_at DESC);
+CREATE INDEX evaluation_runs_identity_idx
+    ON evaluation_runs(system_fingerprint, dataset_fingerprint, created_at DESC);
+
+CREATE TABLE evaluation_case_results (
+    run_id TEXT NOT NULL REFERENCES evaluation_runs(run_id) ON DELETE CASCADE,
+    case_id TEXT NOT NULL,
+    variant TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, case_id, variant)
+);
+CREATE INDEX evaluation_case_results_case_idx
+    ON evaluation_case_results(case_id, variant, run_id);
+
+CREATE TABLE evaluation_generation_results (
+    run_id TEXT NOT NULL REFERENCES evaluation_runs(run_id) ON DELETE CASCADE,
+    case_id TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, case_id)
+);
+
+CREATE TABLE evaluation_judge_results (
+    run_id TEXT NOT NULL REFERENCES evaluation_runs(run_id) ON DELETE CASCADE,
+    case_id TEXT NOT NULL,
+    judge_fingerprint TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(run_id, case_id, judge_fingerprint)
+);
+
+CREATE TABLE evaluation_gate_decisions (
+    decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES evaluation_runs(run_id) ON DELETE RESTRICT,
+    outcome TEXT NOT NULL,
+    policy_fingerprint TEXT NOT NULL,
+    approved_by TEXT,
+    decision_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX evaluation_gate_decisions_run_idx
+    ON evaluation_gate_decisions(run_id, decision_id DESC);
+
+CREATE TABLE evaluation_baselines (
+    target TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES evaluation_runs(run_id) ON DELETE RESTRICT,
+    decision_id INTEGER NOT NULL
+        REFERENCES evaluation_gate_decisions(decision_id) ON DELETE RESTRICT,
+    set_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE evaluation_baseline_events (
+    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target TEXT NOT NULL,
+    run_id TEXT NOT NULL REFERENCES evaluation_runs(run_id) ON DELETE RESTRICT,
+    decision_id INTEGER NOT NULL
+        REFERENCES evaluation_gate_decisions(decision_id) ON DELETE RESTRICT,
+    set_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX evaluation_baseline_events_target_idx
+    ON evaluation_baseline_events(target, event_id DESC);
+
+CREATE TABLE evaluation_legacy_records (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    migrated_at TEXT NOT NULL
+);
+INSERT INTO evaluation_legacy_records(key, value_json, migrated_at)
+SELECT key, value, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+FROM knowledge_metadata
+WHERE key IN ('last_evaluation', 'active_gate_passed');
+PRAGMA user_version = 3;
+COMMIT;
+"""
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -190,6 +287,9 @@ class KnowledgeDatabase:
                     with connection:
                         connection.executescript(_MIGRATION_2)
                         connection.execute("PRAGMA user_version = 2")
+                    version = 2
+                if version < 3:
+                    connection.executescript(_MIGRATION_3)
                 self._check_fts5(connection)
         except sqlite3.OperationalError as exc:
             if "fts5" in str(exc).lower() or "tokenizer" in str(exc).lower():
@@ -465,6 +565,24 @@ class SQLiteKnowledgeStore:
                   AND e.content_hash = c.content_hash
                 """,
                 (version_id, model_name, dimension),
+            ).fetchall()
+        return {str(row[0]) for row in rows}
+
+    def approved_chunk_ids(self) -> set[str]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT c.chunk_id
+                FROM knowledge_chunks c
+                JOIN knowledge_documents d
+                  ON d.knowledge_id = c.knowledge_id
+                 AND d.current_version_id = c.version_id
+                WHERE d.status = ? AND c.status = ?
+                """,
+                (
+                    KnowledgeStatus.APPROVED.value,
+                    KnowledgeStatus.APPROVED.value,
+                ),
             ).fetchall()
         return {str(row[0]) for row in rows}
 

@@ -22,7 +22,11 @@ from packetmaster.rag.embedding import (
     EmbeddingIndexer,
     build_embedding_provider,
 )
-from packetmaster.rag.evaluation import RagEvaluator, load_evaluation_cases
+from packetmaster.rag.evaluation import (
+    RagEvaluator,
+    load_evaluation_cases,
+    validate_evaluation_corpus,
+)
 from packetmaster.rag.importer import ImportMetadata, KnowledgeImporter
 from packetmaster.rag.reranking import build_reranker
 from packetmaster.rag.retrieval import HybridKnowledgeRetriever
@@ -256,6 +260,10 @@ def evaluate_command(
     try:
         settings = Settings.load()
         database = _database(settings)
+        cases = load_evaluation_cases(dataset)
+        validate_evaluation_corpus(
+            cases, SQLiteKnowledgeStore(database).approved_chunk_ids()
+        )
         provider = _embedding_provider(settings)
         store = SQLiteKnowledgeStore(
             database,
@@ -275,7 +283,6 @@ def evaluate_command(
             max_context_bytes=settings.rag_max_context_bytes,
             timeout_seconds=settings.rag_timeout_seconds,
         )
-        cases = load_evaluation_cases(dataset)
         report = asyncio.run(RagEvaluator(retriever).evaluate(cases))
         store.record_evaluation(report)
         rendered = json.dumps(

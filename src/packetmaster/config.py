@@ -22,6 +22,7 @@ except ModuleNotFoundError as exc:
     LOCAL_STRUCTURED_OUTPUT_METHOD = "auto"
     LOCAL_EMBEDDING_API_KEY: str | None = None
     LOCAL_RERANK_API_KEY: str | None = None
+    LOCAL_JUDGE_API_KEY: str | None = None
     LOCAL_RAG_ENABLED = False
     LOCAL_RAG_MODE = RagMode.SHADOW
     LOCAL_RAG_KEYWORD_TOP_K = 20
@@ -36,6 +37,7 @@ else:
     LOCAL_STRUCTURED_OUTPUT_METHOD = _local_config.MODEL_STRUCTURED_OUTPUT_METHOD
     LOCAL_EMBEDDING_API_KEY = getattr(_local_config, "EMBEDDING_API_KEY", None)
     LOCAL_RERANK_API_KEY = getattr(_local_config, "RERANK_API_KEY", None)
+    LOCAL_JUDGE_API_KEY = getattr(_local_config, "JUDGE_API_KEY", None)
     LOCAL_RAG_ENABLED = bool(getattr(_local_config, "RAG_ENABLED", False))
     LOCAL_RAG_MODE = RagMode(getattr(_local_config, "RAG_MODE", RagMode.SHADOW))
     LOCAL_RAG_KEYWORD_TOP_K = int(getattr(_local_config, "RAG_KEYWORD_TOP_K", 20))
@@ -65,6 +67,9 @@ class Settings(BaseSettings):
         "auto", "json_schema", "function_calling", "json_mode"
     ] = LOCAL_STRUCTURED_OUTPUT_METHOD
     model_timeout_seconds: int = Field(default=120, gt=0)
+    model_input_cost_per_million_usd: float | None = Field(default=None, ge=0)
+    model_output_cost_per_million_usd: float | None = Field(default=None, ge=0)
+    llm_observability_enabled: bool = True
     evidence_timeout_seconds: int = Field(default=120, gt=0, le=600)
     speed_analyzer_mode: str = "real"
     speed_analyzer_script: Path | None = None
@@ -130,6 +135,22 @@ class Settings(BaseSettings):
     reranker_timeout_seconds: float = Field(default=1.5, gt=0, le=30)
     reranker_max_retries: int = Field(default=0, ge=0, le=3)
     reranker_max_document_chars: int = Field(default=3_500, ge=256, le=12_000)
+    judge_enabled: bool = False
+    judge_model: str = Field(default="qwen-plus", min_length=1, max_length=256)
+    judge_model_revision: str | None = Field(default=None, max_length=256)
+    judge_api_key: SecretStr | None = Field(
+        default=(SecretStr(LOCAL_JUDGE_API_KEY) if LOCAL_JUDGE_API_KEY else None),
+        exclude=True,
+        repr=False,
+    )
+    judge_base_url: str = Field(
+        default="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        min_length=1,
+    )
+    judge_timeout_seconds: float = Field(default=30, gt=0, le=120)
+    judge_max_retries: int = Field(default=1, ge=0, le=3)
+    judge_temperature: float = Field(default=0, ge=0, le=0)
+    judge_max_tokens: int = Field(default=2_000, ge=256, le=8_000)
     rag_keyword_top_k: int = Field(default=LOCAL_RAG_KEYWORD_TOP_K, ge=1, le=100)
     rag_vector_top_k: int = Field(default=LOCAL_RAG_VECTOR_TOP_K, ge=1, le=100)
     rag_vector_timeout_seconds: float = Field(default=1.25, gt=0, le=30)

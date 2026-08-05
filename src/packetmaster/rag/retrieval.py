@@ -15,6 +15,12 @@ from packetmaster.rag.contracts import (
     KnowledgeType,
     RetrievalCandidate,
 )
+from packetmaster.rag.evaluation_contracts import EvaluationVariant
+from packetmaster.rag.evaluation_retrieval import (
+    EvaluationRetrievalTrace,
+    RetrievalTraceItem,
+    RetrievalVariantTrace,
+)
 
 _AUTHORITY_BOOST = {
     AuthorityLevel.HIGH: 0.08,
@@ -70,9 +76,15 @@ class HybridKnowledgeRetriever:
         self.fail_on_vector_error = fail_on_vector_error
 
     async def retrieve(self, query: KnowledgeQuery) -> KnowledgeBundle:
+        bundle, _ = await self.retrieve_with_trace(query)
+        return bundle
+
+    async def retrieve_with_trace(
+        self, query: KnowledgeQuery
+    ) -> tuple[KnowledgeBundle, EvaluationRetrievalTrace]:
         try:
             return await asyncio.wait_for(
-                self._retrieve(query), timeout=self.timeout_seconds
+                self._retrieve_with_trace(query), timeout=self.timeout_seconds
             )
         except TimeoutError as exc:
             raise AppError(
@@ -82,7 +94,9 @@ class HybridKnowledgeRetriever:
                 suggested_action="本次诊断将跳过 RAG，请检查知识索引性能。",
             ) from exc
 
-    async def _retrieve(self, query: KnowledgeQuery) -> KnowledgeBundle:
+    async def _retrieve_with_trace(
+        self, query: KnowledgeQuery
+    ) -> tuple[KnowledgeBundle, EvaluationRetrievalTrace]:
         # 关键词和向量召回互不依赖，并发执行可控制外部 embedding 的额外延迟。
         keyword_task = asyncio.create_task(
             self.store.keyword_search(query, limit=self.keyword_top_k)
@@ -117,25 +131,67 @@ class HybridKnowledgeRetriever:
             candidates = sorted(
                 merged, key=lambda item: (-item.fusion_score, item.chunk_id)
             )[: self.reranker_candidate_top_k]
-        ranked = await self._rerank(query, candidates, warnings)
-        selected, truncated = self._select(ranked)
+        ranked, reranker_executed, reranker_degraded = await self._rerank(
+            query, candidates, warnings
+        )
+        selected, truncated, excluded = self._select(ranked)
         total_bytes = sum(len(item.content.encode("utf-8")) for item in selected)
-        return KnowledgeBundle(
+        bundle = KnowledgeBundle(
             query_id=query.query_id,
             results=selected,
             total_content_bytes=total_bytes,
             truncated=truncated,
             warnings=warnings,
         )
+        trace = EvaluationRetrievalTrace(
+            query_id=query.query_id,
+            variants=[
+                RetrievalVariantTrace(
+                    variant=EvaluationVariant.BM25,
+                    items=self._trace_items(keyword, EvaluationVariant.BM25),
+                    degraded=any("关键词检索降级" in item for item in warnings),
+                    warnings=[
+                        item for item in warnings if "关键词检索降级" in item
+                    ],
+                ),
+                RetrievalVariantTrace(
+                    variant=EvaluationVariant.VECTOR,
+                    items=self._trace_items(vector, EvaluationVariant.VECTOR),
+                    degraded=any("向量检索降级" in item for item in warnings),
+                    warnings=[item for item in warnings if "向量检索降级" in item],
+                ),
+                RetrievalVariantTrace(
+                    variant=EvaluationVariant.RRF,
+                    items=self._trace_items(merged, EvaluationVariant.RRF),
+                ),
+                RetrievalVariantTrace(
+                    variant=EvaluationVariant.RERANKED,
+                    executed=reranker_executed,
+                    degraded=reranker_degraded,
+                    items=self._trace_items(ranked, EvaluationVariant.RERANKED),
+                    warnings=[
+                        item for item in warnings if "模型重排序降级" in item
+                    ],
+                ),
+            ],
+            final_chunk_ids=[item.chunk_id for item in selected],
+            excluded_reasons=excluded,
+            provider_calls={
+                "embedding-query": 1,
+                "reranker": int(reranker_executed or reranker_degraded),
+            },
+            truncated=truncated,
+        )
+        return bundle, trace
 
     async def _rerank(
         self,
         query: KnowledgeQuery,
         candidates: list[RetrievalCandidate],
         warnings: list[str],
-    ) -> list[RetrievalCandidate]:
+    ) -> tuple[list[RetrievalCandidate], bool, bool]:
         if self.reranker is None or len(candidates) < 2:
-            return candidates
+            return candidates, False, False
         documents = [f"{item.title}\n{item.content}" for item in candidates]
         try:
             results = await asyncio.wait_for(
@@ -146,17 +202,21 @@ class HybridKnowledgeRetriever:
             )
         except TimeoutError:
             warnings.append("模型重排序降级：RERANK_TIMEOUT")
-            return candidates
+            return candidates, False, True
         except Exception as exc:
             if isinstance(exc, AppError):
                 warnings.append(f"模型重排序降级：{exc.code}")
             else:
                 warnings.append("模型重排序降级：RERANK_FAILED")
-            return candidates
-        return [
-            candidates[index].model_copy(update={"rerank_score": score})
-            for index, score in results
-        ]
+            return candidates, False, True
+        return (
+            [
+                candidates[index].model_copy(update={"rerank_score": score})
+                for index, score in results
+            ],
+            True,
+            False,
+        )
 
     async def _vector_search(self, query: KnowledgeQuery) -> list[RetrievalCandidate]:
         vector = await self.embedding_provider.embed_query(query.query_text)
@@ -278,7 +338,7 @@ class HybridKnowledgeRetriever:
 
     def _select(
         self, candidates: list[RetrievalCandidate]
-    ) -> tuple[list[RetrievalCandidate], bool]:
+    ) -> tuple[list[RetrievalCandidate], bool, dict[str, str]]:
         by_type: dict[KnowledgeType, list[RetrievalCandidate]] = defaultdict(list)
         for item in candidates:
             by_type[item.knowledge_type].append(item)
@@ -288,14 +348,50 @@ class HybridKnowledgeRetriever:
                 ordered.append(item)
         ordered.extend(item for item in candidates if item not in ordered)
         selected: list[RetrievalCandidate] = []
+        excluded: dict[str, str] = {}
         total_bytes = 0
         for item in ordered:
             if len(selected) >= self.final_top_k:
-                break
+                excluded[item.chunk_id] = "final_top_k"
+                continue
             size = len(item.content.encode("utf-8"))
             if total_bytes + size > self.max_context_bytes:
+                excluded[item.chunk_id] = "context_budget"
                 continue
             selected.append(item)
             total_bytes += size
         truncated = len(selected) < len(candidates)
-        return selected, truncated
+        return selected, truncated, excluded
+
+    @staticmethod
+    def _trace_items(
+        candidates: list[RetrievalCandidate], variant: EvaluationVariant
+    ) -> list[RetrievalTraceItem]:
+        items: list[RetrievalTraceItem] = []
+        for rank, item in enumerate(candidates[:100], start=1):
+            score: float | None = None
+            business_score: float | None = None
+            if variant is EvaluationVariant.VECTOR:
+                score = item.rerank_score
+            elif variant is EvaluationVariant.RRF:
+                score = item.fusion_score
+                business_score = item.rerank_score
+            elif variant is EvaluationVariant.RERANKED:
+                score = item.rerank_score
+            items.append(
+                RetrievalTraceItem(
+                    chunk_id=item.chunk_id,
+                    rank=rank,
+                    score=score,
+                    keyword_rank=item.keyword_rank,
+                    vector_rank=item.vector_rank,
+                    fusion_score=(
+                        item.fusion_score
+                        if variant
+                        in {EvaluationVariant.RRF, EvaluationVariant.RERANKED}
+                        else None
+                    ),
+                    business_score=business_score,
+                )
+            )
+        return items

@@ -2,7 +2,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { App, KnowledgeReferences, RagMessageTrace } from './App'
+import { AnalysisFailurePanel, App, KnowledgeReferences, LLMUsageBadge, RagMessageTrace } from './App'
 
 const session = { session_id: 'session-1', title: '下载测速诊断', status: 'draft', created_at: '2026-07-26T00:00:00Z', updated_at: '2026-07-26T00:00:00Z' }
 
@@ -34,6 +34,49 @@ it('呈现工作台、历史会话和任务视图标签', async () => {
   expect(input).toBeInTheDocument()
   expect(input.closest('.chat-view')).toHaveClass('chat-view-initial')
   expect(screen.getByText('你好，我是 PacketMaster')).toBeInTheDocument()
+})
+
+it('展示模型 Token、成本和调用明细', () => {
+  render(<LLMUsageBadge costConfigured value={{
+    call_count: 3,
+    succeeded_count: 3,
+    failed_count: 0,
+    retry_count: 1,
+    calls_with_token_usage: 3,
+    input_tokens: 10_000,
+    output_tokens: 2_345,
+    total_tokens: 12_345,
+    estimated_cost_usd: 0.0123,
+    operation_counts: { general_chat: 3 },
+  }} />)
+
+  expect(screen.getByText('12K Token')).toBeInTheDocument()
+  expect(screen.getAllByText('$0.0123')).toHaveLength(2)
+  expect(screen.getByText('10,000')).toBeInTheDocument()
+  expect(screen.getByText('2,345')).toBeInTheDocument()
+})
+
+it('展示分析失败原因和受控技术详情', () => {
+  render(<AnalysisFailurePanel value={{
+    analysis: {
+      analysis_id: 'analysis-1', session_id: 'session-1', status: 'failed',
+      stage_message: '分析失败', capture: { capture_id: 'capture-1', file_name: 'test.pcap', size_bytes: 10 },
+      standard_bandwidth_mbps: 1000, actual_bandwidth_mbps: 400, target: 'download',
+      created_at: '2026-08-05T00:00:00Z', updated_at: '2026-08-05T00:00:01Z', elapsed_seconds: 1,
+      error_code: 'MODEL_CALL_FAILED',
+    },
+    report_available: false,
+    recoverable: true,
+    error_message: '模型调用失败',
+    suggested_action: '检查模型配置后重试。',
+    error_details: { exception_type: 'TimeoutError', attempts: 2 },
+  }} />)
+
+  expect(screen.getByRole('alert', { name: '分析错误详情' })).toBeInTheDocument()
+  expect(screen.getByText('MODEL_CALL_FAILED')).toBeInTheDocument()
+  expect(screen.getByText('模型调用失败')).toBeInTheDocument()
+  expect(screen.getByText(/exception_type=TimeoutError/)).toBeInTheDocument()
+  expect(screen.getByText('检查模型配置后重试。')).toBeInTheDocument()
 })
 
 it('可从会话任务栏删除历史会话', async () => {

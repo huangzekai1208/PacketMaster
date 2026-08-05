@@ -181,6 +181,7 @@ class HealthStatus(WebContract):
     status: Literal["ok"] = "ok"
     version: str = Field(min_length=1, max_length=64)
     model_configured: bool
+    model_cost_configured: bool
     tshark_configured: bool
 
 
@@ -322,7 +323,11 @@ class AnalysisDetail(WebContract):
     analysis: AnalysisSummary
     report_available: bool = False
     recoverable: bool = False
+    error_message: str = Field(default="", max_length=2_000)
     suggested_action: str = Field(default="", max_length=1_000)
+    error_details: dict[str, str | int | float | bool | None] = Field(
+        default_factory=dict, max_length=16
+    )
 
 
 class ReportResult(WebContract):

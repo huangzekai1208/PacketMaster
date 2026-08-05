@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 
 from packetmaster.chat_graph import build_chat_graph
 from packetmaster.domain import ChatSessionState, ConversationTurn
 from packetmaster.errors import AppError
+from packetmaster.llm_observability import LLMObservationCollector
 from packetmaster.web.analysis import AnalysisReadService
 from packetmaster.web.contracts import ChatTurnResult, Page, TaskStatus
 from packetmaster.web.conversation import redact_message
@@ -29,11 +31,13 @@ class AnalysisChatService:
         turns: ChatTurnRepository,
         model: Any,
         rag_runtime: Any | None = None,
+        llm_observer: LLMObservationCollector | None = None,
     ) -> None:
         self.reads = reads
         self.turns = turns
         self.model = model
         self.rag_runtime = rag_runtime
+        self.llm_observer = llm_observer
 
     async def ask(self, analysis_id: str, question: str) -> ChatTurnResult:
         detail = self.reads.detail(analysis_id)
@@ -64,7 +68,13 @@ class AnalysisChatService:
             diagnosis_model=self.model,
             rag_runtime=self.rag_runtime,
         )
-        result = await graph.ainvoke({"session": session})
+        scope = (
+            self.llm_observer.scope(f"analysis-{analysis_id}")
+            if self.llm_observer is not None
+            else nullcontext([])
+        )
+        with scope:
+            result = await graph.ainvoke({"session": session})
         answer = result.get("answer")
         if answer is None:
             raise AppError(

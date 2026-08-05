@@ -75,13 +75,21 @@ class AnalysisReadService:
         analysis = self._analysis(analysis_id)
         private = self.tasks.private_details(analysis_id) or {}
         report_path = private.get("report_path")
+        try:
+            error_details = json.loads(str(private.get("error_details_json") or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            error_details = {}
+        if not isinstance(error_details, dict):
+            error_details = {}
         return AnalysisDetail(
             analysis=analysis,
             report_available=bool(
                 report_path and self._safe_path(report_path).is_file()
             ),
             recoverable=bool(private.get("recoverable", False)),
+            error_message=str(private.get("error_message") or ""),
             suggested_action=str(private.get("suggested_action") or ""),
+            error_details=error_details,
         )
 
     def report(self, analysis_id: str) -> ReportResult:

@@ -28,6 +28,7 @@ class ArtifactPaths:
     analysis_db: Path
     report_json: Path
     trace_jsonl: Path
+    llm_calls_jsonl: Path
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,7 @@ class ArtifactManager:
             analysis_db=task_root / "analysis.sqlite",
             report_json=task_root / "report.json",
             trace_jsonl=task_root / "trace.jsonl",
+            llm_calls_jsonl=task_root / "llm_calls.jsonl",
         )
 
     def preflight(self, input_path: Path, target: Target | str) -> ResourceBudget:
@@ -99,6 +101,11 @@ class ArtifactManager:
 
     def append_trace(self, paths: ArtifactPaths, event: dict[str, Any]) -> None:
         with paths.trace_jsonl.open("a", encoding="utf-8") as trace_file:
+            trace_file.write(json.dumps(event, ensure_ascii=False))
+            trace_file.write("\n")
+
+    def append_llm_call(self, paths: ArtifactPaths, event: dict[str, Any]) -> None:
+        with paths.llm_calls_jsonl.open("a", encoding="utf-8") as trace_file:
             trace_file.write(json.dumps(event, ensure_ascii=False))
             trace_file.write("\n")
 

@@ -22,7 +22,7 @@ from packetmaster.web.contracts import (
     WebMessage,
 )
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 _MIGRATIONS = {
     1: """
         CREATE TABLE sessions (
@@ -159,6 +159,10 @@ _MIGRATIONS = {
     """,
     7: """
         UPDATE sessions SET title = '新会话' WHERE title = '新诊断';
+    """,
+    8: """
+        ALTER TABLE analyses ADD COLUMN error_details_json TEXT
+            NOT NULL DEFAULT '{}';
     """,
 }
 

@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "policy_id": "rag-production",
+  "version": 1,
+  "description": "迁移现有 V1 阻断门槛；新增 V2 指标在完成生产基线与 Judge 校准前仅报告。",
+  "minimum_formal_cases": 50,
+  "metrics": {
+    "recall_at_5": {"minimum": 0.85, "blocking": true},
+    "citation_accuracy": {"minimum": 0.95, "blocking": true},
+    "applicability_accuracy": {"minimum": 0.95, "blocking": true},
+    "cause_coverage_delta": {"exclusive_minimum": 0.0, "blocking": true},
+    "unsupported_conclusion_rate": {"maximum": 0.0, "blocking": true},
+    "p95_latency_seconds": {"maximum": 2.0, "blocking": true},
+    "recall_at_8": {"minimum": 0.0, "blocking": false},
+    "recall_at_20": {"minimum": 0.0, "blocking": false},
+    "ndcg_at_8": {"minimum": 0.0, "blocking": false},
+    "ndcg_at_20": {"minimum": 0.0, "blocking": false}
+  },
+  "critical_metrics": {
+    "recall_at_20": {"minimum": 1.0, "blocking": false}
+  },
+  "judge": {
+    "enabled": false,
+    "calibrated": false,
+    "blocking": false,
+    "minimum_scores": {
+      "faithfulness": 3,
+      "answer_relevance": 3,
+      "citation_correctness": 3,
+      "evidence_consistency": 3,
+      "completeness": 3
+    },
+    "fail_on_severe_violation": true
+  },
+  "require_clean_revision": true,
+  "require_human_approval": true
+}

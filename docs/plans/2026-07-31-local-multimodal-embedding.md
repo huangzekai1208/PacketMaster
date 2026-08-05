@@ -64,11 +64,11 @@
 
 - 修改 `src/packetmaster/rag/database.py`
 - 修改 `tests/unit/test_rag_database.py`
-- 增加旧 schema v2 数据库夹具
+- 增加旧 schema v2 和评测 schema v3 数据库夹具
 
 步骤：
 
-- [ ] 为 schema v3 编写迁移失败测试和旧库升级测试。
+- [ ] 为 schema v4 编写迁移失败测试，并覆盖旧 schema v2/v3 升级。
 - [ ] 新增 `embedding_profiles`、多 Profile embeddings、重建 job 和按 Profile 评测记录。
 - [ ] 将旧 `knowledge_embeddings` 迁移到 legacy Profile，不丢失向量。
 - [ ] 将主键改为 `(chunk_id, profile_id)`，增加 profile、dimension 和 chunk 查询索引。
@@ -238,7 +238,7 @@
 
 ## 最终发布门禁
 
-- [ ] 旧数据库 schema v2 升级无数据损失。
+- [ ] 旧数据库 schema v2/v3 升级无数据损失。
 - [ ] DashScope 回归评测不低于当前基线。
 - [ ] 本地服务 CPU 文本和图文 smoke test 通过。
 - [ ] 候选重建期间 active RAG 持续可用。

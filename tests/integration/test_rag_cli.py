@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,7 @@ from typer.testing import CliRunner
 import packetmaster.cli as cli
 import packetmaster.rag.cli as rag_cli
 from packetmaster.config import Settings
+from packetmaster.rag.database import KnowledgeDatabase, SQLiteKnowledgeStore
 
 runner = CliRunner()
 
@@ -126,3 +128,46 @@ def test_knowledge_health_does_not_print_database_path(
     assert result.exit_code == 0, result.output
     assert "FTS5" in result.output
     assert str(rag_settings.knowledge_database_path) not in result.output
+
+
+def test_evaluate_rejects_corpus_mismatch_without_overwriting_gate(
+    tmp_path: Path, rag_settings: Settings
+) -> None:
+    database = KnowledgeDatabase(rag_settings.knowledge_database_path)
+    database.initialize()
+
+    class PassedReport:
+        production_ready = True
+        case_count = 50
+
+        @staticmethod
+        def model_dump(mode="json"):
+            return {"production_ready": True, "case_count": 50}
+
+    store = SQLiteKnowledgeStore(database)
+    store.record_evaluation(PassedReport())
+    dataset = tmp_path / "mismatched-evaluation.json"
+    dataset.write_text(
+        json.dumps(
+            [
+                {
+                    "case_id": "eval.mismatch.001",
+                    "query": {
+                        "query_id": "eval.mismatch.001",
+                        "query_text": "窗口",
+                    },
+                    "relevant_chunk_ids": ["missing:v1:chunk-0"],
+                    "relevance_grades": {"missing:v1:chunk-0": 3},
+                    "expected_causes": ["窗口限制"],
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(cli.app, ["knowledge", "evaluate", str(dataset)])
+
+    assert result.exit_code == 2
+    assert "EVALUATION_CORPUS_MISMATCH" in result.output
+    assert store.active_gate_passed() is True

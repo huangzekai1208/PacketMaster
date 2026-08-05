@@ -1,16 +1,22 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from packetmaster.errors import AppError
 from packetmaster.rag.contracts import KnowledgeBundle, RetrievalCandidate
 from packetmaster.rag.evaluation import (
     EvaluationCase,
     RagEvaluator,
+    convert_v1_cases_to_v2_draft,
     load_evaluation_cases,
+    validate_evaluation_corpus,
 )
+from packetmaster.rag.evaluation_contracts import EvaluationDatasetV2
 
 
 def _candidate(chunk_id: str) -> RetrievalCandidate:
@@ -125,3 +131,73 @@ def test_production_gate_requires_at_least_fifty_cases() -> None:
     )
 
     assert RagEvaluator.production_gate([case], perfect_metrics=True) is False
+
+
+def test_validate_evaluation_corpus_rejects_missing_relevant_chunks() -> None:
+    case = EvaluationCase(
+        case_id="q1",
+        query={"query_id": "q1", "query_text": "窗口"},
+        relevant_chunk_ids=["a:c1", "b:c1"],
+        relevance_grades={"a:c1": 3, "b:c1": 2},
+        expected_causes=["窗口限制"],
+    )
+
+    with pytest.raises(AppError) as raised:
+        validate_evaluation_corpus([case], {"a:c1", "unused:c1"})
+
+    assert raised.value.code == "EVALUATION_CORPUS_MISMATCH"
+    assert raised.value.details == {
+        "labeled_chunk_count": 2,
+        "available_chunk_count": 2,
+        "missing_chunk_count": 1,
+        "missing_chunk_ids": ["b:c1"],
+    }
+
+
+def test_v1_production_thresholds_are_frozen() -> None:
+    passing = {
+        "recall_at_5": 0.85,
+        "citation_accuracy": 0.95,
+        "applicability_accuracy": 0.95,
+        "cause_coverage_delta": 0.01,
+        "unsupported_conclusion_rate": 0.0,
+        "p95_latency_seconds": 2.0,
+    }
+
+    assert RagEvaluator._passes(50, passing) is True
+    for key, failing_value in {
+        "recall_at_5": 0.849,
+        "citation_accuracy": 0.949,
+        "applicability_accuracy": 0.949,
+        "cause_coverage_delta": 0.0,
+        "unsupported_conclusion_rate": 0.001,
+        "p95_latency_seconds": 2.001,
+    }.items():
+        metrics = {**passing, key: failing_value}
+        assert RagEvaluator._passes(50, metrics) is False, key
+
+
+def test_v1_conversion_produces_an_explicitly_incomplete_v2_draft() -> None:
+    case = EvaluationCase(
+        case_id="q1",
+        query={"query_id": "q1", "query_text": "窗口"},
+        relevant_chunk_ids=["knowledge.tcp:v1:chunk-1"],
+        relevance_grades={"knowledge.tcp:v1:chunk-1": 3},
+        expected_causes=["窗口限制"],
+        answer_citation_chunk_ids=["knowledge.tcp:v1:chunk-1"],
+    )
+
+    draft = convert_v1_cases_to_v2_draft(
+        [case],
+        dataset_id="rag.tcp.v2",
+        version=2,
+        policy_id="rag-production",
+        created_at=datetime(2026, 7, 31, tzinfo=UTC),
+    )
+
+    assert draft["cases"][0]["relevant_chunk_ids"] == case.relevant_chunk_ids
+    assert draft["cases"][0]["critical"] is None
+    assert draft["cases"][0]["expected_facts"] == []
+    assert draft["manifest"]["reviewed_by"] == []
+    with pytest.raises(ValidationError):
+        EvaluationDatasetV2.model_validate(draft)

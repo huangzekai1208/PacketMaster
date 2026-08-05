@@ -8,6 +8,7 @@ export interface RagMessageCitation { knowledge_id: string; title: string; chunk
 export interface Message { message_id: string; session_id: string; message_type: string; content: string; created_at: string; analysis_id?: string; evidence_count: number; rag_status?: 'used' | 'degraded'; rag_reason?: string; rag_citations?: RagMessageCitation[] }
 export interface Parameters { capture?: Capture; standard_bandwidth_mbps?: number; actual_bandwidth_mbps?: number; target: Target; missing: string[]; assumptions: string[]; ambiguities: string[]; ready_for_confirmation: boolean }
 export interface Analysis { analysis_id: string; session_id: string; status: TaskStatus; stage_message: string; progress_fraction?: number; capture: Capture; standard_bandwidth_mbps: number; actual_bandwidth_mbps: number; target: Target; created_at: string; updated_at: string; elapsed_seconds: number; processed_packets?: number; error_code?: string }
+export interface AnalysisDetail { analysis: Analysis; report_available: boolean; recoverable: boolean; error_message: string; suggested_action: string; error_details: Record<string, string | number | boolean | null> }
 export interface SessionDetail { session: Session; messages: Page<Message>; parameters?: Parameters }
 export interface Page<T> { items: T[]; total: number; offset: number; limit: number }
 export interface KnowledgeCitation { knowledge_id: string; version_id: string; chunk_id: string; title: string; knowledge_type: string; source_name: string; source_location?: string; supported_statement: string; supporting_quote: string; applicability_note?: string }
@@ -26,6 +27,7 @@ export interface KnowledgeImportRequest { file_name: string; content: string; kn
 export interface KnowledgePreview { knowledge_id: string; version_id: string; chunk_count: number; risk_flags: string[]; warnings: string[]; requires_risk_acknowledgement: boolean; chunks: Array<{ chunk_id: string; heading_path: string[]; content: string }> }
 export interface KnowledgeMutation { version_id: string; indexed_chunks: number; status?: KnowledgeStatus }
 export interface KnowledgeEvaluationStatus { active_gate_passed: boolean; requested_mode: string; effective_mode: string; last_report?: Record<string, number | boolean> }
+export interface LLMUsageSummary { call_count: number; succeeded_count: number; failed_count: number; retry_count: number; calls_with_token_usage: number; input_tokens: number; output_tokens: number; total_tokens: number; estimated_cost_usd: number; operation_counts: Record<string, number> }
 
 interface Envelope<T> { ok: true; data: T }
 interface ErrorEnvelope { ok: false; error: { code: string; message: string; suggested_action: string; recoverable: boolean } }
@@ -44,7 +46,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  health: () => request<{ status: string; model_configured: boolean; tshark_configured: boolean }>('/api/health'),
+  health: () => request<{ status: string; model_configured: boolean; model_cost_configured: boolean; tshark_configured: boolean }>('/api/health'),
+  llmUsage: () => request<LLMUsageSummary>('/api/llm-observability/summary?limit=10000'),
   sessions: () => request<Page<Session>>('/api/sessions?limit=50'),
   createSession: () => request<Session>('/api/sessions', { method: 'POST', body: '{}' }),
   deleteSession: (id: string) => request<{ deleted: boolean }>(`/api/sessions/${id}`, { method: 'DELETE' }),
@@ -65,7 +68,7 @@ export const api = {
   },
   recent: () => request<Capture[]>('/api/captures/recent'),
   confirm: (id: string) => request<Analysis>(`/api/sessions/${id}/confirm`, { method: 'POST', body: '{}' }),
-  analysis: (id: string) => request<{ analysis: Analysis; report_available: boolean; recoverable: boolean; suggested_action: string }>(`/api/analyses/${id}`),
+  analysis: (id: string) => request<AnalysisDetail>(`/api/analyses/${id}`),
   cancel: (id: string) => request<Analysis>(`/api/analyses/${id}/cancel`, { method: 'POST' }),
   retry: (id: string) => request<Analysis>(`/api/analyses/${id}/retry`, { method: 'POST' }),
   report: (id: string) => request<{ analysis_id: string; report: Report }>(`/api/analyses/${id}/report`),

@@ -17,6 +17,28 @@ from packetmaster.web.contracts import TaskStatus
 from packetmaster.web.database import WebDatabase
 from packetmaster.web.tasks import AnalysisTaskRepository, ClaimedAnalysis
 
+_PUBLIC_ERROR_DETAIL_KEYS = {
+    "attempts",
+    "exception_type",
+    "returncode",
+    "rss_peak_bytes",
+    "size_bytes",
+    "structured_output_method",
+    "timeout_seconds",
+}
+
+
+def _public_error_details(
+    values: dict[str, Any],
+) -> dict[str, str | int | float | bool | None]:
+    """Expose bounded diagnostic metadata without paths, payloads, or secrets."""
+    result: dict[str, str | int | float | bool | None] = {}
+    for key in sorted(_PUBLIC_ERROR_DETAIL_KEYS & values.keys()):
+        value = values[key]
+        if value is None or isinstance(value, str | int | float | bool):
+            result[key] = value if not isinstance(value, str) else value[:256]
+    return result
+
 
 class AnalysisWorker:
     def __init__(
@@ -119,6 +141,7 @@ class AnalysisWorker:
                     stage_message="分析部分完成",
                     error_code=outcome.error.code,
                     error_message=outcome.error.message,
+                    error_details=_public_error_details(outcome.error.details),
                     recoverable=outcome.error.recoverable,
                     suggested_action=outcome.error.suggested_action,
                     report_path=report_path,
@@ -152,16 +175,18 @@ class AnalysisWorker:
                 stage_message="分析失败",
                 error_code=exc.code,
                 error_message=exc.message,
+                error_details=_public_error_details(exc.details),
                 recoverable=exc.recoverable,
                 suggested_action=exc.suggested_action,
             )
-        except Exception:
+        except Exception as exc:
             self.repository.transition(
                 task.analysis_id,
                 TaskStatus.FAILED,
                 stage_message="分析失败",
                 error_code="WORKER_TASK_FAILED",
                 error_message="后台分析任务异常",
+                error_details={"exception_type": exc.__class__.__name__},
                 recoverable=True,
                 suggested_action="请重试该分析任务。",
             )

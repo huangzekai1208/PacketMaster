@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from packetmaster.rag.contracts import (
     KnowledgeBundle,
     KnowledgeQuery,
     RetrievalCandidate,
 )
+
+if TYPE_CHECKING:
+    from packetmaster.rag.judging import JudgeAssessment, JudgeRequest
 
 
 @runtime_checkable
@@ -33,6 +36,17 @@ class Reranker(Protocol):
     async def rerank(
         self, query: str, documents: Sequence[str], *, top_n: int
     ) -> list[tuple[int, float]]: ...
+
+
+@runtime_checkable
+class JudgeProvider(Protocol):
+    @property
+    def model_name(self) -> str: ...
+
+    @property
+    def model_revision(self) -> str: ...
+
+    async def judge(self, request: JudgeRequest) -> JudgeAssessment: ...
 
 
 @runtime_checkable

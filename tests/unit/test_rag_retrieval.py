@@ -11,6 +11,8 @@ from packetmaster.rag.contracts import (
     KnowledgeQuery,
     RetrievalCandidate,
 )
+from packetmaster.rag.evaluation_contracts import EvaluationCaseV2, EvaluationVariant
+from packetmaster.rag.evaluation_retrieval import EvaluationRetrievalRunner
 from packetmaster.rag.retrieval import HybridKnowledgeRetriever
 
 
@@ -356,3 +358,114 @@ async def test_retrieval_timeout_has_stable_error() -> None:
     with pytest.raises(AppError) as raised:
         await retriever.retrieve(KnowledgeQuery(query_id="q1", query_text="窗口"))
     assert raised.value.code == "RAG_RETRIEVAL_TIMEOUT"
+
+
+@pytest.mark.asyncio
+async def test_trace_records_four_variants_and_reuses_one_query_vector() -> None:
+    class CountingProvider(FakeProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def embed_query(self, text):
+            self.calls += 1
+            return await super().embed_query(text)
+
+    shared = _candidate("shared:v1:c1")
+    keyword = _candidate("keyword:v1:c1")
+    vector = _candidate("vector:v1:c1")
+    provider = CountingProvider()
+    retriever = HybridKnowledgeRetriever(
+        FakeStore([shared, keyword], [vector, shared]),
+        provider,
+        reranker=FakeReranker(order=[1, 0, 2]),
+    )
+
+    bundle, trace = await retriever.retrieve_with_trace(
+        KnowledgeQuery(query_id="q1", query_text="窗口")
+    )
+
+    assert provider.calls == 1
+    assert [item.variant for item in trace.variants] == list(EvaluationVariant)
+    assert [item.chunk_id for item in trace.variant(EvaluationVariant.BM25).items] == [
+        shared.chunk_id,
+        keyword.chunk_id,
+    ]
+    assert trace.variant(EvaluationVariant.BM25).items[0].score is None
+    assert trace.variant(EvaluationVariant.VECTOR).items[0].score is not None
+    assert trace.variant(EvaluationVariant.RRF).items[0].fusion_score is not None
+    assert trace.variant(EvaluationVariant.RERANKED).executed is True
+    assert (
+        trace.variant(EvaluationVariant.RERANKED).items[0].chunk_id
+        == vector.chunk_id
+    )
+    assert trace.final_chunk_ids == [item.chunk_id for item in bundle.results]
+    assert trace.provider_calls == {"embedding-query": 1, "reranker": 1}
+
+
+@pytest.mark.asyncio
+async def test_trace_marks_reranker_degradation_and_selection_reasons() -> None:
+    class FailingReranker(FakeReranker):
+        async def rerank(self, query, documents, *, top_n):
+            raise AppError(
+                code="RERANK_SERVICE_UNAVAILABLE",
+                message="failed",
+                recoverable=True,
+                suggested_action="fallback",
+            )
+
+    candidates = [
+        _candidate(f"doc-{index}:v1:c1", content="x" * 100)
+        for index in range(4)
+    ]
+    retriever = HybridKnowledgeRetriever(
+        FakeStore(candidates, candidates),
+        FakeProvider(),
+        reranker=FailingReranker(),
+        final_top_k=2,
+        max_context_bytes=150,
+    )
+
+    _, trace = await retriever.retrieve_with_trace(
+        KnowledgeQuery(query_id="q1", query_text="窗口")
+    )
+
+    reranked = trace.variant(EvaluationVariant.RERANKED)
+    assert reranked.executed is False
+    assert reranked.degraded is True
+    assert "RERANK_SERVICE_UNAVAILABLE" in reranked.warnings[0]
+    assert "context_budget" in set(trace.excluded_reasons.values())
+    assert trace.truncated is True
+
+
+@pytest.mark.asyncio
+async def test_evaluation_runner_converts_trace_to_variant_results() -> None:
+    relevant = _candidate("knowledge.tcp:v1:chunk-1")
+    irrelevant = _candidate("knowledge.other:v1:chunk-1")
+    retriever = HybridKnowledgeRetriever(
+        FakeStore([irrelevant], [relevant]), FakeProvider()
+    )
+    case = EvaluationCaseV2(
+        case_id="case-1",
+        query={"query_id": "case-1", "query_text": "窗口"},
+        relevant_chunk_ids=[relevant.chunk_id],
+        relevance_grades={relevant.chunk_id: 3},
+        critical=True,
+        question_type="protocol",
+        expected_facts=["窗口限制"],
+        applicable_chunk_ids=[relevant.chunk_id],
+        annotated_by="annotator",
+        reviewed_by="reviewer",
+        label_change_reason="initial",
+    )
+
+    _, _, results = await EvaluationRetrievalRunner(retriever).evaluate_case(
+        "run-1", case
+    )
+
+    by_variant = {item.variant: item for item in results}
+    assert by_variant[EvaluationVariant.BM25].failure_labels == ["BM25_MISS"]
+    assert by_variant[EvaluationVariant.VECTOR].relevant_ranks == {
+        relevant.chunk_id: 1
+    }
+    assert by_variant[EvaluationVariant.RRF].relevant_ranks
+    assert all(item.latency_seconds > 0 for item in results)

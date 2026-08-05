@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Annotated, Any
 
@@ -317,7 +318,19 @@ class GeneralChatAnswer(ContractModel):
     """Response contract for conversation before an analysis is active."""
 
     answer: str = Field(min_length=1, max_length=8_000)
+    knowledge_citations: list[str] = Field(default_factory=list, max_length=32)
+    limitations: list[str] = Field(default_factory=list, max_length=32)
     follow_up_suggestions: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("knowledge_citations")
+    @classmethod
+    def validate_knowledge_citations(cls, values: list[str]) -> list[str]:
+        pattern = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+        if any(pattern.fullmatch(value) is None for value in values):
+            raise ValueError("knowledge citations must contain valid chunk IDs")
+        if len(set(values)) != len(values):
+            raise ValueError("knowledge citations must be unique")
+        return values
 
 
 class ConversationTurn(ContractModel):

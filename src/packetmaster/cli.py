@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import hashlib
 import json
 import re
 import time
@@ -33,6 +34,10 @@ from packetmaster.domain import (
     Target,
 )
 from packetmaster.errors import AppError
+from packetmaster.llm_observability import (
+    JsonlLLMCallObserver,
+    LLMObservationCollector,
+)
 from packetmaster.mcp.client import SpeedMCPClient
 from packetmaster.mcp.server import create_server
 from packetmaster.model import DiagnosisModel
@@ -65,6 +70,18 @@ _DIRECTION_LABELS = {
     "upload": "上行方向",
     "both": "上下行方向",
 }
+
+
+def _cli_llm_observer(settings: Settings) -> LLMObservationCollector | None:
+    if not settings.llm_observability_enabled:
+        return None
+    path = settings.artifact_root / "llm-observability" / "llm_calls.jsonl"
+    return LLMObservationCollector(JsonlLLMCallObserver(path))
+
+
+def _cli_trace_id(kind: str, value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+    return f"cli-{kind}-{digest}"
 
 
 def _localize_progress_message(message: str) -> str:
@@ -225,13 +242,21 @@ async def _answer_chat_question(
         evidence_timeout_seconds=settings.evidence_timeout_seconds,
     )
     server = create_server(adapter)
+    observer = _cli_llm_observer(settings)
+    model = DiagnosisModel(settings=settings, observer=observer)
     async with SpeedMCPClient(server) as client:
         graph = build_chat_graph(
             mcp_client=client,
-            diagnosis_model=DiagnosisModel(settings=settings),
+            diagnosis_model=model,
             rag_runtime=build_rag_runtime(settings),
         )
-        result = await graph.ainvoke({"session": session.state})
+        if observer is None:
+            result = await graph.ainvoke({"session": session.state})
+        else:
+            with observer.scope(
+                _cli_trace_id("analysis", session.state.analysis_id or "unknown")
+            ):
+                result = await graph.ainvoke({"session": session.state})
     error = result.get("error")
     if error:
         return "问答暂时失败：" + str(error.get("message", "未知错误")), error
@@ -287,7 +312,8 @@ def _answer_general_chat(
     session: ChatSession, settings: Settings, question: str, rag_runtime=None
 ) -> str:
     session.state.question = question
-    model = DiagnosisModel(settings=settings)
+    observer = _cli_llm_observer(settings)
+    model = DiagnosisModel(settings=settings, observer=observer)
 
     async def answer_with_knowledge():
         knowledge = None
@@ -313,7 +339,11 @@ def _answer_general_chat(
             knowledge=knowledge,
         )
 
-    answer = asyncio.run(answer_with_knowledge())
+    if observer is None:
+        answer = asyncio.run(answer_with_knowledge())
+    else:
+        with observer.scope(_cli_trace_id("session", session.state.session_id)):
+            answer = asyncio.run(answer_with_knowledge())
     session.append_turn(question, answer.answer)
     return answer.answer
 
@@ -392,17 +422,28 @@ def chat() -> None:
             )
             if route is ConversationRoute.GENERAL:
                 try:
-                    typer.echo(_answer_general_chat(session, settings, raw, rag_runtime))
+                    typer.echo(
+                        _answer_general_chat(session, settings, raw, rag_runtime)
+                    )
                 except Exception as exc:
                     typer.echo(f"对话暂时失败，请稍后重试：{exc}")
                 continue
 
             if session.state.analysis_id is None:
                 try:
-                    model = DiagnosisModel(settings=settings)
-                    intent, extraction = asyncio.run(
-                        model.parse_intent(raw, session.state.pending_intent)
-                    )
+                    observer = _cli_llm_observer(settings)
+                    model = DiagnosisModel(settings=settings, observer=observer)
+                    if observer is None:
+                        intent, extraction = asyncio.run(
+                            model.parse_intent(raw, session.state.pending_intent)
+                        )
+                    else:
+                        with observer.scope(
+                            _cli_trace_id("session", session.state.session_id)
+                        ):
+                            intent, extraction = asyncio.run(
+                                model.parse_intent(raw, session.state.pending_intent)
+                            )
                     if path_registry is None:
                         path_registry = extraction.registry
                     else:

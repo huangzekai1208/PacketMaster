@@ -19,6 +19,13 @@ from starlette.exceptions import HTTPException
 from packetmaster.config import Settings
 from packetmaster.domain import EvidenceRequest, EvidenceResponse, EvidenceType, Target
 from packetmaster.errors import AppError
+from packetmaster.llm_observability import (
+    JsonlLLMCallObserver,
+    LLMObservationCollector,
+    LLMObservationSummary,
+    load_llm_calls,
+    summarize_llm_calls,
+)
 from packetmaster.model import DiagnosisModel
 from packetmaster.rag.contracts import KnowledgeStatus, KnowledgeType
 from packetmaster.rag.database import KnowledgeDatabase, SQLiteKnowledgeStore
@@ -97,6 +104,19 @@ def create_app(
     capture_upload_root = (
         runtime.artifact_root / "web-captures"
     ).expanduser().resolve()
+    llm_calls_path = (
+        runtime.artifact_root / "llm-observability" / "llm_calls.jsonl"
+    ).expanduser().resolve()
+    llm_observer = (
+        LLMObservationCollector(JsonlLLMCallObserver(llm_calls_path))
+        if runtime.llm_observability_enabled
+        else None
+    )
+    model = conversation_model or DiagnosisModel(
+        settings=runtime, observer=llm_observer
+    )
+    if conversation_model is not None and isinstance(model, DiagnosisModel):
+        model.observer = llm_observer or model.observer
     conversation = WebConversationService(
         sessions=SessionRepository(database),
         messages=MessageRepository(database),
@@ -106,8 +126,9 @@ def create_app(
             allowed_roots=[*runtime.web_allowed_capture_roots, capture_upload_root],
         ),
         tasks=AnalysisTaskRepository(database),
-        model=conversation_model or DiagnosisModel(settings=runtime),
+        model=model,
         rag_runtime=build_rag_runtime(runtime),
+        llm_observer=llm_observer,
     )
     app.state.conversation = conversation
     tasks = AnalysisTaskRepository(database)
@@ -117,6 +138,7 @@ def create_app(
         turns=ChatTurnRepository(database),
         model=conversation.model,
         rag_runtime=conversation.rag_runtime,
+        llm_observer=llm_observer,
     )
     app.state.analysis_reads = analysis_reads
     app.state.analysis_chat = analysis_chat
@@ -272,8 +294,31 @@ def create_app(
             data=HealthStatus(
                 version=_version(),
                 model_configured=runtime.model_api_key is not None,
+                model_cost_configured=(
+                    runtime.model_input_cost_per_million_usd is not None
+                    and runtime.model_output_cost_per_million_usd is not None
+                ),
                 tshark_configured=_tshark_available(runtime.tshark_path),
             ),
+            request_id=request.state.request_id,
+        )
+
+    @app.get(
+        "/api/llm-observability/summary",
+        response_model=SuccessEnvelope[LLMObservationSummary],
+        tags=["system"],
+    )
+    async def llm_observability_summary(
+        request: Request,
+        limit: int = Query(default=10_000, ge=1, le=100_000),
+    ) -> SuccessEnvelope[LLMObservationSummary]:
+        values = (
+            load_llm_calls(llm_calls_path, limit=limit)
+            if runtime.llm_observability_enabled
+            else []
+        )
+        return SuccessEnvelope(
+            data=summarize_llm_calls(values),
             request_id=request.state.request_id,
         )
 

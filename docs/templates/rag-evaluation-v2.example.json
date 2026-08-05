@@ -1,0 +1,53 @@
+{
+  "schema_version": 2,
+  "manifest": {
+    "dataset_id": "rag.tcp.example",
+    "version": 1,
+    "language": "zh-CN",
+    "domain": "TCP 诊断",
+    "created_at": "2026-07-31T00:00:00Z",
+    "created_by": "network-annotator",
+    "reviewed_by": ["network-reviewer"],
+    "change_summary": "创建 V2 示例数据集。",
+    "annotation_guideline_version": "rag-annotation-v2",
+    "policy_id": "rag-production",
+    "allowed_knowledge_ids": ["tutorial.csdn-wireshark-tcp"],
+    "external_judge_allowed": false
+  },
+  "cases": [
+    {
+      "case_id": "eval.tcp.example.001",
+      "query": {
+        "query_id": "eval.tcp.example.001",
+        "query_text": "为什么 Wireshark 三次握手中的 seq 显示为 0？",
+        "keywords": ["Wireshark", "相对序列号", "seq=0"],
+        "knowledge_types": ["runbook"]
+      },
+      "relevant_chunk_ids": [
+        "tutorial.csdn-wireshark-tcp:v1:chunk-1"
+      ],
+      "relevance_grades": {
+        "tutorial.csdn-wireshark-tcp:v1:chunk-1": 3
+      },
+      "critical": true,
+      "question_type": "protocol-explanation",
+      "expected_facts": [
+        "Wireshark 默认显示相对序列号",
+        "真实初始序列号并不固定为 0"
+      ],
+      "expected_causes": ["Wireshark 相对序列号显示"],
+      "forbidden_conclusions": ["TCP 初始序列号固定为 0"],
+      "applicable_chunk_ids": [
+        "tutorial.csdn-wireshark-tcp:v1:chunk-1"
+      ],
+      "applicability_note": "适用于 Wireshark 开启相对序列号显示的抓包。",
+      "reference_answer": "seq=0 是 Wireshark 的相对显示，不代表真实 ISN 固定为零。",
+      "approved_citation_chunk_ids": [
+        "tutorial.csdn-wireshark-tcp:v1:chunk-1"
+      ],
+      "annotated_by": "network-annotator",
+      "reviewed_by": "network-reviewer",
+      "label_change_reason": "首次建立双人复核的 V2 标注。"
+    }
+  ]
+}

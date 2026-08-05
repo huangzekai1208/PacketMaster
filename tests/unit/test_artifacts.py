@@ -26,6 +26,7 @@ def test_create_makes_isolated_task_directories(tmp_path: Path) -> None:
     assert first.root != second.root
     assert first.coverage_json == first.root / "coverage.json"
     assert first.trace_jsonl == first.root / "trace.jsonl"
+    assert first.llm_calls_jsonl == first.root / "llm_calls.jsonl"
 
 
 @pytest.mark.parametrize(

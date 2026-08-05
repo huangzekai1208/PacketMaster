@@ -99,7 +99,7 @@ def test_knowledge_database_initializes_idempotently_with_fts5(tmp_path: Path) -
             "SELECT name FROM sqlite_master WHERE name = 'knowledge_chunks_fts'"
         ).fetchone()
 
-    assert version == 2
+    assert version == 3
     assert str(journal_mode).lower() == "wal"
     assert fts is not None
 
@@ -121,6 +121,7 @@ def test_save_draft_round_trips_without_entering_search(tmp_path: Path) -> None:
         KnowledgeQuery(query_id="query-1", query_text="零窗口"), limit=10
     )
     assert results == []
+    assert store.approved_chunk_ids() == set()
 
 
 def test_save_draft_round_trips_chunk_media(tmp_path: Path) -> None:

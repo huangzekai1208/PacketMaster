@@ -35,7 +35,7 @@ def test_database_initialization_is_versioned_idempotent_and_uses_wal(
             )
         }
 
-    assert version == 7
+    assert version == 8
     assert journal_mode == "wal"
     assert {
         "sessions",
@@ -52,6 +52,7 @@ def test_schema_migration_renames_legacy_default_sessions(tmp_path: Path) -> Non
     database = _database(tmp_path)
     session = SessionRepository(database).create(title="新诊断")
     with database.transaction(immediate=True) as connection:
+        connection.execute("ALTER TABLE analyses DROP COLUMN error_details_json")
         connection.execute("PRAGMA user_version = 6")
 
     database.initialize()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -197,7 +198,8 @@ class AnalysisTaskRepository:
         with self.database.connect() as connection:
             row = connection.execute(
                 """
-                SELECT report_path, recoverable, suggested_action, error_message
+                SELECT report_path, recoverable, suggested_action, error_message,
+                       error_details_json
                 FROM analyses WHERE analysis_id = ?
                 """,
                 (analysis_id,),
@@ -221,6 +223,7 @@ class AnalysisTaskRepository:
         stage_message: str = "",
         error_code: str | None = None,
         error_message: str | None = None,
+        error_details: dict[str, str | int | float | bool | None] | None = None,
         recoverable: bool = False,
         suggested_action: str = "",
         report_path: str | None = None,
@@ -259,6 +262,7 @@ class AnalysisTaskRepository:
                 SET status = ?, stage_message = ?, updated_at = ?,
                     started_at = ?, finished_at = ?, error_code = ?,
                     error_message = ?, recoverable = ?, suggested_action = ?,
+                    error_details_json = ?,
                     report_path = COALESCE(?, report_path)
                 WHERE analysis_id = ?
                 """,
@@ -272,6 +276,7 @@ class AnalysisTaskRepository:
                     error_message,
                     int(recoverable),
                     suggested_action,
+                    json.dumps(error_details or {}, ensure_ascii=False),
                     report_path,
                     analysis_id,
                 ),

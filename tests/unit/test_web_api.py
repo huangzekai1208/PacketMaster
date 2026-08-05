@@ -4,6 +4,8 @@ from fastapi.testclient import TestClient
 
 import packetmaster.web.api as web_api
 from packetmaster.config import Settings
+from packetmaster.domain import GeneralChatAnswer
+from packetmaster.model import DiagnosisModel
 from packetmaster.web.api import create_app
 
 
@@ -28,11 +30,90 @@ def test_health_uses_public_configuration_flags_and_security_headers(
 
     assert response.status_code == 200
     assert response.json()["data"]["model_configured"] is True
+    assert response.json()["data"]["model_cost_configured"] is False
     assert response.json()["data"]["tshark_configured"] is False
     assert "test-key" not in response.text
     assert response.headers["x-request-id"] == "request-1"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
+
+
+def test_llm_observability_summary_is_empty_without_model_calls(
+    tmp_path: Path,
+) -> None:
+    response = _client(tmp_path).get("/api/llm-observability/summary")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "call_count": 0,
+        "succeeded_count": 0,
+        "failed_count": 0,
+        "retry_count": 0,
+        "calls_with_token_usage": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "estimated_cost_usd": 0.0,
+        "operation_counts": {},
+    }
+
+
+class _ObservedRaw:
+    usage_metadata = {
+        "input_tokens": 40,
+        "output_tokens": 10,
+        "total_tokens": 50,
+    }
+
+
+class _ObservedStructured:
+    async def ainvoke(self, messages):
+        return {
+            "parsed": GeneralChatAnswer(answer="这是不会进入观测文件的回答。"),
+            "raw": _ObservedRaw(),
+            "parsing_error": None,
+        }
+
+
+class _ObservedClient:
+    def with_structured_output(self, schema, *, method, include_raw=False):
+        assert include_raw is True
+        return _ObservedStructured()
+
+
+def test_web_general_chat_records_metadata_without_message_content(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        web_database_path=tmp_path / "web.sqlite",
+        artifact_root=tmp_path / "artifacts",
+        knowledge_database_path=tmp_path / "knowledge.sqlite",
+        rag_enabled=False,
+        tshark_path="definitely-not-installed-tshark",
+        web_allowed_capture_roots=[tmp_path],
+        model_name="observed-model",
+    )
+    model = DiagnosisModel(client=_ObservedClient(), settings=settings)
+    client = TestClient(
+        create_app(settings, testing=True, conversation_model=model)
+    )
+    session = client.post("/api/sessions", json={"title": "新会话"}).json()["data"]
+
+    response = client.post(
+        f"/api/sessions/{session['session_id']}/messages",
+        json={"content": "这是不能进入观测文件的用户问题"},
+    )
+    summary = client.get("/api/llm-observability/summary")
+
+    assert response.status_code == 200
+    assert summary.json()["data"]["call_count"] == 1
+    assert summary.json()["data"]["total_tokens"] == 50
+    content = (
+        tmp_path / "artifacts" / "llm-observability" / "llm_calls.jsonl"
+    ).read_text(encoding="utf-8")
+    assert "用户问题" not in content
+    assert "不会进入观测文件的回答" not in content
+    assert "session-" in content
 
 
 def test_corrupt_rag_database_does_not_block_web_startup(tmp_path: Path) -> None:

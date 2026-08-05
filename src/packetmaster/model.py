@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import time
+from collections.abc import Mapping
+from datetime import datetime
 from importlib.resources import files
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.exceptions import OutputParserException
 from pydantic import BaseModel, ValidationError
@@ -28,15 +33,28 @@ from packetmaster.intent import (
     extract_explicit_bandwidth,
     merge_intent,
 )
+from packetmaster.llm_observability import (
+    LLMCallObserver,
+    LLMCallRecord,
+    LLMCallStatus,
+    LLMTokenUsage,
+    NullLLMCallObserver,
+    token_usage_from_mapping,
+    utc_now,
+)
 from packetmaster.rag.contracts import KnowledgeAugmentation, KnowledgeBundle
 
 
 class DiagnosisModel:
     def __init__(
-        self, client: Any | None = None, settings: Settings | None = None
+        self,
+        client: Any | None = None,
+        settings: Settings | None = None,
+        observer: LLMCallObserver | None = None,
     ) -> None:
         self.settings = settings
         self._client = client
+        self.observer = observer or NullLLMCallObserver()
 
     def _structured_output_method(self) -> str:
         settings = self.settings or Settings.load()
@@ -94,6 +112,10 @@ class DiagnosisModel:
     async def _invoke(
         self, schema: type[BaseModel], prompt_name: str, payload: dict[str, Any]
     ) -> BaseModel:
+        started_at = utc_now()
+        started = time.perf_counter()
+        attempts = 0
+        usage = LLMTokenUsage()
         client = self._client_or_error()
         serialized_payload = json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
@@ -124,16 +146,49 @@ class DiagnosisModel:
                 "content": serialized_payload,
             },
         ]
-        structured = client.with_structured_output(schema, method=method)
+        include_raw = True
+        try:
+            structured = client.with_structured_output(
+                schema, method=method, include_raw=True
+            )
+        except TypeError as exc:
+            if "include_raw" not in str(exc):
+                raise
+            include_raw = False
+            structured = client.with_structured_output(schema, method=method)
         try:
             for attempt in range(2):
+                attempts = attempt + 1
                 try:
                     result = await structured.ainvoke(messages)
-                    return (
-                        result
-                        if isinstance(result, schema)
-                        else schema.model_validate(result)
+                    parsed, raw, parsing_error = self._structured_result(
+                        result, include_raw=include_raw
                     )
+                    usage = self._merge_usage(usage, self._extract_usage(raw))
+                    if parsing_error is not None:
+                        recovered = self._recover_structured_result(raw, schema)
+                        if recovered is None:
+                            raise parsing_error
+                        parsed = recovered
+                    validated = (
+                        parsed
+                        if isinstance(parsed, schema)
+                        else schema.model_validate(parsed)
+                    )
+                    self._record_call(
+                        prompt_name=prompt_name,
+                        system_prompt=system_prompt,
+                        schema=schema,
+                        method=method,
+                        started_at=started_at,
+                        started=started,
+                        attempts=attempts,
+                        input_bytes=len(serialized_payload.encode("utf-8")),
+                        message_count=len(messages),
+                        status=LLMCallStatus.SUCCEEDED,
+                        usage=usage,
+                    )
+                    return validated
                 except (OutputParserException, ValidationError) as exc:
                     if attempt == 1:
                         raise AppError(
@@ -163,16 +218,43 @@ class DiagnosisModel:
                         },
                     ]
         except TimeoutError as exc:
-            raise AppError(
+            error = AppError(
                 code="MODEL_TIMEOUT",
                 message="Diagnosis model timed out",
                 recoverable=True,
                 suggested_action="Retry or increase the model timeout.",
-            ) from exc
-        except AppError:
+            )
+            self._record_failed_call(
+                error,
+                prompt_name,
+                system_prompt,
+                schema,
+                method,
+                started_at,
+                started,
+                attempts,
+                serialized_payload,
+                messages,
+                usage,
+            )
+            raise error from exc
+        except AppError as error:
+            self._record_failed_call(
+                error,
+                prompt_name,
+                system_prompt,
+                schema,
+                method,
+                started_at,
+                started,
+                max(1, attempts),
+                serialized_payload,
+                messages,
+                usage,
+            )
             raise
         except Exception as exc:
-            raise AppError(
+            error = AppError(
                 code="MODEL_CALL_FAILED",
                 message="Diagnosis model call failed",
                 recoverable=True,
@@ -181,7 +263,184 @@ class DiagnosisModel:
                     "exception_type": exc.__class__.__name__,
                     "structured_output_method": method,
                 },
-            ) from exc
+            )
+            self._record_failed_call(
+                error,
+                prompt_name,
+                system_prompt,
+                schema,
+                method,
+                started_at,
+                started,
+                max(1, attempts),
+                serialized_payload,
+                messages,
+                usage,
+            )
+            raise error from exc
+
+    @staticmethod
+    def _structured_result(
+        result: object, *, include_raw: bool
+    ) -> tuple[object, object | None, Exception | None]:
+        if include_raw and isinstance(result, Mapping) and "parsed" in result:
+            parsing_error = result.get("parsing_error")
+            return (
+                result.get("parsed"),
+                result.get("raw"),
+                parsing_error if isinstance(parsing_error, Exception) else None,
+            )
+        return result, None, None
+
+    @staticmethod
+    def _recover_structured_result(
+        raw: object | None, schema: type[BaseModel]
+    ) -> BaseModel | None:
+        """Recover valid JSON wrapped in fences or surrounding prose.
+
+        Some OpenAI-compatible gateways report a parser error even when the
+        response contains a valid JSON object. Recovery remains strict: the
+        extracted object must pass the requested Pydantic schema unchanged.
+        """
+        content = getattr(raw, "content", None)
+        if isinstance(content, list):
+            content = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, Mapping) and isinstance(item.get("text"), str)
+            )
+        if not isinstance(content, str) or not content.strip():
+            return None
+        candidate = content.strip()
+        if candidate.startswith("```"):
+            lines = candidate.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            candidate = "\n".join(lines).strip()
+        start, end = candidate.find("{"), candidate.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            value = json.loads(candidate[start : end + 1])
+            return schema.model_validate(value)
+        except (json.JSONDecodeError, TypeError, ValidationError):
+            return None
+
+    @staticmethod
+    def _extract_usage(raw: object | None) -> LLMTokenUsage:
+        if raw is None:
+            return LLMTokenUsage()
+        direct = getattr(raw, "usage_metadata", None)
+        metadata = getattr(raw, "response_metadata", None)
+        token_usage = (
+            metadata.get("token_usage") if isinstance(metadata, Mapping) else None
+        )
+        values = direct if isinstance(direct, Mapping) else token_usage
+        return token_usage_from_mapping(values)
+
+    @staticmethod
+    def _merge_usage(left: LLMTokenUsage, right: LLMTokenUsage) -> LLMTokenUsage:
+        def add(first: int | None, second: int | None) -> int | None:
+            if first is None:
+                return second
+            if second is None:
+                return first
+            return first + second
+
+        return LLMTokenUsage(
+            input_tokens=add(left.input_tokens, right.input_tokens),
+            output_tokens=add(left.output_tokens, right.output_tokens),
+            total_tokens=add(left.total_tokens, right.total_tokens),
+        )
+
+    def _estimated_cost(self, usage: LLMTokenUsage) -> float | None:
+        settings = self.settings or Settings.load()
+        if (
+            usage.input_tokens is None
+            or usage.output_tokens is None
+            or settings.model_input_cost_per_million_usd is None
+            or settings.model_output_cost_per_million_usd is None
+        ):
+            return None
+        return (
+            usage.input_tokens * settings.model_input_cost_per_million_usd
+            + usage.output_tokens * settings.model_output_cost_per_million_usd
+        ) / 1_000_000
+
+    def _record_call(
+        self,
+        *,
+        prompt_name: str,
+        system_prompt: str,
+        schema: type[BaseModel],
+        method: str,
+        started_at: datetime,
+        started: float,
+        attempts: int,
+        input_bytes: int,
+        message_count: int,
+        status: LLMCallStatus,
+        usage: LLMTokenUsage,
+        error_code: str | None = None,
+    ) -> None:
+        try:
+            settings = self.settings or Settings.load()
+            value = LLMCallRecord(
+                call_id=uuid4().hex,
+                operation=prompt_name.removesuffix(".md"),
+                model_name=settings.model_name,
+                prompt_name=prompt_name,
+                prompt_sha256=hashlib.sha256(
+                    system_prompt.encode("utf-8")
+                ).hexdigest(),
+                output_schema=schema.__name__,
+                structured_output_method=method,
+                started_at=started_at,
+                latency_seconds=time.perf_counter() - started,
+                attempt_count=attempts,
+                retry_count=attempts - 1,
+                input_bytes=input_bytes,
+                message_count=message_count,
+                status=status,
+                usage=usage,
+                estimated_cost_usd=self._estimated_cost(usage),
+                error_code=error_code,
+            )
+            self.observer.record(value)
+        except Exception:
+            # Telemetry must never break diagnosis or expose user data in errors.
+            return
+
+    def _record_failed_call(
+        self,
+        error: AppError,
+        prompt_name: str,
+        system_prompt: str,
+        schema: type[BaseModel],
+        method: str,
+        started_at: datetime,
+        started: float,
+        attempts: int,
+        serialized_payload: str,
+        messages: list[dict[str, str]],
+        usage: LLMTokenUsage,
+    ) -> None:
+        self._record_call(
+            prompt_name=prompt_name,
+            system_prompt=system_prompt,
+            schema=schema,
+            method=method,
+            started_at=started_at,
+            started=started,
+            attempts=attempts,
+            input_bytes=len(serialized_payload.encode("utf-8")),
+            message_count=len(messages),
+            status=LLMCallStatus.FAILED,
+            usage=usage,
+            error_code=error.code,
+        )
 
     async def generate_hypotheses(
         self, context: DiagnosisContext
@@ -307,7 +566,9 @@ class DiagnosisModel:
                 turn.model_dump(mode="json") if hasattr(turn, "model_dump") else turn
                 for turn in (turns or [])[-8:]
             ],
-            "retrieved_knowledge": knowledge.model_dump(mode="json") if knowledge else None,
+            "retrieved_knowledge": (
+                knowledge.model_dump(mode="json") if knowledge else None
+            ),
         }
         result = await self._invoke(GeneralChatAnswer, "general_chat.md", payload)
         return GeneralChatAnswer.model_validate(result)

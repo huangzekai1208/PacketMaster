@@ -6,10 +6,12 @@ import json
 import math
 import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 from pydantic import Field, model_validator
 
+from packetmaster.errors import AppError
 from packetmaster.rag.base import KnowledgeRetriever
 from packetmaster.rag.contracts import Identifier, KnowledgeQuery, RagContract
 
@@ -96,6 +98,90 @@ def load_evaluation_cases(path: Path) -> list[EvaluationCase]:
     if len(set(identifiers)) != len(identifiers):
         raise ValueError("evaluation dataset contains duplicate case IDs")
     return cases
+
+
+def validate_evaluation_corpus(
+    cases: list[EvaluationCase], available_chunk_ids: set[str]
+) -> None:
+    """Reject labels that do not belong to the current approved corpus."""
+    relevant = {
+        chunk_id for case in cases for chunk_id in case.relevant_chunk_ids
+    }
+    missing = sorted(relevant - available_chunk_ids)
+    if not missing:
+        return
+    raise AppError(
+        code="EVALUATION_CORPUS_MISMATCH",
+        message="评测标注切片与当前正式知识库不匹配",
+        recoverable=True,
+        suggested_action="请切换到对应知识快照，或人工迁移标注切片后重试。",
+        details={
+            "labeled_chunk_count": len(relevant),
+            "available_chunk_count": len(available_chunk_ids),
+            "missing_chunk_count": len(missing),
+            "missing_chunk_ids": missing[:10],
+        },
+    )
+
+
+def convert_v1_cases_to_v2_draft(
+    cases: list[EvaluationCase],
+    *,
+    dataset_id: str,
+    version: int,
+    policy_id: str,
+    created_at: datetime,
+) -> dict[str, object]:
+    """Copy known V1 labels without inventing V2 review decisions."""
+    if not cases:
+        raise ValueError("at least one evaluation case is required")
+    knowledge_ids = sorted(
+        {
+            chunk_id.split(":v", 1)[0]
+            for case in cases
+            for chunk_id in case.relevant_chunk_ids
+        }
+    )
+    return {
+        "schema_version": 2,
+        "manifest": {
+            "dataset_id": dataset_id,
+            "version": version,
+            "language": "zh-CN",
+            "domain": "TODO",
+            "created_at": created_at.isoformat(),
+            "created_by": "TODO",
+            "reviewed_by": [],
+            "change_summary": "TODO: review labels migrated from V1",
+            "annotation_guideline_version": "TODO",
+            "policy_id": policy_id,
+            "allowed_knowledge_ids": knowledge_ids,
+            "external_judge_allowed": False,
+        },
+        "cases": [
+            {
+                "case_id": case.case_id,
+                "query": case.query.model_dump(mode="json"),
+                "relevant_chunk_ids": case.relevant_chunk_ids,
+                "relevance_grades": case.relevance_grades,
+                "critical": None,
+                "question_type": "TODO",
+                "expected_facts": [],
+                "expected_causes": case.expected_causes,
+                "forbidden_conclusions": case.forbidden_conclusions,
+                "applicable_chunk_ids": (
+                    case.applicable_chunk_ids or case.relevant_chunk_ids
+                ),
+                "applicability_note": "TODO",
+                "reference_answer": None,
+                "approved_citation_chunk_ids": case.answer_citation_chunk_ids,
+                "annotated_by": "",
+                "reviewed_by": "",
+                "label_change_reason": "TODO: manually review migrated labels",
+            }
+            for case in cases
+        ],
+    }
 
 
 class RagEvaluator:

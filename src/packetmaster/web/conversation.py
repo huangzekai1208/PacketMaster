@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -21,6 +22,7 @@ from packetmaster.intent import (
     extract_explicit_bandwidth,
     merge_intent,
 )
+from packetmaster.llm_observability import LLMObservationCollector
 from packetmaster.web.captures import CaptureRegistry
 from packetmaster.web.contracts import (
     AnalysisSummary,
@@ -81,6 +83,7 @@ class WebConversationService:
         tasks: AnalysisTaskRepository,
         model: Any,
         rag_runtime: Any | None = None,
+        llm_observer: LLMObservationCollector | None = None,
     ) -> None:
         self.sessions = sessions
         self.messages = messages
@@ -89,6 +92,7 @@ class WebConversationService:
         self.tasks = tasks
         self.model = model
         self.rag_runtime = rag_runtime
+        self.llm_observer = llm_observer
 
     def create_session(self, *, title: str = "新会话") -> SessionSummary:
         return self.sessions.create(title=title)
@@ -127,28 +131,37 @@ class WebConversationService:
         content: str,
         capture_id: str | None = None,
     ) -> ConversationResult:
-        # 已选 capture_id 强制走诊断分支，避免普通闲聊路由丢失报文绑定。
-        session = self._session(session_id)
-        previous = self.intents.get(session_id)
-        route = route_conversation(
-            content,
-            has_analysis=session.current_analysis_id is not None,
-            has_pending_intent=previous is not None,
+        scope = (
+            self.llm_observer.scope(f"session-{session_id}")
+            if self.llm_observer is not None
+            else nullcontext([])
         )
-        if capture_id is not None and session.current_analysis_id is None:
-            route = ConversationRoute.DIAGNOSIS
-        if route is ConversationRoute.GENERAL:
-            result = await self._general(session_id, content)
-        elif route is ConversationRoute.ANALYSIS_QUESTION:
-            result = self._analysis_question(session_id, content)
-        else:
-            result = await self._diagnosis(
-                session_id, content=content, capture_id=capture_id, previous=previous
+        with scope:
+            # 已选 capture_id 强制走诊断分支，避免普通闲聊路由丢失报文绑定。
+            session = self._session(session_id)
+            previous = self.intents.get(session_id)
+            route = route_conversation(
+                content,
+                has_analysis=session.current_analysis_id is not None,
+                has_pending_intent=previous is not None,
             )
-        title = _conversation_title(content, has_capture=capture_id is not None)
-        if title is not None:
-            self.sessions.set_title_if_default(session_id, title)
-        return result
+            if capture_id is not None and session.current_analysis_id is None:
+                route = ConversationRoute.DIAGNOSIS
+            if route is ConversationRoute.GENERAL:
+                result = await self._general(session_id, content)
+            elif route is ConversationRoute.ANALYSIS_QUESTION:
+                result = self._analysis_question(session_id, content)
+            else:
+                result = await self._diagnosis(
+                    session_id,
+                    content=content,
+                    capture_id=capture_id,
+                    previous=previous,
+                )
+            title = _conversation_title(content, has_capture=capture_id is not None)
+            if title is not None:
+                self.sessions.set_title_if_default(session_id, title)
+            return result
 
     def confirm(self, session_id: str) -> AnalysisSummary:
         # 使用会话和待处理记录派生稳定 ID；重复点击确认会返回同一任务。

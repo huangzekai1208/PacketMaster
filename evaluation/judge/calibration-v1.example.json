@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "status": "template-not-calibrated",
+  "instructions": "Replace examples with independently reviewed production cases before enabling Judge blocking.",
+  "labels": [
+    {
+      "case_id": "example-case-id",
+      "reviewer_ids": ["reviewer-a", "reviewer-b"],
+      "expected_passed": false,
+      "severe_violations": ["UNSUPPORTED_CLAIM"]
+    }
+  ]
+}

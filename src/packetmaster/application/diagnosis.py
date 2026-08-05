@@ -14,6 +14,12 @@ from packetmaster.context import ContextBuilder, DiagnosisContext
 from packetmaster.domain import AnalyzeResponse, DiagnosticReport, Target
 from packetmaster.errors import AppError
 from packetmaster.graph import build_graph
+from packetmaster.llm_observability import (
+    LLMCallRecord,
+    LLMObservationCollector,
+    LLMObservationSummary,
+    summarize_llm_calls,
+)
 from packetmaster.mcp.client import SpeedMCPClient
 from packetmaster.mcp.server import create_server
 from packetmaster.model import DiagnosisModel
@@ -37,6 +43,9 @@ class DiagnosisOutcome:
     analysis: AnalyzeResponse | None = None
     context: DiagnosisContext | None = None
     report_path: Path | None = None
+    llm_calls_path: Path | None = None
+    llm_call_count: int = 0
+    llm_summary: LLMObservationSummary | None = None
 
 
 class DiagnosisService:
@@ -54,6 +63,7 @@ class DiagnosisService:
         graph_factory: Callable[..., Any] = build_graph,
         artifact_manager: ArtifactManager | None = None,
         rag_runtime: Any | None = None,
+        llm_observer: LLMObservationCollector | None = None,
     ) -> None:
         self.settings = settings
         self.adapter = adapter or RealAnalyzerAdapter(
@@ -62,7 +72,10 @@ class DiagnosisService:
             tshark_path=settings.tshark_path,
             evidence_timeout_seconds=settings.evidence_timeout_seconds,
         )
-        self.diagnosis_model = diagnosis_model or DiagnosisModel(settings=settings)
+        self.llm_observer = llm_observer or LLMObservationCollector()
+        self.diagnosis_model = diagnosis_model or DiagnosisModel(
+            settings=settings, observer=self.llm_observer
+        )
         self.context_builder = context_builder or ContextBuilder()
         self.server_factory = server_factory
         self.client_factory = client_factory
@@ -102,24 +115,35 @@ class DiagnosisService:
                 context_builder=self.context_builder,
                 rag_runtime=self.rag_runtime,
             )
-            result = await graph.ainvoke(
-                {
-                    "request": {
-                        "request_id": request_id,
-                        "pcap_path": pcap_path,
-                        "target": target.value,
-                    },
-                    "standard_bandwidth_mbps": standard,
-                    "actual_bandwidth_mbps": actual,
-                }
-            )
-        return self._finalize(result, request_id)
+            with self.llm_observer.scope(request_id) as llm_calls:
+                result = await graph.ainvoke(
+                    {
+                        "request": {
+                            "request_id": request_id,
+                            "pcap_path": pcap_path,
+                            "target": target.value,
+                        },
+                        "standard_bandwidth_mbps": standard,
+                        "actual_bandwidth_mbps": actual,
+                    }
+                )
+        return self._finalize(result, request_id, llm_calls=llm_calls)
 
-    def _finalize(self, result: dict[str, Any], request_id: str) -> DiagnosisOutcome:
+    def _finalize(
+        self,
+        result: dict[str, Any],
+        request_id: str,
+        *,
+        llm_calls: list[LLMCallRecord] | None = None,
+    ) -> DiagnosisOutcome:
         # 无论诊断完整或部分完成，都先持久化 trace 和报告，便于后续排查。
         paths = self.artifact_manager.create(request_id)
         for event in result.get("trace", []):
             self.artifact_manager.append_trace(paths, event)
+        for call in llm_calls or []:
+            self.artifact_manager.append_llm_call(
+                paths, call.model_dump(mode="json")
+            )
 
         report = DiagnosticReport.model_validate(result["report"])
         raw_analysis = result.get("analysis")
@@ -145,6 +169,9 @@ class DiagnosisService:
             analysis=analysis,
             context=context,
             report_path=paths.report_json,
+            llm_calls_path=(paths.llm_calls_jsonl if llm_calls else None),
+            llm_call_count=len(llm_calls or []),
+            llm_summary=summarize_llm_calls(llm_calls or []),
         )
 
 
