@@ -2,7 +2,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { AnalysisFailurePanel, App, KnowledgeReferences, LLMUsageBadge, RagMessageTrace } from './App'
+import { AnalysisCompletionNotice, AnalysisFailurePanel, App, KnowledgeReferences, LLMUsageBadge, RagMessageTrace } from './App'
 
 const session = { session_id: 'session-1', title: '下载测速诊断', status: 'draft', created_at: '2026-07-26T00:00:00Z', updated_at: '2026-07-26T00:00:00Z' }
 
@@ -77,6 +77,20 @@ it('展示分析失败原因和受控技术详情', () => {
   expect(screen.getByText('模型调用失败')).toBeInTheDocument()
   expect(screen.getByText(/exception_type=TimeoutError/)).toBeInTheDocument()
   expect(screen.getByText('检查模型配置后重试。')).toBeInTheDocument()
+})
+
+it('分析完成后展示总耗时和处理报文数', () => {
+  render(<AnalysisCompletionNotice value={{
+    analysis_id: 'analysis-1', session_id: 'session-1', status: 'completed',
+    stage_message: '分析完成', capture: { capture_id: 'capture-1', file_name: 'test.pcap', size_bytes: 10 },
+    standard_bandwidth_mbps: 1000, actual_bandwidth_mbps: 400, target: 'download',
+    created_at: '2026-08-05T00:00:00Z', updated_at: '2026-08-05T00:01:05Z',
+    elapsed_seconds: 65.2, processed_packets: 12_345,
+  }} />)
+
+  expect(screen.getByRole('status', { name: '分析完成状态' })).toBeInTheDocument()
+  expect(screen.getByText('总耗时 1 分 5 秒')).toBeInTheDocument()
+  expect(screen.getByText('处理 12,345 个报文')).toBeInTheDocument()
 })
 
 it('可从会话任务栏删除历史会话', async () => {
