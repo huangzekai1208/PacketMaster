@@ -1,12 +1,9 @@
 # PacketMaster supports Python 3.11 through 3.13.
-# Runtime dependencies are maintained in pyproject.toml.
--e .
+# Install the project with every Python dependency needed for runtime, RAG,
+# evaluation, development, and verification. Version constraints live in
+# pyproject.toml so this file and package metadata cannot drift apart.
+-e ".[rag,dev]"
 
 # FastMCP currently leaves fakeredis without a lower bound; pin a current
 # compatible release so pip does not backtrack into broken legacy packages.
 fakeredis[lua]==2.34.1
-
-# Development and verification tools.
-pytest>=8
-pytest-asyncio>=0.23
-ruff>=0.6

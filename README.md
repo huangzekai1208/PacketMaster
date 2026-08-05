@@ -8,6 +8,8 @@ PacketMaster 是 TCP 测速不达标原因分析 Agent。它在本机流式处�
 - `pkm chat`：终端多轮对话；
 - `pkm diagnose`：一次性命令行诊断。
 
+第一次部署或需要完整操作流程时，请阅读 [PacketMaster 完整操作手册](docs/packetmaster-user-guide.md)。
+
 ## 安装
 
 支持 Python 3.11 至 3.13。正式运行需要 Wireshark/TShark。
@@ -147,7 +149,7 @@ export WEB_DATABASE_PATH='/Users/me/PacketMaster/packetmaster-web.sqlite'
 
 ## RAG 知识库
 
-RAG 是可选能力。基础安装和无 RAG 诊断不依赖 embedding 服务；启用 RAG 时需要 DashScope API Key。安装可选依赖：
+RAG 是可选能力。`requirements.txt` 已包含 RAG、评测和开发所需的全部 Python 依赖；启用 RAG 时还需要配置 DashScope API Key。仅使用包元数据进行最小安装时，也可以安装 RAG extra：
 
 ```powershell
 python -m pip install -e ".[rag]"

@@ -444,10 +444,9 @@ async def _maybe_await(value: Any) -> None:
         await value
 
 
-def dynamic_timeout_seconds(input_size_bytes: int) -> float:
-    """Allow more time for large captures while keeping a finite upper bound."""
-    gib = max(0, input_size_bytes) / (1024**3)
-    return min(6 * 3600.0, 300.0 + gib * 900.0)
+def analysis_timeout_disabled(input_size_bytes: int) -> None:
+    """Disable the main capture-analysis deadline regardless of input size."""
+    return None
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:
@@ -505,7 +504,7 @@ class RealAnalyzerAdapter:
         artifact_root: Path,
         pipeline_script: Path | None = None,
         tshark_path: str | None = None,
-        timeout_calculator: Callable[[int], float] = dynamic_timeout_seconds,
+        timeout_calculator: Callable[[int], float | None] = analysis_timeout_disabled,
         evidence_timeout_seconds: float = 120.0,
     ) -> None:
         self.artifact_root = Path(artifact_root).expanduser().resolve()
@@ -542,7 +541,7 @@ class RealAnalyzerAdapter:
     async def _wait(
         self,
         process: Any,
-        timeout: float,
+        timeout: float | None,
         progress_path: Path | None = None,
         progress_callback: Callable[[float, float | None, str | None], Any]
         | None = None,
@@ -550,7 +549,7 @@ class RealAnalyzerAdapter:
         peak = _rss_bytes(process.pid)
         wait_task = asyncio.create_task(process.wait())
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
+        deadline = loop.time() + timeout if timeout is not None else None
         progress_position = 0
 
         async def stop_process() -> None:
@@ -596,12 +595,15 @@ class RealAnalyzerAdapter:
                         await _maybe_await(
                             progress_callback(current, total, message)
                         )
-                remaining = deadline - loop.time()
-                if remaining <= 0:
+                remaining = deadline - loop.time() if deadline is not None else None
+                if remaining is not None and remaining <= 0:
                     raise TimeoutError
                 try:
                     returncode = await asyncio.wait_for(
-                        asyncio.shield(wait_task), timeout=min(0.25, remaining)
+                        asyncio.shield(wait_task),
+                        timeout=(
+                            0.25 if remaining is None else min(0.25, remaining)
+                        ),
                     )
                     peak = max(peak, _rss_bytes(process.pid))
                     return returncode, peak
@@ -731,7 +733,7 @@ class RealAnalyzerAdapter:
         *,
         returncode: int,
         rss_peak: int,
-        timeout: float,
+        timeout: float | None,
         reused: bool,
     ) -> AnalyzeResponse:
         manifest_path = paths.root / "manifest.json"
@@ -849,9 +851,13 @@ class RealAnalyzerAdapter:
             available_evidence=manifest.available_evidence,
             resource_usage={
                 "rss_peak_bytes": rss_peak,
-                "timeout_seconds": timeout,
                 "returncode": returncode,
                 "reused": reused,
+                **(
+                    {"timeout_seconds": timeout}
+                    if timeout is not None
+                    else {}
+                ),
             },
             warnings=manifest.warnings,
             artifact_paths=artifacts,
@@ -901,7 +907,7 @@ class RealAnalyzerAdapter:
                         existing_paths,
                         returncode=0,
                         rss_peak=0,
-                        timeout=0,
+                        timeout=None,
                         reused=True,
                     )
                 if existing_manifest.get("status") == "failed":

@@ -266,6 +266,7 @@ def test_real_adapter_uses_argument_array_and_disk_logs(
     assert kwargs["stdout"] is kwargs["stderr"]
     assert "shell" not in kwargs
     assert response.target is Target.UPLOAD
+    assert "timeout_seconds" not in response.resource_usage
     assert response.artifact_paths["manifest"].endswith("manifest.json")
     pipeline_log = (
         tmp_path / "artifacts" / "real-contract" / "logs" / "pipeline.log"
