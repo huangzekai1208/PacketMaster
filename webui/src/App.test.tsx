@@ -64,6 +64,34 @@ it('支持切换到通用卡顿模式并携带分析意图', async () => {
   expect(submitted).toContain('12 秒左右开始变慢')
 })
 
+it('卡顿报告展示多协议关联且不展示带宽指标', async () => {
+  localStorage.setItem('packetmaster.session', 'session-1')
+  vi.stubGlobal('EventSource', class { addEventListener() {} close() {} })
+  const completedSession = { ...session, status: 'completed', current_analysis_id: 'analysis-1' }
+  const analysis = { analysis_id: 'analysis-1', session_id: 'session-1', status: 'completed', stage_message: '分析完成', progress_fraction: 1, capture: { capture_id: 'capture-1', file_name: 'stall.pcapng', size_bytes: 1024 }, mode: 'stall', standard_bandwidth_mbps: 1, actual_bandwidth_mbps: 1, target: 'both', created_at: '2026-08-11T00:00:00Z', updated_at: '2026-08-11T00:00:01Z', elapsed_seconds: 1 }
+  const report = { mode: 'stall', analysis_id: 'analysis-1', primary_cause: 'DNS 解析失败或请求未获得响应', candidate_causes: [], key_evidence: [], confidence: 88, coverage_summary: { complete: true, truncated: false }, stall_events: [], protocol_summary: { tcp_flow_count: 1 }, endpoint_summary: [{ ip: '198.51.100.20', scope: 'public', packets: 20, protocols: ['TLSv1.3'], domains: ['video.example.com'], sni: ['video.example.com'] }], dns_summary: { failure_count: 1, unanswered_count: 1, latency_ms: { p95: 800 }, domains: [{ name: 'video.example.com', answer_ips: ['198.51.100.20'] }] }, tls_summary: { alert_count: 0, sni: [{ name: 'video.example.com', endpoint_ips: ['198.51.100.20'] }] }, http_summary: { error_response_count: 0, latency_ms: { p95: 120 } }, udp_summary: { quic_packet_count: 4 }, keyword_summary: {}, limitations: [], troubleshooting_steps: [], optimization_suggestions: [], analysis_metadata: {} }
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const path = String(input)
+    const data = path.endsWith('/report') ? { analysis_id: 'analysis-1', report }
+      : path.includes('/api/analyses/analysis-1/chat') ? { items: [], total: 0, offset: 0, limit: 100 }
+        : path.includes('/api/analyses/analysis-1') ? { analysis, report_available: true, recoverable: false, suggested_action: '' }
+          : path.includes('/api/health') ? { status: 'ok', model_configured: true, tshark_configured: true }
+            : path.includes('/api/sessions/session-1') ? { session: completedSession, messages: { items: [], total: 0, offset: 0, limit: 100 }, parameters: null }
+              : { items: [completedSession], total: 1, offset: 0, limit: 50 }
+    return new Response(JSON.stringify({ ok: true, data }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }))
+  render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
+
+  fireEvent.click(await screen.findByRole('button', { name: /报告/ }))
+
+  expect(await screen.findByText('DNS 解析失败或请求未获得响应')).toBeInTheDocument()
+  expect(screen.getAllByText('video.example.com').length).toBeGreaterThan(0)
+  expect(screen.getByText('198.51.100.20')).toBeInTheDocument()
+  expect(screen.queryByText('标准带宽')).not.toBeInTheDocument()
+  expect(screen.queryByText('实际带宽')).not.toBeInTheDocument()
+  expect(screen.queryByText('达标率')).not.toBeInTheDocument()
+})
+
 it('展示模型 Token、成本和调用明细', () => {
   render(<LLMUsageBadge costConfigured value={{
     call_count: 3,

@@ -3,16 +3,15 @@
 [![CI](https://github.com/huangzekai1208/PacketMaster/actions/workflows/test.yml/badge.svg)](https://github.com/huangzekai1208/PacketMaster/actions/workflows/test.yml)
 [![Python](https://img.shields.io/badge/Python-3.11--3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 
-PacketMaster 是一个面向 PCAP/PCAPNG 的本地网络诊断 Agent。当前核心能力是分析 TCP 测速不达标问题：它通过 TShark 流式处理完整报文，提取吞吐、RTT、重传、乱序、窗口和流级证据，再由 LangGraph 编排诊断、证据复核和报告生成。
+PacketMaster 是一个面向 PCAP/PCAPNG 的本地网络诊断 Agent。它既能分析 TCP 测速不达标问题，也能执行不依赖带宽参数的通用卡顿分析。系统通过 TShark 处理完整报文，提取 TCP、UDP/QUIC、DNS、TLS SNI、HTTP、端点关联和时序证据，再生成可复核的结构化报告。
 
 项目同时提供 Web 工作台、CLI、多轮对话、分页证据查询、断点恢复，以及带审核和评测门禁的 RAG 知识库。
-
-> 当前稳定分析流水线面向 TCP 测速诊断。Web 已提供“测速分析 / 通用卡顿”模式入口；通用卡顿的独立协议分析与归因流水线仍在建设中，请勿将该入口视为完整卡顿分析能力。
 
 ## 核心特性
 
 - **本地报文处理**：原始 PCAP、筛选报文和 Payload 不进入模型上下文。
 - **全量流式聚合**：不只分析首个端口或第一条 TCP 流，适合大型抓包。
+- **通用卡顿分析**：覆盖 DNS 失败和时延、TLS 告警与 SNI、HTTP 错误和响应等待、TCP 传输异常、UDP/QUIC 长间断、IP 与业务域名关联。
 - **证据驱动诊断**：每个原因包含支持证据、反向证据、受影响流、置信度和建议。
 - **多入口使用**：提供 Web 工作台、一次性 CLI 和终端多轮对话。
 - **可恢复任务**：后台 Worker、SSE 进度、取消、失败重试和 LangGraph 检查点恢复。
@@ -25,7 +24,8 @@ PacketMaster 是一个面向 PCAP/PCAPNG 的本地网络诊断 Agent。当前核
 ```text
 PCAP / PCAPNG
     -> TShark 流式提取
-    -> TCP 全量聚合与本地证据索引
+    -> 测速模式：TCP 全量聚合与本地证据索引
+    -> 卡顿模式：TCP + DNS + TLS + HTTP + UDP/QUIC 元数据聚合
     -> 候选原因生成
     -> RAG 知识增强（可选）
     -> 分页证据复核

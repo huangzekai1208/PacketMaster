@@ -1,4 +1,4 @@
-"""Deterministic generic TCP stall analysis built on the local TShark pipeline."""
+"""Deterministic multi-protocol stall analysis built on local TShark metadata."""
 
 from __future__ import annotations
 
@@ -13,6 +13,10 @@ from statistics import median
 from typing import Any
 
 from packetmaster.analyzer.real import default_pipeline_script
+from packetmaster.application.stall_protocol import (
+    extract_protocol_summary,
+    find_tshark,
+)
 from packetmaster.config import Settings
 from packetmaster.domain import (
     CoverageSummary,
@@ -55,6 +59,14 @@ class StallDiagnosisService:
         output.mkdir(parents=True, exist_ok=True)
         if progress is not None:
             progress(0.05, "正在准备通用卡顿分析")
+        tshark_path = find_tshark(self.settings.tshark_path)
+        protocol_task = asyncio.create_task(
+            asyncio.to_thread(
+                extract_protocol_summary,
+                Path(pcap_path).expanduser().resolve(),
+                tshark_path=tshark_path,
+            )
+        )
         command = [
             sys.executable,
             str(self.pipeline_script),
@@ -74,8 +86,7 @@ class StallDiagnosisService:
             "--min-bytes",
             "0",
         ]
-        if self.settings.tshark_path:
-            command.extend(["--tshark-path", self.settings.tshark_path])
+        command.extend(["--tshark-path", str(tshark_path)])
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -96,25 +107,35 @@ class StallDiagnosisService:
                 process.kill()
                 await process.wait()
             raise
+        try:
+            protocol = await protocol_task
+        except AppError as exc:
+            protocol = {"extraction_error": exc.message}
         manifest = _read_object(output / "manifest.json")
-        if returncode != 0 or manifest.get("status") == "failed":
+        pipeline_failed = returncode != 0 or manifest.get("status") == "failed"
+        if pipeline_failed:
             error = (
                 manifest.get("error") if isinstance(manifest.get("error"), dict) else {}
             )
             code = str(error.get("code") or "STALL_ANALYSIS_FAILED")
             message = str(error.get("message") or "通用卡顿分析失败")
-            if code in {"NO_TCP_PACKETS", "NO_SPEED_FLOW"}:
-                message = "当前通用卡顿 MVP 未在报文中识别到可分析的 TCP 流"
-            raise AppError(
-                code=code,
-                message=message,
-                recoverable=True,
-                suggested_action="确认抓包包含卡顿时段和 TCP 业务流后重试。",
-            )
+            packet_count = _count(protocol.get("capture_summary"), "packet_count")
+            if code not in {"NO_TCP_PACKETS", "NO_SPEED_FLOW"} or packet_count == 0:
+                raise AppError(
+                    code=code,
+                    message=message,
+                    recoverable=True,
+                    suggested_action="确认抓包包含卡顿时段的业务流后重试。",
+                )
+            manifest = {**manifest, "status": "partial"}
         if progress is not None:
             progress(0.8, "正在归纳卡顿事件和候选原因")
-        summary = _read_object(output / "tcp_analysis.json")
-        report = build_stall_report(request_id, summary, manifest)
+        summary = (
+            _read_object(output / "tcp_analysis.json")
+            if (output / "tcp_analysis.json").is_file()
+            else {}
+        )
+        report = build_stall_report(request_id, summary, manifest, protocol)
         report_path = output / "stall_report.json"
         _atomic_write(report_path, report.model_dump(mode="json"))
         if progress is not None:
@@ -129,7 +150,9 @@ def build_stall_report(
     analysis_id: str,
     summary: dict[str, Any],
     manifest: dict[str, Any],
+    protocol: dict[str, Any] | None = None,
 ) -> StallDiagnosticReport:
+    protocol = protocol or {}
     coverage = CoverageSummary.model_validate(summary.get("coverage_summary", {}))
     tcp = (
         summary.get("tcp_summary")
@@ -207,15 +230,125 @@ def build_stall_report(
             )
         )
 
+    dns = _mapping(protocol.get("dns_summary"))
+    dns_latency = _mapping(dns.get("latency_ms"))
+    dns_failures = _count(dns, "failure_count")
+    dns_unanswered = _count(dns, "unanswered_count")
+    dns_p95 = _number(dns_latency.get("p95"))
+    if dns_failures or dns_unanswered:
+        candidates.append(
+            _hypothesis(
+                "DNS 解析失败或请求未获得响应",
+                min(94.0, 65.0 + dns_failures * 4 + dns_unanswered * 2),
+                [f"DNS 失败响应 {dns_failures} 个", f"未响应查询 {dns_unanswered} 个"],
+                "检查 DNS 服务器可达性、域名配置、缓存和上游解析链路。",
+                [],
+            )
+        )
+    elif dns_p95 >= 500:
+        candidates.append(
+            _hypothesis(
+                "DNS 解析时延偏高",
+                min(90.0, 55.0 + dns_p95 / 25),
+                [f"DNS 响应时延 P95 为 {dns_p95:g} ms"],
+                "检查递归 DNS 距离、丢包、缓存命中和域名 CNAME 链。",
+                [],
+            )
+        )
+
+    tls = _mapping(protocol.get("tls_summary"))
+    tls_alerts = _count(tls, "alert_count")
+    client_hellos = _count(tls, "client_hello_count")
+    server_hellos = _count(tls, "server_hello_count")
+    if tls_alerts or client_hellos > server_hellos + 2:
+        candidates.append(
+            _hypothesis(
+                "TLS 握手异常或服务端未完成协商",
+                min(92.0, 62.0 + tls_alerts * 5 + (client_hellos - server_hellos) * 2),
+                [
+                    f"TLS 告警 {tls_alerts} 个",
+                    f"ClientHello/ServerHello 为 {client_hellos}/{server_hellos}",
+                ],
+                "检查证书、协议版本、SNI 路由、服务端握手日志和中间设备。",
+                [],
+            )
+        )
+
+    http = _mapping(protocol.get("http_summary"))
+    http_errors = _count(http, "error_response_count")
+    http_latency = _mapping(http.get("latency_ms"))
+    http_p95 = _number(http_latency.get("p95"))
+    if http_errors:
+        candidates.append(
+            _hypothesis(
+                "HTTP 服务返回错误响应",
+                min(94.0, 68.0 + http_errors * 3),
+                [f"检测到 {http_errors} 个 HTTP 4xx/5xx 响应"],
+                "检查源站、网关、鉴权、限流和 CDN 回源日志。",
+                [],
+            )
+        )
+    elif http_p95 >= 1000:
+        candidates.append(
+            _hypothesis(
+                "HTTP 响应等待时间过长",
+                min(92.0, 58.0 + http_p95 / 100),
+                [f"HTTP 响应时延 P95 为 {http_p95:g} ms"],
+                "检查服务端处理、上游依赖、CDN 回源和连接复用。",
+                [],
+                observability=Observability.INDIRECT,
+            )
+        )
+
+    udp = _mapping(protocol.get("udp_summary"))
+    udp_long_gaps = _count(udp, "long_gap_flow_count")
+    quic_packets = _count(udp, "quic_packet_count")
+    if udp_long_gaps and quic_packets:
+        candidates.append(
+            _hypothesis(
+                "QUIC/UDP 业务流存在长时间数据间断",
+                min(86.0, 52.0 + udp_long_gaps * 4),
+                [
+                    f"发现 {udp_long_gaps} 条存在长间断的 UDP 流",
+                    f"QUIC/UDP 443 报文 {quic_packets} 个",
+                ],
+                "检查 UDP 丢包、NAT 映射、防火墙策略及 QUIC 回退情况。",
+                [],
+                observability=Observability.INDIRECT,
+            )
+        )
+
+    keywords = _mapping(protocol.get("keyword_summary"))
+    keyword_hits = {
+        key: _int_value(value) for key, value in keywords.items() if _int_value(value)
+    }
+    if keyword_hits:
+        candidates.append(
+            _hypothesis(
+                "应用载荷出现卡顿或错误关键词",
+                min(82.0, 48.0 + sum(keyword_hits.values()) * 2),
+                [
+                    "受控关键词命中："
+                    + "、".join(f"{key}={value}" for key, value in keyword_hits.items())
+                ],
+                "结合应用日志确认关键词所在请求、响应及业务状态。",
+                [],
+                observability=Observability.INDIRECT,
+            )
+        )
+
     candidates.sort(key=lambda item: item.confidence, reverse=True)
     limitations = [
-        "当前通用卡顿 MVP 主要分析 TCP 传输层时序，"
-        "尚未覆盖 UDP、DNS、TLS SNI 和应用层播放器缓冲。",
         "仅凭报文无法直接证明用户界面发生卡顿，结论表示与卡顿一致的网络或业务等待现象。",
+        "加密后的应用内容和播放器缓冲状态不可见，需结合终端、播放器和服务端日志确认。",
+        "IP 关联仅来自报文中的 DNS、SNI、HTTP 和端点元数据，"
+        "不执行外部归属或地理位置查询。",
     ]
     if manifest.get("status") == "partial":
         limitations.append("报文分析覆盖不完整，候选原因置信度需要谨慎解释。")
-    primary = candidates[0].cause if candidates else "未发现明确的 TCP 传输层卡顿原因"
+    primary = (
+        candidates[0].cause if candidates else "未发现明确的网络层或应用协议卡顿原因"
+    )
     confidence = candidates[0].confidence if candidates else 30.0
     return StallDiagnosticReport(
         analysis_id=analysis_id,
@@ -233,18 +366,29 @@ def build_stall_report(
             "window_full_count": window_full,
             "throughput_drop_count": len(throughput_drops),
             "data_gap_count": len(gaps),
+            **_mapping(protocol.get("capture_summary")),
         },
+        endpoint_summary=_list_of_mappings(protocol.get("endpoint_summary")),
+        dns_summary=dns,
+        tls_summary=tls,
+        http_summary=http,
+        udp_summary=udp,
+        keyword_summary={key: _int_value(value) for key, value in keywords.items()},
         limitations=limitations,
         troubleshooting_steps=[
             "先按卡顿事件时间窗定位受影响流。",
             "对照同一时间窗检查重传、RTT、接收窗口和吞吐变化。",
-            "若 TCP 指标正常，继续采集 DNS、TLS、应用日志或播放器缓冲信息。",
+            "按端点关联的 DNS、SNI 和 HTTP Host 确认受影响业务。",
+            "若协议指标正常，结合终端、播放器、服务端和无线侧日志继续定位。",
         ],
         optimization_suggestions=[
             "抓包应覆盖卡顿前至少 10 秒、卡顿期间和恢复后至少 10 秒。",
             "尽量同时记录用户操作时间点和终端、服务端日志。",
         ],
-        analysis_metadata={"analysis_mode": "stall", "analyzer": "generic-tcp-mvp"},
+        analysis_metadata={
+            "analysis_mode": "stall",
+            "analyzer": "generic-multiprotocol-v1",
+        },
     )
 
 
@@ -376,6 +520,26 @@ def _number(value: object) -> float:
         float(value)
         if isinstance(value, int | float) and not isinstance(value, bool)
         else 0.0
+    )
+
+
+def _mapping(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _list_of_mappings(value: object) -> list[dict[str, Any]]:
+    return (
+        [item for item in value if isinstance(item, dict)]
+        if isinstance(value, list)
+        else []
+    )
+
+
+def _int_value(value: object) -> int:
+    return (
+        int(value)
+        if isinstance(value, int | float) and not isinstance(value, bool)
+        else 0
     )
 
 

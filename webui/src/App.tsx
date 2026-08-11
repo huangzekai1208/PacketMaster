@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { EChartsOption } from 'echarts'
 import { Activity, AlertTriangle, BarChart3, BookOpen, CheckCircle2, ChevronLeft, ChevronRight, Coins, FileSearch, FileUp, Menu, MessageSquare, Network, PanelLeft, PanelRight, Plus, RefreshCw, Send, Square, Trash2, X } from 'lucide-react'
 import { ChangeEvent, CSSProperties, FormEvent, lazy, PointerEvent as ReactPointerEvent, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { Analysis, AnalysisDetail, AnalysisMode, api, ApiFailure, Capture, ChatTurn, Evidence, formatBytes, isReportReady, isRunning, KnowledgeCitation, LLMUsageSummary, Message, Metrics, Page, Parameters, Session, SessionDetail, TaskStatus } from './api'
+import { Analysis, AnalysisDetail, AnalysisMode, api, ApiFailure, Capture, ChatTurn, Evidence, formatBytes, isReportReady, isRunning, KnowledgeCitation, LLMUsageSummary, Message, Metrics, Page, Parameters, Report, Session, SessionDetail, TaskStatus } from './api'
 import { KnowledgeManagement } from './KnowledgeManagement'
 const Chart = lazy(() => import('./Chart'))
 
@@ -267,12 +267,36 @@ function ReportView({ id, status }: { id: string; status?: TaskStatus }) {
   const stall = report.mode === 'stall'
   return <section className="report-view">
     <div className="report-summary">{stall ? <><Metric label="分析模式" value="通用卡顿" /><Metric label="TCP 流" value={number(Number(report.protocol_summary.tcp_flow_count))} /><Metric label="卡顿事件" value={number(report.stall_events.length)} /></> : <><Metric label="标准带宽" value={`${report.standard_bandwidth_mbps} Mbps`} /><Metric label="实际带宽" value={`${report.actual_bandwidth_mbps} Mbps`} /><Metric label="达标率" value={`${report.achievement_ratio_pct.toFixed(1)}%`} tone={report.achievement_ratio_pct < 80 ? 'warn' : 'good'} /></>}<Metric label="置信度" value={`${report.confidence.toFixed(0)}%`} /></div>
-    <section className="cause-band"><label>主要原因</label><h2>{report.primary_cause}</h2><span>{stall ? 'TCP 通用卡顿分析' : `${targetText[report.target]}方向`} · {complete ? '覆盖完整' : '覆盖不完整'}{truncated ? ' · 数据已截断' : ''}</span></section>
+    <section className="cause-band"><label>主要原因</label><h2>{report.primary_cause}</h2><span>{stall ? '多协议通用卡顿分析' : `${targetText[report.target]}方向`} · {complete ? '覆盖完整' : '覆盖不完整'}{truncated ? ' · 数据已截断' : ''}</span></section>
+    {stall && <StallProtocolDetails report={report} />}
     <Section title={`候选原因 ${report.candidate_causes.length}`}><div className="cause-list">{report.candidate_causes.map((cause, index) => <details key={index} open={index === 0}><summary><b>{String(cause.cause ?? `候选原因 ${index + 1}`)}</b><span>{String(cause.confidence ?? 0)}% 置信度</span></summary><div className="cause-body"><p>{String(cause.explanation ?? '')}</p><EvidenceList label="支持证据" value={cause.supporting_evidence} /><EvidenceList label="反向证据" value={cause.contradicting_evidence} /><EvidenceList label="缺失证据" value={cause.missing_evidence} />{Boolean(cause.suggestion) && <p><b>排查建议：</b>{String(cause.suggestion)}</p>}</div></details>)}</div></Section>
     {!stall && <KnowledgeReferences value={report.knowledge_citations ?? []} />}
     <div className="report-columns"><Section title="限制条件"><StringList value={report.limitations} empty="未记录限制" /></Section><Section title="排查步骤"><StringList value={report.troubleshooting_steps} empty="暂无步骤" /></Section><Section title="优化建议"><StringList value={report.optimization_suggestions} empty="暂无建议" /></Section></div>
   </section>
 }
+
+function StallProtocolDetails({ report }: { report: Extract<Report, { mode: 'stall' }> }) {
+  const dnsLatency = objectValue(report.dns_summary.latency_ms)
+  const httpLatency = objectValue(report.http_summary.latency_ms)
+  const sni = objectArray(report.tls_summary.sni)
+  const domains = objectArray(report.dns_summary.domains)
+  const keywords = Object.entries(report.keyword_summary).filter(([, value]) => value > 0)
+  return <>
+    <Section title="协议分析概览"><div className="metric-strip"><Metric label="DNS 失败/未响应" value={`${numeric(report.dns_summary.failure_count)} / ${numeric(report.dns_summary.unanswered_count)}`} tone={numeric(report.dns_summary.failure_count) + numeric(report.dns_summary.unanswered_count) > 0 ? 'warn' : ''} /><Metric label="DNS P95" value={`${numeric(dnsLatency.p95)} ms`} /><Metric label="TLS 告警" value={number(numeric(report.tls_summary.alert_count))} tone={numeric(report.tls_summary.alert_count) > 0 ? 'warn' : ''} /><Metric label="HTTP 错误" value={number(numeric(report.http_summary.error_response_count))} tone={numeric(report.http_summary.error_response_count) > 0 ? 'warn' : ''} /><Metric label="HTTP P95" value={`${numeric(httpLatency.p95)} ms`} /><Metric label="QUIC 报文" value={number(numeric(report.udp_summary.quic_packet_count))} /></div></Section>
+    <div className="report-columns"><Section title={`DNS 域名 ${domains.length}`}><ProtocolNames value={domains} nameKey="name" detailKey="answer_ips" empty="未识别到 DNS 域名" /></Section><Section title={`TLS SNI ${sni.length}`}><ProtocolNames value={sni} nameKey="name" detailKey="endpoint_ips" empty="未识别到 TLS SNI" /></Section><Section title="载荷关键词命中">{keywords.length ? <ul>{keywords.map(([key, value]) => <li key={key}><b>{key}</b>：{value}</li>)}</ul> : <p className="muted">未命中受控卡顿关键词</p>}</Section></div>
+    <Section title={`IP 与业务关联 ${report.endpoint_summary.length}`}><div className="table-scroll"><table><thead><tr><th>IP</th><th>范围</th><th>报文</th><th>协议</th><th>关联域名 / SNI</th></tr></thead><tbody>{report.endpoint_summary.slice(0, 128).map((endpoint, index) => <tr key={String(endpoint.ip ?? index)}><td className="flow-id">{String(endpoint.ip ?? '-')}</td><td>{String(endpoint.scope ?? '-')}</td><td>{number(numeric(endpoint.packets))}</td><td>{arrayValue(endpoint.protocols).join(', ') || '-'}</td><td>{[...arrayValue(endpoint.domains), ...arrayValue(endpoint.sni)].join(', ') || '-'}</td></tr>)}</tbody></table></div></Section>
+  </>
+}
+
+function ProtocolNames({ value, nameKey, detailKey, empty }: { value: Array<Record<string, unknown>>; nameKey: string; detailKey: string; empty: string }) {
+  if (!value.length) return <p className="muted">{empty}</p>
+  return <ul>{value.slice(0, 32).map((item, index) => <li key={String(item[nameKey] ?? index)}><b>{String(item[nameKey] ?? '-')}</b>{arrayValue(item[detailKey]).length > 0 ? `：${arrayValue(item[detailKey]).join(', ')}` : ''}</li>)}</ul>
+}
+
+const objectValue = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+const objectArray = (value: unknown): Array<Record<string, unknown>> => Array.isArray(value) ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === 'object' && !Array.isArray(item)) : []
+const arrayValue = (value: unknown): string[] => Array.isArray(value) ? value.map(String) : []
+const numeric = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? value : 0
 
 function MetricsView({ id, status }: { id: string; status?: TaskStatus }) {
   const query = useQuery({ queryKey: ['metrics', id], queryFn: () => api.metrics(id), enabled: isReportReady(status) })

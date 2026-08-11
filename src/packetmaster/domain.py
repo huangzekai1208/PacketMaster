@@ -252,6 +252,12 @@ class StallDiagnosticReport(ContractModel):
     coverage_summary: CoverageSummary
     stall_events: list[dict[str, Any]] = Field(default_factory=list, max_length=512)
     protocol_summary: dict[str, Any] = Field(default_factory=dict)
+    endpoint_summary: list[dict[str, Any]] = Field(default_factory=list, max_length=128)
+    dns_summary: dict[str, Any] = Field(default_factory=dict)
+    tls_summary: dict[str, Any] = Field(default_factory=dict)
+    http_summary: dict[str, Any] = Field(default_factory=dict)
+    udp_summary: dict[str, Any] = Field(default_factory=dict)
+    keyword_summary: dict[str, int] = Field(default_factory=dict)
     limitations: list[str] = Field(default_factory=list)
     troubleshooting_steps: list[str] = Field(default_factory=list)
     optimization_suggestions: list[str] = Field(default_factory=list)

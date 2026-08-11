@@ -440,8 +440,7 @@ class WebConversationService:
             missing.append(MissingParameter.STANDARD_BANDWIDTH)
         if pending.mode is AnalysisMode.SPEED and pending.actual_bandwidth_mbps is None:
             missing.append(MissingParameter.ACTUAL_BANDWIDTH)
-        # The generic stall pipeline is not wired to the task worker yet. Keep the
-        # mode visible and avoid asking for irrelevant speed-test parameters.
+        # 卡顿任务在绑定报文后自动入队，不需要进入测速参数确认阶段。
         ready = (
             pending.mode is AnalysisMode.SPEED
             and not missing
@@ -503,10 +502,7 @@ def _parameter_message(parameters: DiagnosisParameters) -> str:
     if parameters.mode is AnalysisMode.STALL:
         if parameters.capture is None:
             return "通用卡顿分析无需提供带宽，请先提供要分析的 pcap 或 pcapng 报文。"
-        return (
-            "已选择通用卡顿分析，已绑定报文。该分析流水线正在建设中，"
-            "当前不会要求标准带宽或实际带宽。"
-        )
+        return "已选择通用卡顿分析，已绑定报文，将直接开始分析。"
     prompts = {
         MissingParameter.CAPTURE: "请提供要分析的 pcap 或 pcapng 报文绝对路径。",
         MissingParameter.STANDARD_BANDWIDTH: (
