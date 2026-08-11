@@ -1,5 +1,4 @@
 # PacketMaster
-
 PacketMaster 是 TCP 测速不达标原因分析 Agent。它在本机流式处理 pcap/pcapng，模型只接收全量聚合后的有界摘要和分页证据，不接收原始报文、Payload、API Key 或本地绝对路径。
 
 当前提供三个入口。推荐使用短命令 `pkm`，完整命令 `packetmaster` 继续兼容：
