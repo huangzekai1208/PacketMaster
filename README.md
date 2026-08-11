@@ -1,120 +1,130 @@
 # PacketMaster
-PacketMaster 是 TCP 测速不达标原因分析 Agent。它在本机流式处理 pcap/pcapng，模型只接收全量聚合后的有界摘要和分页证据，不接收原始报文、Payload、API Key 或本地绝对路径。
 
-当前提供三个入口。推荐使用短命令 `pkm`，完整命令 `packetmaster` 继续兼容：
+[![CI](https://github.com/huangzekai1208/PacketMaster/actions/workflows/test.yml/badge.svg)](https://github.com/huangzekai1208/PacketMaster/actions/workflows/test.yml)
+[![Python](https://img.shields.io/badge/Python-3.11--3.13-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 
-- `pkm web`：本地 Web 对话与可视化工作台；
-- `pkm chat`：终端多轮对话；
-- `pkm diagnose`：一次性命令行诊断。
+PacketMaster 是一个面向 PCAP/PCAPNG 的本地网络诊断 Agent。当前核心能力是分析 TCP 测速不达标问题：它通过 TShark 流式处理完整报文，提取吞吐、RTT、重传、乱序、窗口和流级证据，再由 LangGraph 编排诊断、证据复核和报告生成。
 
-第一次部署或需要完整操作流程时，请阅读 [PacketMaster 完整操作手册](docs/packetmaster-user-guide.md)。
+项目同时提供 Web 工作台、CLI、多轮对话、分页证据查询、断点恢复，以及带审核和评测门禁的 RAG 知识库。
 
-## 安装
+> 当前稳定分析流水线面向 TCP 测速诊断。Web 已提供“测速分析 / 通用卡顿”模式入口；通用卡顿的独立协议分析与归因流水线仍在建设中，请勿将该入口视为完整卡顿分析能力。
 
-支持 Python 3.11 至 3.13。正式运行需要 Wireshark/TShark。
+## 核心特性
 
-```bash
-conda create -n agent python=3.12
-conda activate agent
-python -m pip install -r requirements.txt
+- **本地报文处理**：原始 PCAP、筛选报文和 Payload 不进入模型上下文。
+- **全量流式聚合**：不只分析首个端口或第一条 TCP 流，适合大型抓包。
+- **证据驱动诊断**：每个原因包含支持证据、反向证据、受影响流、置信度和建议。
+- **多入口使用**：提供 Web 工作台、一次性 CLI 和终端多轮对话。
+- **可恢复任务**：后台 Worker、SSE 进度、取消、失败重试和 LangGraph 检查点恢复。
+- **受控证据查询**：通过本地 SQLite 分页读取白名单字段，不向模型发送完整逐包数据。
+- **可治理 RAG**：支持知识导入、审核、版本、停用、重建索引、离线评测和 active 门禁。
+- **模型可观测性**：记录脱敏调用元数据、Token usage、延迟、重试和可选成本估算。
+
+## 工作方式
+
+```text
+PCAP / PCAPNG
+    -> TShark 流式提取
+    -> TCP 全量聚合与本地证据索引
+    -> 候选原因生成
+    -> RAG 知识增强（可选）
+    -> 分页证据复核
+    -> 结构化报告与持续追问
 ```
 
-Windows 安装 Wireshark 时勾选 TShark。若不在 PATH：
+模型只接收有界摘要和按需查询的局部证据。原始报文、Payload、API Key 和本机绝对路径不会写入模型上下文、Web 响应或诊断报告。
+
+## 快速开始
+
+### 1. 环境要求
+
+- Python 3.11、3.12 或 3.13，推荐 3.12
+- Wireshark/TShark
+- 一个支持 OpenAI 兼容接口的大模型
+- 启用 RAG 时需要阿里云百炼 DashScope API
+- Node.js 20-24 仅在修改前端时需要
+
+安装 TShark：
+
+```bash
+# macOS
+brew install wireshark
+
+# Ubuntu / Debian
+sudo apt update
+sudo apt install tshark
+```
+
+Windows 请安装 Wireshark，并在安装向导中勾选 TShark。若它不在 `PATH`：
 
 ```powershell
 $env:TSHARK_PATH = "C:\Program Files\Wireshark\tshark.exe"
 ```
 
-macOS 开发环境可以使用：
+检查安装：
 
 ```bash
-brew install wireshark
-export TSHARK_PATH=/opt/homebrew/bin/tshark
+tshark --version
 ```
 
-## 模型配置
+### 2. 安装项目
 
-推荐复制本地模板并填写模型配置：
+```bash
+git clone git@github.com:huangzekai1208/PacketMaster.git
+cd PacketMaster
 
-```powershell
-Copy-Item src\packetmaster\config_local.example.py src\packetmaster\config_local.py
+conda create -n packetmaster python=3.12
+conda activate packetmaster
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-macOS：
+确认命令入口：
+
+```bash
+pkm --help
+```
+
+若系统找不到 `pkm`，可以使用等价入口：
+
+```bash
+python -m packetmaster.cli --help
+```
+
+### 3. 配置主模型
+
+复制本地配置模板：
 
 ```bash
 cp src/packetmaster/config_local.example.py src/packetmaster/config_local.py
 ```
 
-`config_local.py` 已被 Git 忽略。也可以使用环境变量临时覆盖：
+Windows PowerShell：
 
 ```powershell
-$env:MODEL_API_KEY = "..."
-$env:MODEL_BASE_URL = "https://api.deepseek.com"
-$env:MODEL_NAME = "deepseek-v4-flash"
-$env:MODEL_STRUCTURED_OUTPUT_METHOD = "auto"
+Copy-Item src\packetmaster\config_local.example.py src\packetmaster\config_local.py
 ```
 
-`auto` 会为 DeepSeek 兼容服务选择 `json_mode`，其他服务默认使用 `json_schema`。也可显式设置 `json_mode`、`json_schema` 或 `function_calling`。
-
-### LLM 调用可观测性
-
-默认记录诊断、普通对话、诊断追问、评测生成和 Judge 的脱敏调用元数据，
-包括模型名、Prompt SHA-256、输出 Schema、延迟、重试、错误码和 Provider
-返回的 Token usage。记录不包含用户消息、Prompt 正文、模型回答、API Key、
-原始报文或 Payload；Provider 不返回 usage 时保持未知，不做字符数估算。
-
-可选配置模型单价，用于估算调用成本：
-
-```bash
-export MODEL_INPUT_COST_PER_MILLION_USD="0.28"
-export MODEL_OUTPUT_COST_PER_MILLION_USD="0.42"
-export LLM_OBSERVABILITY_ENABLED="true"
-```
-
-单次报文诊断记录位于对应任务目录的 `llm_calls.jsonl`；Web 和 CLI 对话的
-全局记录位于 `artifacts/llm-observability/llm_calls.jsonl`。Web 聚合摘要接口为：
-
-```text
-GET /api/llm-observability/summary?limit=10000
-```
-
-### DashScope Embedding 配置
-
-RAG 默认使用阿里云百炼 DashScope 的原生多模态模型 `qwen3-vl-embedding`（2560 维），不再提供本地 embedding 模型回退。Markdown 文件可导入同目录或子目录的相对 PNG、JPEG、WebP 图片（单图最多 5 MiB）；图片与所在章节首个切片的正文会做图文联合 Embedding。远程 URL、绝对路径、`data:` 图片及越出 Markdown 目录的引用会被忽略并提示警告。Web 的纯文本上传无法携带本机图片，请使用 CLI 文件导入。
+编辑 `src/packetmaster/config_local.py`：
 
 ```python
-# src/packetmaster/config_local.py
-EMBEDDING_API_KEY = "sk-..."
+MODEL_API_KEY = "填写主模型 API Key"
+MODEL_BASE_URL = "https://api.deepseek.com"
+MODEL_NAME = "deepseek-v4-flash"
+MODEL_STRUCTURED_OUTPUT_METHOD = "auto"
+
+# 初次部署建议先关闭 RAG，完成基础分析后再启用。
+RAG_ENABLED = False
+RAG_MODE = "shadow"
 ```
 
-```bash
-export EMBEDDING_API_KEY="sk-..."
-export EMBEDDING_MODEL="qwen3-vl-embedding"
-export EMBEDDING_DIMENSION="2560"
-```
-
-模型 API Key 和 Embedding API Key 都不会写入日志、Web API 响应或诊断报告。
-
-### DashScope Reranker 配置
-
-RAG 默认启用百炼 `qwen3-rerank`。它复用 `EMBEDDING_API_KEY`，仅在需要不同凭据时配置 `RERANK_API_KEY`：
-
-```bash
-export RERANKER_ENABLED="true"
-export RERANKER_MODEL="qwen3-rerank"
-export RERANKER_CANDIDATE_TOP_K="20"
-export RAG_FINAL_TOP_K="8"
-```
-
-`qwen3-rerank` 是文本重排模型。多模态知识的图片参与 `qwen3-vl-embedding` 召回，重排阶段使用切片标题、正文和图片替代文本。
+`config_local.py` 已被 Git 忽略。环境变量优先级高于该文件，适合 CI 和部署使用。不要提交真实 API Key。
 
 ## Web 工作台
 
-Web 模式默认只监听 `127.0.0.1`，启动 API、单 Worker 和已构建的 React 页面：
+启动本机 Web 服务：
 
 ```bash
-conda activate agent
 pkm web
 ```
 
@@ -124,186 +134,186 @@ pkm web
 pkm web --no-browser
 ```
 
-默认访问地址为 `http://127.0.0.1:8765`。端口占用时会继续尝试后续本机端口。
+默认地址为 <http://127.0.0.1:8765>。端口被占用时会自动尝试后续端口，以终端输出为准。
 
-点击“加载报文”即可打开系统文件选择器，支持 `.pcap` 和 `.pcapng`。选中的文件会自动上传到本机 PacketMaster 受管目录 `artifacts/web-captures`，并作为待发送附件显示在输入区；补充描述后点击发送，文字和 `capture_id` 会一并进入对话。页面和 API 不返回浏览器路径或受管文件绝对路径。删除报文引用不会删除原始文件或受管副本。
+完成一次测速诊断：
 
-路径注册 API 仍保留给 CLI 和已有本机自动化调用。默认只允许从当前工作目录注册路径；生产环境应显式配置允许目录：
+1. 新建会话。
+2. 保持“测速分析”模式。
+3. 点击输入框左侧的 `+`，选择 `.pcap` 或 `.pcapng`。
+4. 描述标准带宽、实际带宽和分析方向。
+5. 核对系统提取的参数，点击“开始分析”。
+6. 在“报告”“指标”“TCP 流”和“证据”中查看结果。
+7. 在对话框继续追问原因、证据或排查建议。
 
-```powershell
-$env:WEB_ALLOWED_CAPTURE_ROOTS = '["D:\\captures"]'
-$env:WEB_DATABASE_PATH = "D:\PacketMaster\packetmaster-web.sqlite"
+示例输入：
+
+```text
+标准带宽 1000 Mbps，实际只有 600 Mbps，请分析下载方向。
 ```
 
-macOS：
+Web 支持任务取消、失败重试、刷新恢复、历史会话、实时进度、处理报文数和总耗时。分析中断后，系统会从最近成功的 LangGraph 节点恢复；如果中断发生在 TShark 解析阶段，该节点会使用新任务 ID 重新执行。
+
+## CLI 使用
+
+### 一次性诊断
 
 ```bash
-export WEB_ALLOWED_CAPTURE_ROOTS='["/Users/me/captures"]'
-export WEB_DATABASE_PATH='/Users/me/PacketMaster/packetmaster-web.sqlite'
+pkm diagnose samples/packetmaster_download_underperform.pcapng \
+  --standard 1000 \
+  --actual 20 \
+  --target download \
+  --output-dir artifacts/first-run \
+  --keep-artifacts
 ```
 
-工作台支持会话恢复、普通对话、分轮参数补充、确认后后台分析、SSE 进度、取消与重试、报告、吞吐/RTT/TCP 事件图表、TCP 流分页、证据浏览和诊断后持续问答。
+`--target` 支持 `download`、`upload` 和 `both`，默认是 `download`。主分析不设置固定完成时限，大型 PCAP 会持续运行，直到完成、主动取消或发生资源/TShark 错误。
 
-右上角“知识库”提供知识列表、浏览器文件导入预览、草稿保存、审核发布、版本历史、停用、重建索引，以及最后一次正式评估与 active 门禁状态。知识文件支持 `.md`、`.markdown`、`.txt`、`.json`；浏览器只提交所选文件名和内容，不提交本地路径。
+任务目录通常包含：
+
+| 文件 | 内容 |
+|---|---|
+| `report.json` | 最终结构化诊断报告 |
+| `tcp_analysis.json` | TCP、流、区间和 SYN 聚合指标 |
+| `analysis.sqlite` | 本地分页证据索引 |
+| `manifest.json` | 状态、告警和产物清单 |
+| `coverage.json` | 报文覆盖与完整性信息 |
+| `trace.jsonl` | Agent 节点执行轨迹 |
+| `llm_calls.jsonl` | 脱敏 LLM 调用元数据 |
+
+### 多轮对话
+
+```bash
+pkm chat
+```
+
+可以一次提供完整参数，也可以分轮补充。参数完整后仍需用户确认才会开始分析。
+
+```text
+请分析 /data/captures/test.pcapng，标准带宽 1 Gbps，实际 600 Mbps，分析下载方向。
+```
+
+内置命令：`/new`、`/report`、`/evidence`、`/save`、`/help`、`/quit`。
 
 ## RAG 知识库
 
-RAG 是可选能力。`requirements.txt` 已包含 RAG、评测和开发所需的全部 Python 依赖；启用 RAG 时还需要配置 DashScope API Key。仅使用包元数据进行最小安装时，也可以安装 RAG extra：
-
-```powershell
-python -m pip install -e ".[rag]"
-```
+RAG 是可选能力。推荐先以 `shadow` 模式验证检索效果，再通过正式评测启用 `active`：
 
 ```bash
-export EMBEDDING_API_KEY="sk-..."
-export KNOWLEDGE_DATABASE_PATH="artifacts/knowledge/packetmaster-knowledge.sqlite"
+export EMBEDDING_API_KEY="填写 DashScope API Key"
+export EMBEDDING_MODEL="qwen3-vl-embedding"
+export EMBEDDING_DIMENSION="2560"
 export RAG_ENABLED=true
 export RAG_MODE=shadow
 ```
 
+默认检索链路：
+
+```text
+FTS5/BM25 + DashScope 向量召回
+    -> RRF 融合
+    -> qwen3-rerank
+    -> 有界 Top-K 上下文
+```
+
 导入、审核和检查知识：
 
-```powershell
-pkm knowledge import ".\knowledge\tcp-window.md" `
-  --knowledge-id rfc.tcp-window --title "TCP 窗口机制" `
-  --type standard --authority high --source-name "RFC"
-pkm knowledge approve rfc.tcp-window:v1 --reviewer network-reviewer
+```bash
+pkm knowledge import knowledge/tcp-window.md \
+  --knowledge-id runbook.tcp-window \
+  --title "TCP 窗口排障" \
+  --type runbook \
+  --authority medium_high \
+  --source-name "网络排障手册"
+
+pkm knowledge approve runbook.tcp-window:v1 --reviewer network-reviewer
 pkm knowledge list --status approved
 pkm knowledge health
 ```
 
 运行模式：
 
-- `off`：不检索知识；
-- `shadow`：执行检索但不改变诊断候选，适合上线前观察；
-- `active`：已验证知识可以补充候选原因和建议，但不能覆盖报文证据。
+| 模式 | 行为 |
+|---|---|
+| `off` | 不构建 RAG 运行时 |
+| `shadow` | 执行检索，但不让知识改变诊断候选 |
+| `active` | 已验证知识可以补充候选原因和建议，但不能覆盖报文证据 |
 
-`active` 不是只改环境变量即可启用。必须先用不少于 50 条正式脱敏样本执行 `pkm knowledge evaluate` 并达到质量门槛；否则启动时自动降级为 `shadow`。完整知识管理、备份恢复、评估和离线部署步骤见 [RAG 使用与运维手册](docs/rag-operations.md)。
+`active` 需要不少于 50 条正式脱敏样本通过评测门禁，否则自动降级为 `shadow`。知识审核、多模态 Markdown、评测、备份和恢复流程见 [RAG 使用与运维手册](docs/rag-operations.md)。
 
-当前检索使用 FTS5/BM25 与 DashScope 向量检索并行召回，经过环境过滤和 RRF 融合后取 Top 20，再由百炼 `qwen3-rerank` 重排，最终按 `RAG_FINAL_TOP_K`（默认 8）和上下文预算交给模型。Reranker 超时、限流或服务异常时自动回退到 RRF 排序。
+## 配置摘要
 
-## CLI 诊断
+| 配置 | 用途 | 默认/建议 |
+|---|---|---|
+| `MODEL_API_KEY` | 主诊断模型密钥 | 必填 |
+| `MODEL_BASE_URL` | OpenAI 兼容接口 | 按供应商填写 |
+| `MODEL_NAME` | 主模型名称 | 按供应商填写 |
+| `MODEL_STRUCTURED_OUTPUT_METHOD` | 结构化输出 | `auto` |
+| `TSHARK_PATH` | TShark 可执行文件 | 自动发现 |
+| `ARTIFACT_ROOT` | 分析产物目录 | `artifacts` |
+| `WEB_DATABASE_PATH` | Web 会话数据库 | `artifacts/packetmaster-web.sqlite` |
+| `GRAPH_CHECKPOINT_DATABASE_PATH` | 诊断检查点 | `artifacts/packetmaster-checkpoints.sqlite` |
+| `KNOWLEDGE_DATABASE_PATH` | RAG 知识数据库 | `artifacts/knowledge/packetmaster-knowledge.sqlite` |
+| `WEB_PORT` | Web 端口 | `8765` |
 
-省略 `--target` 时固定使用 `download`：
-
-```powershell
-pkm diagnose "C:\captures\测速 报文.pcapng" --standard 1000 --actual 600
-```
-
-只有明确需要时才使用上行或双向：
-
-```powershell
-pkm diagnose "C:\captures\test.pcapng" --standard 1000 --actual 600 --target upload
-pkm diagnose "C:\captures\test.pcapng" --standard 1000 --actual 600 --target both
-```
-
-指定报告目录并保留产物：
-
-```bash
-pkm diagnose samples/packetmaster_download_underperform.pcapng \
-  --standard 1000 \
-  --actual 20 \
-  --output-dir artifacts/my-first-report \
-  --keep-artifacts
-```
-
-## CLI 对话
-
-```bash
-pkm chat
-```
-
-可以一次提供完整参数，也可以分多轮补充：
-
-```text
-请分析 /Users/me/captures/test.pcapng，标准带宽 1Gbps，实际 600M
-```
-
-未明确方向时默认下载，参数完整后仍需用户确认。诊断完成后可继续询问当前报告和证据。
-
-内置命令：`/new`、`/report`、`/evidence`、`/save`、`/help`、`/quit`。
-
-## 前端开发
-
-运行已构建 Web 不需要 Node.js。只有修改 React 前端时才需要 Node 20 至 24：
-
-```bash
-cd webui
-npm ci
-npm run dev
-```
-
-Vite 开发服务运行在 `http://127.0.0.1:5173`，并将 `/api` 代理到 PacketMaster Web 后端。生产构建：
-
-```bash
-npm run build
-```
+完整配置项、Windows 示例、Judge、Token 成本和路径策略见 [PacketMaster 完整操作手册](docs/packetmaster-user-guide.md)。
 
 ## 项目结构
 
 ```text
-SpeedAnalyzeAgent/
-├── src/packetmaster/                 # Python 主包
-│   ├── cli.py                        # pkm / packetmaster 命令入口
-│   ├── config.py                     # 环境变量与本地配置加载
-│   ├── config_local.example.py       # API Key 本地配置模板
-│   ├── graph.py                      # LangGraph 诊断流程
-│   ├── analyzer/                     # TShark 实报文与 mock 分析适配器
-│   ├── application/                  # 诊断应用服务
-│   ├── mcp/                          # MCP Server 与客户端
-│   ├── prompts/                      # 模型提示词
-│   ├── rag/                          # 知识导入、DashScope embedding、检索、评估、SQLite 存储
-│   └── web/                          # FastAPI、会话、Worker、报文注册、已构建静态资源
-├── webui/                            # React + TypeScript 前端工程
-│   ├── src/                          # 工作台、知识管理、API 客户端与样式
-│   ├── e2e/                          # Playwright 端到端测试
-│   └── vite.config.ts                # 前端构建与开发代理配置
-├── speed-analyze/scripts/            # 报文处理脚本及共享库
-├── tests/                            # 自动化测试
-│   ├── unit/                         # 单元测试
-│   ├── integration/                  # CLI 与真实处理链路集成测试
-│   ├── contract/                     # MCP 合约测试
-│   ├── performance/                  # 大报文与 RAG 容量门禁
-│   └── fixtures/                     # 测试数据
-├── docs/                             # 使用手册、规格、计划、评估模板
-├── samples/                          # 示例与合成测试数据
-├── scripts/                          # 开发辅助脚本
-├── artifacts/                        # 运行时产物、Web 数据库、知识库、上传报文（Git 忽略）
-├── pyproject.toml                    # Python 依赖、命令和工具配置
-└── requirements.txt                  # 开发环境安装入口
+PacketMaster/
+├── src/packetmaster/
+│   ├── analyzer/          # TShark 真实报文与 mock 分析适配器
+│   ├── application/       # 诊断应用服务
+│   ├── mcp/               # MCP Server 与客户端
+│   ├── prompts/           # 结构化诊断提示词
+│   ├── rag/               # 导入、检索、重排、评测和 SQLite 存储
+│   ├── web/               # FastAPI、会话、Worker 和构建产物
+│   ├── graph.py           # LangGraph 诊断流程
+│   └── cli.py             # pkm / packetmaster 命令入口
+├── speed-analyze/         # TShark 流水线和聚合脚本
+├── webui/                 # React + TypeScript 工作台
+├── tests/                 # unit / integration / contract / performance
+├── docs/                  # 使用、运维、设计和发布文档
+├── samples/               # 示例和合成测试数据
+└── artifacts/             # 本地运行产物（Git 忽略）
 ```
 
-`src/packetmaster/config_local.py`、`artifacts/`、`webui/node_modules/`、`build/` 和测试缓存均属于本机生成内容，不应提交到 Git。
+## 开发与验证
 
-## 测试
+Python：
 
 ```bash
 python -m pytest -m "not performance" -q
 python -m ruff check .
+```
 
+前端：
+
+```bash
 cd webui
+npm ci
 npm run typecheck
 npm run lint
 npm test
 npm run build
-npm run test:e2e
 ```
 
-`npm run test:e2e` 默认使用系统 Google Chrome 访问 `http://127.0.0.1:8765`。先启动 `pkm web --no-browser`。
+运行已构建 Web 不需要 Node.js。Vite 开发服务默认使用 <http://127.0.0.1:5173>，并将 `/api` 代理到 PacketMaster 后端。
 
-大报文真实门禁：
+大型 PCAP、RAG 25,000 切片容量门禁和 Windows 发布验收步骤见完整手册及 [Windows Web 发布验收清单](docs/windows-web-release-checklist.md)。
 
-```powershell
-$env:PERF_PCAP_PATH = "D:\captures\release-2gb.pcapng"
-$env:PERF_METADATA_PATH = "D:\captures\release-2gb.pcapng.metadata.json"
-$env:PERF_MAX_RSS_BYTES = "1073741824"
-python -m pytest tests/performance/test_large_capture.py -v
-```
+## 数据与安全边界
 
-独立元数据需要包含 `input_size_bytes`、`total_packets_seen`、`tcp_packets_seen` 和 `speed_packets_analyzed`。Windows 真机发布步骤见 [Windows Web 发布验收清单](docs/windows-web-release-checklist.md)。
+- 原始报文、筛选报文和 Payload 只保留在本机。
+- 模型仅接收聚合摘要和有界、白名单化的分页证据。
+- API Key 不写入日志、报告、Web API 响应或评测结果。
+- `config_local.py`、`artifacts/`、`webui/node_modules/` 和测试缓存不应提交到 Git。
+- 报文能够证明网络现象，但不能总是证明服务端内部、应用逻辑或终端性能问题；报告会标注可观测性和证据限制。
 
-RAG 25,000 切片容量门禁：
+## 文档
 
-```bash
-python -m pytest tests/performance/test_rag_capacity.py -v
-```
+- [完整操作手册](docs/packetmaster-user-guide.md)
+- [RAG 使用与运维手册](docs/rag-operations.md)
+- [Windows Web 发布验收清单](docs/windows-web-release-checklist.md)
+- [系统设计](docs/superpowers/specs/2026-07-20-packetmaster-design.md)
