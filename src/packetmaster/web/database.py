@@ -14,6 +14,7 @@ from pathlib import Path
 from packetmaster.domain import Target
 from packetmaster.errors import AppError
 from packetmaster.web.contracts import (
+    AnalysisMode,
     ChatTurnResult,
     MessageType,
     RagMessageCitation,
@@ -22,7 +23,7 @@ from packetmaster.web.contracts import (
     WebMessage,
 )
 
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 _ACTIVE_ANALYSIS_STATUSES = (
     TaskStatus.QUEUED,
     TaskStatus.VALIDATING,
@@ -149,6 +150,7 @@ _MIGRATIONS = {
             standard_bandwidth_mbps REAL,
             actual_bandwidth_mbps REAL,
             target TEXT NOT NULL DEFAULT 'download',
+            mode TEXT NOT NULL DEFAULT 'speed',
             assumptions_json TEXT NOT NULL DEFAULT '[]',
             ambiguities_json TEXT NOT NULL DEFAULT '[]',
             confirmed_analysis_id TEXT REFERENCES analyses(analysis_id),
@@ -179,6 +181,8 @@ _MIGRATIONS = {
         WHERE checkpoint_thread_id IS NULL;
         CREATE INDEX analyses_checkpoint_thread_idx
             ON analyses(checkpoint_thread_id, created_at);
+    """,
+    10: """
     """,
 }
 
@@ -215,7 +219,20 @@ class WebDatabase:
             for next_version in range(version + 1, _SCHEMA_VERSION + 1):
                 migration = _MIGRATIONS[next_version]
                 with connection:
-                    connection.executescript(migration)
+                    if next_version == 10:
+                        columns = {
+                            row[1]
+                            for row in connection.execute(
+                                "PRAGMA table_info(session_intents)"
+                            )
+                        }
+                        if "mode" not in columns:
+                            connection.execute(
+                                "ALTER TABLE session_intents "
+                                "ADD COLUMN mode TEXT NOT NULL DEFAULT 'speed'"
+                            )
+                    else:
+                        connection.executescript(migration)
                     connection.execute(f"PRAGMA user_version = {next_version}")
 
     @contextmanager
@@ -484,6 +501,7 @@ class PendingIntentRecord:
     standard_bandwidth_mbps: float | None
     actual_bandwidth_mbps: float | None
     target: Target
+    mode: AnalysisMode
     assumptions: list[str]
     ambiguities: list[str]
     confirmed_analysis_id: str | None
@@ -509,6 +527,7 @@ class PendingIntentRepository:
         standard_bandwidth_mbps: float | None,
         actual_bandwidth_mbps: float | None,
         target: Target = Target.DOWNLOAD,
+        mode: AnalysisMode = AnalysisMode.SPEED,
         assumptions: list[str] | None = None,
         ambiguities: list[str] | None = None,
     ) -> PendingIntentRecord:
@@ -520,14 +539,15 @@ class PendingIntentRepository:
                     """
                     INSERT INTO session_intents (
                         session_id, capture_id, standard_bandwidth_mbps,
-                        actual_bandwidth_mbps, target, assumptions_json,
+                        actual_bandwidth_mbps, target, mode, assumptions_json,
                         ambiguities_json, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(session_id) DO UPDATE SET
                         capture_id = excluded.capture_id,
                         standard_bandwidth_mbps = excluded.standard_bandwidth_mbps,
                         actual_bandwidth_mbps = excluded.actual_bandwidth_mbps,
                         target = excluded.target,
+                        mode = excluded.mode,
                         assumptions_json = excluded.assumptions_json,
                         ambiguities_json = excluded.ambiguities_json,
                         confirmed_analysis_id = NULL,
@@ -539,6 +559,7 @@ class PendingIntentRepository:
                         standard_bandwidth_mbps,
                         actual_bandwidth_mbps,
                         target.value,
+                        mode.value,
                         json.dumps(assumptions or [], ensure_ascii=False),
                         json.dumps(ambiguities or [], ensure_ascii=False),
                         timestamp,
@@ -684,6 +705,7 @@ def _pending_intent(row: sqlite3.Row) -> PendingIntentRecord:
         standard_bandwidth_mbps=row["standard_bandwidth_mbps"],
         actual_bandwidth_mbps=row["actual_bandwidth_mbps"],
         target=Target(row["target"]),
+        mode=AnalysisMode(row["mode"] if "mode" in row.keys() else "speed"),
         assumptions=list(json.loads(row["assumptions_json"])),
         ambiguities=list(json.loads(row["ambiguities_json"])),
         confirmed_analysis_id=row["confirmed_analysis_id"],

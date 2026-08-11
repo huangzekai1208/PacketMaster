@@ -616,7 +616,10 @@ def create_app(
         request: Request,
     ) -> SuccessEnvelope[ConversationResult]:
         result = await conversation.submit_message(
-            session_id, content=body.content, capture_id=body.capture_id
+            session_id,
+            content=body.content,
+            capture_id=body.capture_id,
+            mode=body.mode,
         )
         return SuccessEnvelope(data=result, request_id=request.state.request_id)
 

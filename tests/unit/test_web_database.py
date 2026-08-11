@@ -38,7 +38,7 @@ def test_database_initialization_is_versioned_idempotent_and_uses_wal(
             )
         }
 
-    assert version == 9
+    assert version == 10
     assert journal_mode == "wal"
     assert {
         "sessions",

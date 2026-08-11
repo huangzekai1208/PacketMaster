@@ -8,7 +8,7 @@ from packetmaster.domain import GeneralChatAnswer, Target
 from packetmaster.rag.contracts import KnowledgeBundle, RagMode, RetrievalCandidate
 from packetmaster.rag.query import KnowledgeQueryBuilder
 from packetmaster.web.captures import CaptureRegistry, CaptureRepository
-from packetmaster.web.contracts import MissingParameter, TaskStatus
+from packetmaster.web.contracts import AnalysisMode, MissingParameter, TaskStatus
 from packetmaster.web.conversation import WebConversationService
 from packetmaster.web.database import (
     MessageRepository,
@@ -256,6 +256,30 @@ def test_complete_parameters_wait_for_confirmation_and_default_download(
     assert AnalysisTaskRepository(database).count_for_session(session.session_id) == 0
     stored, _ = MessageRepository(database).list(session_id=session.session_id)
     assert str(capture) not in "\n".join(message.content for message in stored)
+
+
+def test_stall_mode_does_not_request_bandwidth(tmp_path: Path) -> None:
+    service, _database = _service(tmp_path)
+    session = service.create_session()
+    capture = tmp_path / "stall.pcapng"
+    capture.write_bytes(b"capture")
+    registered = service.register_capture(str(capture))
+
+    result = asyncio.run(
+        service.submit_message(
+            session.session_id,
+            content="观看视频时出现卡顿",
+            capture_id=registered.capture_id,
+            mode=AnalysisMode.STALL,
+        )
+    )
+
+    assert result.parameters is not None
+    assert result.parameters.mode is AnalysisMode.STALL
+    assert result.parameters.missing == []
+    assert result.parameters.ready_for_confirmation is False
+    assert result.assistant_message.content.startswith("已选择通用卡顿分析")
+    assert "请提供标准带宽" not in result.assistant_message.content
 
 
 def test_parameters_can_be_completed_across_turns_and_restart(tmp_path: Path) -> None:

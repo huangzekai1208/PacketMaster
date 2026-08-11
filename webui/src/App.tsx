@@ -3,12 +3,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { EChartsOption } from 'echarts'
 import { Activity, AlertTriangle, BarChart3, BookOpen, CheckCircle2, ChevronLeft, ChevronRight, Coins, FileSearch, FileUp, Menu, MessageSquare, Network, PanelLeft, PanelRight, Plus, RefreshCw, Send, Square, Trash2, X } from 'lucide-react'
 import { ChangeEvent, CSSProperties, FormEvent, lazy, PointerEvent as ReactPointerEvent, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { Analysis, AnalysisDetail, api, ApiFailure, Capture, ChatTurn, Evidence, formatBytes, isReportReady, isRunning, KnowledgeCitation, LLMUsageSummary, Message, Metrics, Page, Parameters, Session, SessionDetail, TaskStatus } from './api'
+import { Analysis, AnalysisDetail, AnalysisMode, api, ApiFailure, Capture, ChatTurn, Evidence, formatBytes, isReportReady, isRunning, KnowledgeCitation, LLMUsageSummary, Message, Metrics, Page, Parameters, Session, SessionDetail, TaskStatus } from './api'
 import { KnowledgeManagement } from './KnowledgeManagement'
 const Chart = lazy(() => import('./Chart'))
 
 type Tab = 'chat' | 'report' | 'metrics' | 'flows' | 'evidence'
-type AnalysisMode = 'speed' | 'stall'
 const statusText: Record<TaskStatus, string> = { draft: '收集参数', awaiting_confirmation: '待确认', queued: '排队中', validating: '校验中', analyzing: '分析报文', reasoning: '生成原因', verifying: '复核证据', reporting: '生成报告', completed: '已完成', partial: '部分完成', failed: '失败', cancelled: '已取消', interrupted: '已中断' }
 const targetText = { download: '下载', upload: '上行', both: '上行 + 下载' }
 const replyStatusLabels = ['Thinking…', 'Cooking…', 'Reviewing context…', 'Preparing reply…']
@@ -126,7 +125,7 @@ function ChatView({ sessionId, detail, analysisDetail, pendingCapture, captureUp
   const bottom = useRef<HTMLDivElement>(null)
   const history = useQuery({ queryKey: ['chat-history', analysis?.analysis_id], queryFn: () => api.chatHistory(analysis!.analysis_id), enabled: Boolean(analysis && isReportReady(analysis.status)) })
   const send = useMutation<ChatTurn | { parameters?: Parameters }, Error, ChatSendInput, { previous?: SessionDetail; previousHistory?: Page<ChatTurn> }>({
-    mutationFn: ({ content, capture, analysisMode }) => analysis && isReportReady(analysis.status) ? api.chat(analysis.analysis_id, content) : api.send(sessionId, analysisMode === 'stall' ? `请按通用卡顿分析模式处理。${content}` : content, capture?.capture_id),
+    mutationFn: ({ content, capture, analysisMode }) => analysis && isReportReady(analysis.status) ? api.chat(analysis.analysis_id, content) : api.send(sessionId, content, capture?.capture_id, analysisMode),
     onMutate: async ({ content, capture }) => {
       if (analysis && isReportReady(analysis.status)) {
         const historyKey = ['chat-history', analysis.analysis_id]
@@ -248,11 +247,14 @@ function Progress({ analysis, refresh }: { analysis: Analysis; refresh: () => vo
 
 function Context({ parameters, analysis, onCapture, refresh }: { parameters?: Parameters; analysis?: Analysis; onCapture: () => void; refresh: () => void }) {
   const retry = useMutation({ mutationFn: () => api.retry(analysis!.analysis_id), onSuccess: refresh })
-  const value = parameters ?? (analysis ? { capture: analysis.capture, standard_bandwidth_mbps: analysis.standard_bandwidth_mbps, actual_bandwidth_mbps: analysis.actual_bandwidth_mbps, target: analysis.target, missing: [], assumptions: [], ambiguities: [], ready_for_confirmation: false } : undefined)
-  return <div className="context-body">{analysis && <section className="context-section"><label>任务状态</label><div className="context-status"><Status value={analysis.status} /><span>{analysis.stage_message}</span></div></section>}<section className="context-section"><label>报文文件</label>{value?.capture ? <div className="file-row"><FileSearch /><span><b>{value.capture.file_name}</b><small>{formatBytes(value.capture.size_bytes)}</small></span></div> : <button className="secondary full" onClick={onCapture}><FileUp />加载报文</button>}</section>{value && <><section className="context-section"><label>测速参数</label><ParameterGrid value={value} /></section><section className="context-section"><label>分析方向</label><b>{targetText[value.target]}</b><small>未明确指定时默认分析下载方向</small></section></>}{analysis && ['failed', 'cancelled', 'interrupted', 'partial'].includes(analysis.status) && <button className="secondary full" onClick={() => retry.mutate()} disabled={retry.isPending}><RefreshCw />重试任务</button>}</div>
+  const value = parameters ?? (analysis ? { capture: analysis.capture, mode: 'speed' as const, standard_bandwidth_mbps: analysis.standard_bandwidth_mbps, actual_bandwidth_mbps: analysis.actual_bandwidth_mbps, target: analysis.target, missing: [], assumptions: [], ambiguities: [], ready_for_confirmation: false } : undefined)
+  return <div className="context-body">{analysis && <section className="context-section"><label>任务状态</label><div className="context-status"><Status value={analysis.status} /><span>{analysis.stage_message}</span></div></section>}<section className="context-section"><label>报文文件</label>{value?.capture ? <div className="file-row"><FileSearch /><span><b>{value.capture.file_name}</b><small>{formatBytes(value.capture.size_bytes)}</small></span></div> : <button className="secondary full" onClick={onCapture}><FileUp />加载报文</button>}</section>{value && <><section className="context-section"><label>{value.mode === 'stall' ? '分析参数' : '测速参数'}</label><ParameterGrid value={value} /></section>{value.mode === 'speed' && <section className="context-section"><label>分析方向</label><b>{targetText[value.target]}</b><small>未明确指定时默认分析下载方向</small></section>}</>}{analysis && ['failed', 'cancelled', 'interrupted', 'partial'].includes(analysis.status) && <button className="secondary full" onClick={() => retry.mutate()} disabled={retry.isPending}><RefreshCw />重试任务</button>}</div>
 }
 
-function ParameterGrid({ value }: { value: Parameters }) { return <div className="parameter-grid"><span>标准带宽<b>{value.standard_bandwidth_mbps ? `${value.standard_bandwidth_mbps} Mbps` : '待补充'}</b></span><span>实际带宽<b>{value.actual_bandwidth_mbps ? `${value.actual_bandwidth_mbps} Mbps` : '待补充'}</b></span><span>分析方向<b>{targetText[value.target]}</b></span></div> }
+function ParameterGrid({ value }: { value: Parameters }) {
+  if (value.mode === 'stall') return <div className="parameter-grid"><span>分析模式<b>通用卡顿</b></span></div>
+  return <div className="parameter-grid"><span>标准带宽<b>{value.standard_bandwidth_mbps ? `${value.standard_bandwidth_mbps} Mbps` : '待补充'}</b></span><span>实际带宽<b>{value.actual_bandwidth_mbps ? `${value.actual_bandwidth_mbps} Mbps` : '待补充'}</b></span><span>分析方向<b>{targetText[value.target]}</b></span></div>
+}
 
 function ReportView({ id, status }: { id: string; status?: TaskStatus }) {
   const query = useQuery({ queryKey: ['report', id], queryFn: () => api.report(id), enabled: isReportReady(status) })

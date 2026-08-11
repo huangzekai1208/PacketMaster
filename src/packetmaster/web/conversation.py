@@ -25,6 +25,7 @@ from packetmaster.intent import (
 from packetmaster.llm_observability import LLMObservationCollector
 from packetmaster.web.captures import CaptureRegistry
 from packetmaster.web.contracts import (
+    AnalysisMode,
     AnalysisSummary,
     CaptureSummary,
     ConversationResult,
@@ -130,6 +131,7 @@ class WebConversationService:
         *,
         content: str,
         capture_id: str | None = None,
+        mode: AnalysisMode = AnalysisMode.SPEED,
     ) -> ConversationResult:
         scope = (
             self.llm_observer.scope(f"session-{session_id}")
@@ -157,6 +159,7 @@ class WebConversationService:
                     content=content,
                     capture_id=capture_id,
                     previous=previous,
+                    mode=mode,
                 )
             title = _conversation_title(content, has_capture=capture_id is not None)
             if title is not None:
@@ -297,6 +300,7 @@ class WebConversationService:
         content: str,
         capture_id: str | None,
         previous: PendingIntentRecord | None,
+        mode: AnalysisMode,
     ) -> ConversationResult:
         # 文本中的路径仅在本机注册后使用，写入会话前始终替换和脱敏。
         extracted = extract_capture_paths(content)
@@ -357,7 +361,12 @@ class WebConversationService:
             standard_bandwidth_mbps=intent.standard_bandwidth_mbps,
             actual_bandwidth_mbps=intent.actual_bandwidth_mbps,
             target=intent.target or Target.DOWNLOAD,
-            assumptions=["未填写带宽单位时默认按 Mbps 解释"],
+            mode=mode,
+            assumptions=(
+                ["通用卡顿分析不要求提供带宽"]
+                if mode is AnalysisMode.STALL
+                else ["未填写带宽单位时默认按 Mbps 解释"]
+            ),
             ambiguities=intent.ambiguities,
         )
         parameters = self._parameters(stored)
@@ -395,13 +404,26 @@ class WebConversationService:
         missing: list[MissingParameter] = []
         if capture is None:
             missing.append(MissingParameter.CAPTURE)
-        if pending.standard_bandwidth_mbps is None:
+        if (
+            pending.mode is AnalysisMode.SPEED
+            and pending.standard_bandwidth_mbps is None
+        ):
             missing.append(MissingParameter.STANDARD_BANDWIDTH)
-        if pending.actual_bandwidth_mbps is None:
+        if (
+            pending.mode is AnalysisMode.SPEED
+            and pending.actual_bandwidth_mbps is None
+        ):
             missing.append(MissingParameter.ACTUAL_BANDWIDTH)
-        ready = not missing and not pending.ambiguities
+        # The generic stall pipeline is not wired to the task worker yet. Keep the
+        # mode visible and avoid asking for irrelevant speed-test parameters.
+        ready = (
+            pending.mode is AnalysisMode.SPEED
+            and not missing
+            and not pending.ambiguities
+        )
         return DiagnosisParameters(
             capture=capture,
+            mode=pending.mode,
             standard_bandwidth_mbps=pending.standard_bandwidth_mbps,
             actual_bandwidth_mbps=pending.actual_bandwidth_mbps,
             target=pending.target,
@@ -455,6 +477,13 @@ def _parameter_message(parameters: DiagnosisParameters) -> str:
     if parameters.ambiguities:
         details = "；".join(parameters.ambiguities)
         return f"参数存在歧义：{details}。请修正后再确认。"
+    if parameters.mode is AnalysisMode.STALL:
+        if parameters.capture is None:
+            return "通用卡顿分析无需提供带宽，请先提供要分析的 pcap 或 pcapng 报文。"
+        return (
+            "已选择通用卡顿分析，已绑定报文。该分析流水线正在建设中，"
+            "当前不会要求标准带宽或实际带宽。"
+        )
     prompts = {
         MissingParameter.CAPTURE: "请提供要分析的 pcap 或 pcapng 报文绝对路径。",
         MissingParameter.STANDARD_BANDWIDTH: (

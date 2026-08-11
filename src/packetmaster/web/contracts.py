@@ -45,6 +45,11 @@ class MessageType(StrEnum):
     ERROR = "error"
 
 
+class AnalysisMode(StrEnum):
+    SPEED = "speed"
+    STALL = "stall"
+
+
 class EventType(StrEnum):
     ANALYSIS_STATUS = "analysis_status"
     ANALYSIS_PROGRESS = "analysis_progress"
@@ -77,6 +82,7 @@ class CaptureSummary(WebContract):
 
 class DiagnosisParameters(WebContract):
     capture: CaptureSummary | None = None
+    mode: AnalysisMode = AnalysisMode.SPEED
     standard_bandwidth_mbps: float | None = Field(default=None, gt=0)
     actual_bandwidth_mbps: float | None = Field(default=None, gt=0)
     target: Target = Target.DOWNLOAD
@@ -292,6 +298,7 @@ class RegisterCaptureRequest(WebContract):
 class SubmitMessageRequest(WebContract):
     content: str = Field(min_length=1, max_length=2_000)
     capture_id: PublicId | None = None
+    mode: AnalysisMode = AnalysisMode.SPEED
 
 
 class ConfirmAnalysisRequest(WebContract):

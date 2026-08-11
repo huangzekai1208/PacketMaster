@@ -1,12 +1,13 @@
 // Web API 客户端：仅使用公开 ID 和元数据，绝不向界面泄露服务端本地路径。
 export type TaskStatus = 'draft' | 'awaiting_confirmation' | 'queued' | 'validating' | 'analyzing' | 'reasoning' | 'verifying' | 'reporting' | 'completed' | 'partial' | 'failed' | 'cancelled' | 'interrupted'
 export type Target = 'download' | 'upload' | 'both'
+export type AnalysisMode = 'speed' | 'stall'
 
 export interface Session { session_id: string; title: string; status: TaskStatus; current_analysis_id?: string; created_at: string; updated_at: string }
 export interface Capture { capture_id: string; file_name: string; size_bytes: number }
 export interface RagMessageCitation { knowledge_id: string; title: string; chunk_id: string; reranker_score?: number }
 export interface Message { message_id: string; session_id: string; message_type: string; content: string; created_at: string; analysis_id?: string; evidence_count: number; rag_status?: 'used' | 'degraded'; rag_reason?: string; rag_citations?: RagMessageCitation[] }
-export interface Parameters { capture?: Capture; standard_bandwidth_mbps?: number; actual_bandwidth_mbps?: number; target: Target; missing: string[]; assumptions: string[]; ambiguities: string[]; ready_for_confirmation: boolean }
+export interface Parameters { capture?: Capture; mode: AnalysisMode; standard_bandwidth_mbps?: number; actual_bandwidth_mbps?: number; target: Target; missing: string[]; assumptions: string[]; ambiguities: string[]; ready_for_confirmation: boolean }
 export interface Analysis { analysis_id: string; session_id: string; status: TaskStatus; stage_message: string; progress_fraction?: number; capture: Capture; standard_bandwidth_mbps: number; actual_bandwidth_mbps: number; target: Target; created_at: string; updated_at: string; elapsed_seconds: number; processed_packets?: number; error_code?: string }
 export interface AnalysisDetail { analysis: Analysis; report_available: boolean; recoverable: boolean; error_message: string; suggested_action: string; error_details: Record<string, string | number | boolean | null> }
 export interface SessionDetail { session: Session; messages: Page<Message>; parameters?: Parameters }
@@ -52,7 +53,7 @@ export const api = {
   createSession: () => request<Session>('/api/sessions', { method: 'POST', body: '{}' }),
   deleteSession: (id: string) => request<{ deleted: boolean }>(`/api/sessions/${id}`, { method: 'DELETE' }),
   session: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),
-  send: (id: string, content: string, capture_id?: string) => request<{ parameters?: Parameters }>(`/api/sessions/${id}/messages`, { method: 'POST', body: JSON.stringify({ content, capture_id }) }),
+  send: (id: string, content: string, capture_id?: string, mode: AnalysisMode = 'speed') => request<{ parameters?: Parameters }>(`/api/sessions/${id}/messages`, { method: 'POST', body: JSON.stringify({ content, capture_id, mode }) }),
   register: (path: string) => request<Capture>('/api/captures/register', { method: 'POST', body: JSON.stringify({ path }) }),
   uploadCapture: async (file: File) => {
     // 上传使用 multipart，不能附带默认 JSON Content-Type，否则浏览器不会生成 boundary。

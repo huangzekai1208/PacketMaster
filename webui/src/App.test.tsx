@@ -60,7 +60,7 @@ it('支持切换到通用卡顿模式并携带分析意图', async () => {
   fireEvent.change(screen.getByLabelText('对话输入'), { target: { value: '12 秒左右开始变慢' } })
   fireEvent.click(screen.getByTitle('发送'))
 
-  await waitFor(() => expect(submitted).toContain('请按通用卡顿分析模式处理'))
+  await waitFor(() => expect(submitted).toContain('"mode":"stall"'))
   expect(submitted).toContain('12 秒左右开始变慢')
 })
 
