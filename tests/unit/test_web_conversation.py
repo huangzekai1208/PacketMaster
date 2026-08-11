@@ -258,8 +258,10 @@ def test_complete_parameters_wait_for_confirmation_and_default_download(
     assert str(capture) not in "\n".join(message.content for message in stored)
 
 
-def test_stall_mode_does_not_request_bandwidth(tmp_path: Path) -> None:
-    service, _database = _service(tmp_path)
+def test_stall_mode_starts_analysis_without_requesting_bandwidth(
+    tmp_path: Path,
+) -> None:
+    service, database = _service(tmp_path)
     session = service.create_session()
     capture = tmp_path / "stall.pcapng"
     capture.write_bytes(b"capture")
@@ -278,7 +280,11 @@ def test_stall_mode_does_not_request_bandwidth(tmp_path: Path) -> None:
     assert result.parameters.mode is AnalysisMode.STALL
     assert result.parameters.missing == []
     assert result.parameters.ready_for_confirmation is False
-    assert result.assistant_message.content.startswith("已选择通用卡顿分析")
+    assert result.analysis is not None
+    assert result.analysis.status is TaskStatus.QUEUED
+    assert result.analysis.mode is AnalysisMode.STALL
+    assert AnalysisTaskRepository(database).count_for_session(session.session_id) == 1
+    assert result.assistant_message.content == "卡顿报文已接收，任务已进入分析队列。"
     assert "请提供标准带宽" not in result.assistant_message.content
 
 

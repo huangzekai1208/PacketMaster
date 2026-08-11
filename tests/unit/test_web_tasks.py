@@ -6,7 +6,7 @@ import pytest
 from packetmaster.domain import Target
 from packetmaster.errors import AppError
 from packetmaster.web.captures import CaptureRegistry, CaptureRepository
-from packetmaster.web.contracts import EventType, TaskStatus
+from packetmaster.web.contracts import AnalysisMode, EventType, TaskStatus
 from packetmaster.web.database import SessionRepository, WebDatabase
 from packetmaster.web.tasks import AnalysisTaskRepository
 
@@ -73,6 +73,32 @@ def test_analysis_state_and_event_change_in_one_transaction(tmp_path: Path) -> N
         EventType.ANALYSIS_PROGRESS,
     ]
     assert progress.event_id == events[-1].event_id
+
+
+def test_analysis_mode_round_trips_through_claim_and_retry(tmp_path: Path) -> None:
+    sessions, captures, tasks = _repositories(tmp_path)
+    sessions.create(session_id="session-1")
+    capture_path = tmp_path / "stall.pcapng"
+    capture_path.write_bytes(b"capture")
+    capture = captures.register(str(capture_path))
+    task = tasks.create_queued(
+        session_id="session-1",
+        capture_id=capture.capture_id,
+        standard_bandwidth_mbps=1,
+        actual_bandwidth_mbps=1,
+        target=Target.BOTH,
+        mode=AnalysisMode.STALL,
+        analysis_id="stall-1",
+    )
+
+    assert task.mode is AnalysisMode.STALL
+    claimed = tasks.claim_next("worker-1")
+    assert claimed is not None
+    assert claimed.mode is AnalysisMode.STALL
+    tasks.transition("stall-1", TaskStatus.ANALYZING)
+    tasks.transition("stall-1", TaskStatus.FAILED)
+    retry = tasks.retry("stall-1", new_analysis_id="stall-2")
+    assert retry.mode is AnalysisMode.STALL
 
 
 def test_repeated_transition_is_idempotent_and_invalid_transition_is_rejected(

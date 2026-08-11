@@ -5,10 +5,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from packetmaster.application import DiagnosisOutcome, DiagnosisProgress
+from packetmaster.application.stall import StallAnalysisOutcome
 from packetmaster.domain import CoverageSummary, DiagnosticReport, Target
 from packetmaster.errors import AppError
 from packetmaster.web.captures import CaptureRegistry, CaptureRepository
-from packetmaster.web.contracts import TaskStatus
+from packetmaster.web.contracts import AnalysisMode, TaskStatus
 from packetmaster.web.database import SessionRepository, WebDatabase
 from packetmaster.web.tasks import AnalysisTaskRepository
 from packetmaster.web.worker import AnalysisWorker, _configure_worker_signal_handling
@@ -66,6 +67,35 @@ def test_worker_claims_task_reports_progress_and_completes(tmp_path: Path) -> No
     assert any(event.stage_message == "正在扫描报文流" for event in events)
     assert all("Scanning capture flows" not in event.stage_message for event in events)
     assert asyncio.run(worker.run_once()) is False
+
+
+def test_worker_routes_stall_task_to_stall_service(tmp_path: Path) -> None:
+    repository = _task(tmp_path)
+    with repository.database.transaction(immediate=True) as connection:
+        connection.execute(
+            "UPDATE analyses SET mode = ? WHERE analysis_id = ?",
+            (AnalysisMode.STALL.value, "analysis-1"),
+        )
+    report_path = tmp_path / "stall_report.json"
+    report_path.write_text("{}", encoding="utf-8")
+    calls = []
+
+    class StallService:
+        async def run(self, **kwargs):
+            calls.append(kwargs)
+            kwargs["progress"](0.5, "正在归纳卡顿事件")
+            return StallAnalysisOutcome(report_path=report_path, partial=False)
+
+    worker = AnalysisWorker(
+        repository,
+        lambda: object(),
+        stall_service_factory=StallService,
+        worker_id="worker-1",
+    )
+
+    assert asyncio.run(worker.run_once()) is True
+    assert repository.get("analysis-1").status is TaskStatus.COMPLETED
+    assert calls[0]["request_id"] == "analysis-1"
 
 
 def test_worker_persists_recoverable_failure(tmp_path: Path) -> None:

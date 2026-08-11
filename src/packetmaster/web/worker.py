@@ -11,10 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from packetmaster.application import DiagnosisProgress, DiagnosisService
+from packetmaster.application.stall import StallDiagnosisService
 from packetmaster.config import Settings
 from packetmaster.errors import AppError
 from packetmaster.progress import localize_progress_message
-from packetmaster.web.contracts import TaskStatus
+from packetmaster.web.contracts import AnalysisMode, TaskStatus
 from packetmaster.web.database import WebDatabase
 from packetmaster.web.tasks import AnalysisTaskRepository, ClaimedAnalysis
 
@@ -47,11 +48,13 @@ class AnalysisWorker:
         repository: AnalysisTaskRepository,
         service_factory: Callable[[], Any],
         *,
+        stall_service_factory: Callable[[], Any] | None = None,
         worker_id: str | None = None,
         heartbeat_interval_seconds: float = 5.0,
     ) -> None:
         self.repository = repository
         self.service_factory = service_factory
+        self.stall_service_factory = stall_service_factory
         self.worker_id = worker_id or uuid.uuid4().hex
         self.heartbeat_interval_seconds = heartbeat_interval_seconds
 
@@ -63,9 +66,7 @@ class AnalysisWorker:
         execution = asyncio.create_task(self._run_claimed(task))
         try:
             while not execution.done():
-                await asyncio.wait(
-                    {execution}, timeout=self.heartbeat_interval_seconds
-                )
+                await asyncio.wait({execution}, timeout=self.heartbeat_interval_seconds)
                 if execution.done():
                     break
                 self.repository.heartbeat(task.analysis_id, self.worker_id)
@@ -152,6 +153,30 @@ class AnalysisWorker:
                         task.analysis_id, status, stage_message=message
                     )
 
+            if task.mode is AnalysisMode.STALL:
+                if self.stall_service_factory is None:
+                    raise AppError(
+                        code="STALL_ANALYZER_UNAVAILABLE",
+                        message="通用卡顿分析服务未配置",
+                        recoverable=True,
+                        suggested_action="请检查后台 Worker 配置后重试。",
+                    )
+                outcome = await self.stall_service_factory().run(
+                    pcap_path=str(task.pcap_path),
+                    request_id=task.analysis_id,
+                    progress=lambda fraction, message: self.repository.update_progress(
+                        task.analysis_id,
+                        fraction=fraction,
+                        stage_message=message,
+                    ),
+                )
+                self.repository.transition(
+                    task.analysis_id,
+                    TaskStatus.PARTIAL if outcome.partial else TaskStatus.COMPLETED,
+                    stage_message=("分析部分完成" if outcome.partial else "分析完成"),
+                    report_path=str(outcome.report_path),
+                )
+                return
             outcome = await self.service_factory().run(
                 pcap_path=str(task.pcap_path),
                 standard=task.standard_bandwidth_mbps,
@@ -213,9 +238,7 @@ def _configure_worker_signal_handling() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
 
 
-def run_worker_process(
-    database_path: str, settings: Settings, stop_event: Any
-) -> None:
+def run_worker_process(database_path: str, settings: Settings, stop_event: Any) -> None:
     """Top-level Windows-spawn-compatible worker process target."""
 
     _configure_worker_signal_handling()
@@ -225,5 +248,6 @@ def run_worker_process(
     worker = AnalysisWorker(
         repository,
         lambda: DiagnosisService(settings),
+        stall_service_factory=lambda: StallDiagnosisService(settings),
     )
     asyncio.run(worker.run_forever(stop_event))

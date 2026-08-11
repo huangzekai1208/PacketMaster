@@ -89,6 +89,7 @@ it('展示分析失败原因和受控技术详情', () => {
     analysis: {
       analysis_id: 'analysis-1', session_id: 'session-1', status: 'failed',
       stage_message: '分析失败', capture: { capture_id: 'capture-1', file_name: 'test.pcap', size_bytes: 10 },
+      mode: 'speed',
       standard_bandwidth_mbps: 1000, actual_bandwidth_mbps: 400, target: 'download',
       created_at: '2026-08-05T00:00:00Z', updated_at: '2026-08-05T00:00:01Z', elapsed_seconds: 1,
       error_code: 'MODEL_CALL_FAILED',
@@ -111,6 +112,7 @@ it('分析完成后展示总耗时和处理报文数', () => {
   render(<AnalysisCompletionNotice value={{
     analysis_id: 'analysis-1', session_id: 'session-1', status: 'completed',
     stage_message: '分析完成', capture: { capture_id: 'capture-1', file_name: 'test.pcap', size_bytes: 10 },
+    mode: 'speed',
     standard_bandwidth_mbps: 1000, actual_bandwidth_mbps: 400, target: 'download',
     created_at: '2026-08-05T00:00:00Z', updated_at: '2026-08-05T00:01:05Z',
     elapsed_seconds: 65.2, processed_packets: 12_345,
@@ -315,7 +317,7 @@ it('报告完成后的追问也会在请求完成前立即显示在对话区', a
   let resolveQuestion: ((value: Response) => void) | undefined
   vi.stubGlobal('EventSource', class { addEventListener() {} close() {} })
   const completedSession = { ...session, status: 'completed', current_analysis_id: 'analysis-1' }
-  const analysis = { analysis_id: 'analysis-1', session_id: 'session-1', status: 'completed', stage_message: '', progress_fraction: 1, capture: { capture_id: 'capture-1', file_name: '测速.pcapng', size_bytes: 1024 }, standard_bandwidth_mbps: 100, actual_bandwidth_mbps: 80, target: 'download', created_at: '2026-07-26T00:00:00Z', updated_at: '2026-07-26T00:00:00Z', elapsed_seconds: 1 }
+  const analysis = { analysis_id: 'analysis-1', session_id: 'session-1', status: 'completed', stage_message: '', progress_fraction: 1, capture: { capture_id: 'capture-1', file_name: '测速.pcapng', size_bytes: 1024 }, mode: 'speed', standard_bandwidth_mbps: 100, actual_bandwidth_mbps: 80, target: 'download', created_at: '2026-07-26T00:00:00Z', updated_at: '2026-07-26T00:00:00Z', elapsed_seconds: 1 }
   vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
     const path = String(input)
     if (path.includes('/api/analyses/analysis-1/chat') && init?.method === 'POST') return new Promise<Response>(resolve => { resolveQuestion = resolve })

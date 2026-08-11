@@ -14,11 +14,13 @@ from packetmaster.domain import (
     EvidenceField,
     EvidenceRequest,
     EvidenceResponse,
+    StallDiagnosticReport,
     Target,
 )
 from packetmaster.errors import AppError
 from packetmaster.web.contracts import (
     AnalysisDetail,
+    AnalysisMode,
     FlowSummary,
     MetricSeries,
     Page,
@@ -93,9 +95,14 @@ class AnalysisReadService:
         )
 
     def report(self, analysis_id: str) -> ReportResult:
-        self._analysis(analysis_id)
+        analysis = self._analysis(analysis_id)
         path = self._report_path(analysis_id)
-        report = DiagnosticReport.model_validate(self._read_object(path))
+        model = (
+            StallDiagnosticReport
+            if analysis.mode is AnalysisMode.STALL
+            else DiagnosticReport
+        )
+        report = model.model_validate(self._read_object(path))
         return ReportResult(analysis_id=analysis_id, report=report)
 
     def metrics(self, analysis_id: str) -> MetricSeries:

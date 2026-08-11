@@ -276,9 +276,7 @@ class WebConversationService:
             reason = exc.code if isinstance(exc, AppError) else "RAG_RETRIEVAL_FAILED"
             return _GeneralKnowledgeTrace(status="degraded", reason=reason)
 
-    def _analysis_question(
-        self, session_id: str, content: str
-    ) -> ConversationResult:
+    def _analysis_question(self, session_id: str, content: str) -> ConversationResult:
         self.messages.append(
             session_id=session_id,
             message_type=MessageType.USER,
@@ -320,9 +318,7 @@ class WebConversationService:
 
         safe_content = extracted.sanitized_text
         for reference, capture in zip(extracted.references, registered, strict=True):
-            safe_content = safe_content.replace(
-                reference.placeholder, "[已注册报文]"
-            )
+            safe_content = safe_content.replace(reference.placeholder, "[已注册报文]")
         safe_content = _redact(safe_content)
         self.messages.append(
             session_id=session_id,
@@ -370,6 +366,39 @@ class WebConversationService:
             ambiguities=intent.ambiguities,
         )
         parameters = self._parameters(stored)
+        if mode is AnalysisMode.STALL and capture_value is not None:
+            analysis_id = uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"packetmaster:stall:{session_id}:{stored.updated_at.isoformat()}",
+            ).hex
+            try:
+                analysis = self.tasks.create_queued(
+                    session_id=session_id,
+                    capture_id=capture_value.capture_id,
+                    standard_bandwidth_mbps=1.0,
+                    actual_bandwidth_mbps=1.0,
+                    target=Target.BOTH,
+                    mode=AnalysisMode.STALL,
+                    analysis_id=analysis_id,
+                )
+            except AppError as exc:
+                existing = self.tasks.get(analysis_id)
+                if exc.code != "ANALYSIS_ALREADY_ACTIVE" or existing is None:
+                    raise
+                analysis = existing
+            self.intents.mark_confirmed(session_id, analysis.analysis_id)
+            assistant = self.messages.append(
+                session_id=session_id,
+                message_type=MessageType.CONFIRMATION,
+                content="卡顿报文已接收，任务已进入分析队列。",
+                analysis_id=analysis.analysis_id,
+            )
+            return ConversationResult(
+                route="diagnosis",
+                assistant_message=assistant,
+                parameters=parameters,
+                analysis=analysis,
+            )
         status = (
             TaskStatus.AWAITING_CONFIRMATION
             if parameters.ready_for_confirmation
@@ -409,10 +438,7 @@ class WebConversationService:
             and pending.standard_bandwidth_mbps is None
         ):
             missing.append(MissingParameter.STANDARD_BANDWIDTH)
-        if (
-            pending.mode is AnalysisMode.SPEED
-            and pending.actual_bandwidth_mbps is None
-        ):
+        if pending.mode is AnalysisMode.SPEED and pending.actual_bandwidth_mbps is None:
             missing.append(MissingParameter.ACTUAL_BANDWIDTH)
         # The generic stall pipeline is not wired to the task worker yet. Keep the
         # mode visible and avoid asking for irrelevant speed-test parameters.
@@ -446,10 +472,7 @@ class WebConversationService:
         for message in messages:
             if message.message_type is MessageType.USER:
                 question = message.content
-            elif (
-                message.message_type is MessageType.ASSISTANT
-                and question is not None
-            ):
+            elif message.message_type is MessageType.ASSISTANT and question is not None:
                 turns.append(
                     ConversationTurn(question=question, answer=message.content)
                 )

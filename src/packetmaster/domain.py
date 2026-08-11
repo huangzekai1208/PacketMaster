@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -239,6 +239,22 @@ class DiagnosticReport(ContractModel):
     knowledge_conflicts: list[dict[str, Any]] = Field(
         default_factory=list, max_length=32
     )
+    analysis_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class StallDiagnosticReport(ContractModel):
+    mode: Literal["stall"] = "stall"
+    analysis_id: str
+    primary_cause: str = "unresolved"
+    candidate_causes: list[Hypothesis] = Field(default_factory=list)
+    key_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    confidence: ConfidencePercentage
+    coverage_summary: CoverageSummary
+    stall_events: list[dict[str, Any]] = Field(default_factory=list, max_length=512)
+    protocol_summary: dict[str, Any] = Field(default_factory=dict)
+    limitations: list[str] = Field(default_factory=list)
+    troubleshooting_steps: list[str] = Field(default_factory=list)
+    optimization_suggestions: list[str] = Field(default_factory=list)
     analysis_metadata: dict[str, Any] = Field(default_factory=dict)
 
 

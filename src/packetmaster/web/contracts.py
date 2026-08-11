@@ -8,7 +8,12 @@ from typing import Annotated, Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from packetmaster.domain import ChatEvidenceCitation, DiagnosticReport, Target
+from packetmaster.domain import (
+    ChatEvidenceCitation,
+    DiagnosticReport,
+    StallDiagnosticReport,
+    Target,
+)
 from packetmaster.rag.contracts import AuthorityLevel, KnowledgeStatus, KnowledgeType
 
 PublicId = Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[\w.-]+$")]
@@ -128,6 +133,7 @@ class AnalysisSummary(WebContract):
     stage_message: str = Field(default="", max_length=512)
     progress_fraction: float | None = Field(default=None, ge=0, le=1)
     capture: CaptureSummary
+    mode: AnalysisMode = AnalysisMode.SPEED
     standard_bandwidth_mbps: float = Field(gt=0)
     actual_bandwidth_mbps: float = Field(gt=0)
     target: Target = Target.DOWNLOAD
@@ -339,7 +345,7 @@ class AnalysisDetail(WebContract):
 
 class ReportResult(WebContract):
     analysis_id: PublicId
-    report: DiagnosticReport
+    report: DiagnosticReport | StallDiagnosticReport
 
 
 class MetricSeries(WebContract):
