@@ -979,6 +979,7 @@ def _app_error_status(code: str) -> int:
     if code in {
         "ANALYSIS_ALREADY_ACTIVE",
         "CAPTURE_IN_USE",
+        "SESSION_ANALYSIS_ACTIVE",
         "SESSION_IN_USE",
         "KNOWLEDGE_RISK_ACK_REQUIRED",
     }:

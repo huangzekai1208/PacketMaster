@@ -68,6 +68,14 @@ def _settings() -> Settings:
     )
 
 
+def test_main_model_client_has_no_timeout_when_disabled() -> None:
+    settings = _settings().model_copy(update={"model_timeout_seconds": None})
+
+    client = DiagnosisModel(settings=settings)._client_or_error()
+
+    assert client.request_timeout is None
+
+
 def test_model_records_usage_cost_and_only_hashed_prompt_metadata() -> None:
     client = _Client(
         [

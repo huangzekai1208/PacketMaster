@@ -168,9 +168,11 @@ RAG_MODE = "shadow"
 | `MODEL_BASE_URL` | OpenAI 兼容接口地址 | 按供应商填写 |
 | `MODEL_NAME` | 模型名称 | 当前示例为 `deepseek-v4-flash` |
 | `MODEL_STRUCTURED_OUTPUT_METHOD` | 结构化输出方式 | 推荐 `auto` |
-| `MODEL_TIMEOUT_SECONDS` | 模型超时秒数 | 120 |
+| `MODEL_TIMEOUT_SECONDS` | 主模型客户端超时秒数 | 默认关闭；填正整数可重新启用 |
 
 `auto` 对 DeepSeek 兼容服务使用 `json_mode`，其他服务默认使用 `json_schema`。如果持续出现 `INVALID_MODEL_OUTPUT`，先确认模型支持结构化 JSON，再尝试显式配置 `json_mode` 或 `function_calling`。
+
+主模型默认不设置客户端超时，长时间推理不会再因固定时限自动失败。若模型服务无响应，可在 Web 端取消任务或重启服务；生产环境也可以设置 `MODEL_TIMEOUT_SECONDS=300` 等正整数重新启用超时。该配置不影响 Embedding、Reranker、Judge、RAG 和证据查询各自的独立超时。
 
 ### 4.3 Embedding 配置
 
@@ -249,6 +251,7 @@ Provider 不返回 usage 时显示“未知”，系统不会根据字符数估�
 ```bash
 export ARTIFACT_ROOT=artifacts
 export WEB_DATABASE_PATH=artifacts/packetmaster-web.sqlite
+export GRAPH_CHECKPOINT_DATABASE_PATH=artifacts/packetmaster-checkpoints.sqlite
 export KNOWLEDGE_DATABASE_PATH=artifacts/knowledge/packetmaster-knowledge.sqlite
 export WEB_PORT=8765
 ```
@@ -420,6 +423,10 @@ http://127.0.0.1:8765
 9. 在对话框继续追问当前分析结论。
 
 Web 支持取消、失败重试、刷新后恢复、历史会话删除和会话自动命名。
+
+失败、取消、Worker 异常退出或主机断电后，点击“重试任务”会从最近一个成功的 LangGraph 节点继续。已经完成的报文分析、候选原因生成、知识检索或证据复核不会重复执行；页面会显示当前实际恢复到的阶段。断点保存在 `GRAPH_CHECKPOINT_DATABASE_PATH` 指定的 SQLite 文件中，默认是 `artifacts/packetmaster-checkpoints.sqlite`。
+
+TShark 主分析节点内部暂不支持按数据包续跑。如果任务在 TShark 处理过程中中断，系统会使用新的任务 ID 重新执行该节点；如果 TShark 已经完成而后续 LLM、RAG、证据复核或报告节点失败，则不会重新解析报文。修改报文参数、主模型、结构化输出方式或主要 RAG 模型配置会生成新的运行指纹，并自动执行完整分析，避免复用不兼容的断点。
 
 ### 8.3 Web 中的 RAG 状态
 

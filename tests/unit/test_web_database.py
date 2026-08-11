@@ -2,9 +2,12 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from packetmaster.domain import Target
+from packetmaster.errors import AppError
 from packetmaster.web.captures import CaptureRegistry, CaptureRepository
-from packetmaster.web.contracts import MessageType, RagMessageCitation
+from packetmaster.web.contracts import MessageType, RagMessageCitation, TaskStatus
 from packetmaster.web.database import (
     MessageRepository,
     PendingIntentRepository,
@@ -35,7 +38,7 @@ def test_database_initialization_is_versioned_idempotent_and_uses_wal(
             )
         }
 
-    assert version == 8
+    assert version == 9
     assert journal_mode == "wal"
     assert {
         "sessions",
@@ -52,6 +55,8 @@ def test_schema_migration_renames_legacy_default_sessions(tmp_path: Path) -> Non
     database = _database(tmp_path)
     session = SessionRepository(database).create(title="新诊断")
     with database.transaction(immediate=True) as connection:
+        connection.execute("DROP INDEX analyses_checkpoint_thread_idx")
+        connection.execute("ALTER TABLE analyses DROP COLUMN checkpoint_thread_id")
         connection.execute("ALTER TABLE analyses DROP COLUMN error_details_json")
         connection.execute("PRAGMA user_version = 6")
 
@@ -172,3 +177,141 @@ def test_concurrent_message_writes_are_serialized(tmp_path: Path) -> None:
     )
     assert total == 20
     assert len(page) == 20
+
+
+def test_session_with_terminal_analysis_is_deleted_with_related_records(
+    tmp_path: Path,
+) -> None:
+    database = _database(tmp_path)
+    sessions = SessionRepository(database)
+    sessions.create(session_id="session-1")
+    capture_path = tmp_path / "capture.pcapng"
+    capture_path.write_bytes(b"capture")
+    capture = CaptureRegistry(
+        CaptureRepository(database), allowed_roots=[tmp_path]
+    ).register(str(capture_path))
+    now = datetime(2026, 8, 6, tzinfo=UTC).isoformat()
+    with database.transaction(immediate=True) as connection:
+        connection.execute(
+            """
+            INSERT INTO analyses (
+                analysis_id, session_id, capture_id, status,
+                standard_bandwidth_mbps, actual_bandwidth_mbps, target,
+                created_at, updated_at, checkpoint_thread_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "analysis-1",
+                "session-1",
+                capture.capture_id,
+                TaskStatus.COMPLETED.value,
+                1000,
+                600,
+                Target.DOWNLOAD.value,
+                now,
+                now,
+                "thread-1",
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO analysis_events (
+                analysis_id, event_type, status, created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            ("analysis-1", "analysis_completed", "completed", now),
+        )
+        connection.execute(
+            """
+            INSERT INTO chat_turns (
+                turn_id, session_id, analysis_id, question, answer, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("turn-1", "session-1", "analysis-1", "原因？", "拥塞。", now),
+        )
+        connection.execute(
+            """
+            INSERT INTO session_intents (
+                session_id, capture_id, confirmed_analysis_id, updated_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            ("session-1", capture.capture_id, "analysis-1", now),
+        )
+    MessageRepository(database).append(
+        session_id="session-1",
+        message_id="message-1",
+        message_type=MessageType.REPORT,
+        content="分析完成",
+        analysis_id="analysis-1",
+    )
+
+    assert sessions.delete("session-1") is True
+
+    with database.connect() as connection:
+        for table in (
+            "sessions",
+            "messages",
+            "session_intents",
+            "analyses",
+            "analysis_events",
+            "chat_turns",
+        ):
+            count = connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            assert count == 0
+        assert connection.execute("SELECT COUNT(*) FROM captures").fetchone()[0] == 1
+    assert capture_path.is_file()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        TaskStatus.QUEUED,
+        TaskStatus.VALIDATING,
+        TaskStatus.ANALYZING,
+        TaskStatus.REASONING,
+        TaskStatus.VERIFYING,
+        TaskStatus.REPORTING,
+    ],
+)
+def test_session_with_active_analysis_cannot_be_deleted(
+    tmp_path: Path, status: TaskStatus
+) -> None:
+    database = _database(tmp_path)
+    sessions = SessionRepository(database)
+    sessions.create(session_id="session-1")
+    capture_path = tmp_path / "capture.pcapng"
+    capture_path.write_bytes(b"capture")
+    capture = CaptureRegistry(
+        CaptureRepository(database), allowed_roots=[tmp_path]
+    ).register(str(capture_path))
+    now = datetime(2026, 8, 6, tzinfo=UTC).isoformat()
+    with database.transaction(immediate=True) as connection:
+        connection.execute(
+            """
+            INSERT INTO analyses (
+                analysis_id, session_id, capture_id, status,
+                standard_bandwidth_mbps, actual_bandwidth_mbps, target,
+                created_at, updated_at, checkpoint_thread_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "analysis-1",
+                "session-1",
+                capture.capture_id,
+                status.value,
+                1000,
+                600,
+                Target.DOWNLOAD.value,
+                now,
+                now,
+                "thread-1",
+            ),
+        )
+
+    with pytest.raises(AppError) as raised:
+        sessions.delete("session-1")
+
+    assert raised.value.code == "SESSION_ANALYSIS_ACTIVE"
+    assert sessions.get("session-1") is not None

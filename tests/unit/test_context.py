@@ -445,6 +445,28 @@ class RepairingStructuredModel(FakeStructuredModel):
         return await super().ainvoke(messages)
 
 
+class LanguageRepairingStructuredModel(FakeStructuredModel):
+    def __init__(self, *, always_english: bool = False) -> None:
+        super().__init__()
+        self.always_english = always_english
+        self.calls = 0
+        self.all_messages: list[list[object]] = []
+
+    async def ainvoke(self, messages: list[object]) -> object:
+        self.calls += 1
+        self.all_messages.append(messages)
+        if self.calls == 1 or self.always_english:
+            result = await super().ainvoke(messages)
+            if self.schema is HypothesisBatch:
+                result["hypotheses"][0].update(
+                    cause="Server-side bandwidth throttling",
+                    explanation="The throughput remains below the expected bandwidth.",
+                    suggestion="Check the server bandwidth policy.",
+                )
+            return result
+        return await super().ainvoke(messages)
+
+
 def test_diagnosis_model_uses_open_structured_output_without_network() -> None:
     fake = FakeStructuredModel()
     model = DiagnosisModel(
@@ -592,6 +614,43 @@ def test_diagnosis_model_stops_after_one_failed_schema_repair() -> None:
         "attempts": 2,
         "exception_type": "OutputParserException",
     }
+    assert fake.calls == 2
+
+
+def test_diagnosis_model_repairs_english_report_text_once() -> None:
+    fake = LanguageRepairingStructuredModel()
+    model = DiagnosisModel(client=fake, settings=Settings())
+    context = ContextBuilder().build(
+        _analysis([]),
+        [],
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+    )
+
+    result = asyncio.run(model.generate_hypotheses(context))
+
+    assert result.hypotheses[0].cause == "应用层自适应限速策略"
+    assert fake.calls == 2
+    assert "面向用户的报告文字包含英文" in fake.all_messages[1][-1]["content"]
+    assert "TCP、RTT、ACK" in fake.all_messages[1][-1]["content"]
+
+
+def test_diagnosis_model_rejects_persistent_english_report_text() -> None:
+    fake = LanguageRepairingStructuredModel(always_english=True)
+    model = DiagnosisModel(client=fake, settings=Settings())
+    context = ContextBuilder().build(
+        _analysis([]),
+        [],
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=600,
+    )
+
+    with pytest.raises(AppError) as raised:
+        asyncio.run(model.generate_hypotheses(context))
+
+    assert raised.value.code == "INVALID_MODEL_LANGUAGE"
+    assert raised.value.details["attempts"] == 2
+    assert raised.value.details["invalid_text_fields"] == 3
     assert fake.calls == 2
 
 

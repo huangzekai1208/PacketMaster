@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import math
 from typing import Any, TypedDict
@@ -176,8 +177,32 @@ def build_graph(
     diagnosis_model: Any,
     context_builder: ContextBuilder | None = None,
     rag_runtime: Any | None = None,
+    checkpointer: Any | None = None,
+    raise_node_errors: bool = False,
+    stage_handler: Any | None = None,
 ):
     builder = context_builder or ContextBuilder()
+
+    def node_error(exc: Exception, default_code: str) -> dict[str, Any]:
+        error = _error_dict(exc, default_code)
+        if raise_node_errors:
+            if isinstance(exc, AppError):
+                raise exc
+            raise AppError(
+                code=error["code"],
+                message=error["message"],
+                recoverable=True,
+                suggested_action="请从最近的诊断断点重试。",
+                details=error.get("details", {}),
+            ) from exc
+        return error
+
+    async def notify_stage(node: str) -> None:
+        if stage_handler is None:
+            return
+        observed = stage_handler(node)
+        if inspect.isawaitable(observed):
+            await observed
 
     def normalize_requests(
         state: AgentState, candidates: list[EvidenceRequest]
@@ -219,6 +244,7 @@ def build_graph(
         return normalized
 
     async def validate(state: AgentState) -> dict[str, Any]:
+        await notify_stage("validate")
         # 首节点统一补全默认方向和数值校验，后续节点只处理规范化请求。
         try:
             raw = state.get("request", {})
@@ -260,6 +286,7 @@ def build_graph(
             }
 
     async def analyze(state: AgentState) -> dict[str, Any]:
+        await notify_stage("analyze")
         try:
             response = await mcp_client.analyze_speed_capture(state["request"])
             if response.target is not state["target"]:
@@ -274,7 +301,7 @@ def build_graph(
                 "trace": _trace(state, "analyze", status="ok"),
             }
         except Exception as exc:
-            error = _error_dict(exc, "ANALYSIS_FAILED")
+            error = node_error(exc, "ANALYSIS_FAILED")
             return {
                 "error": error,
                 "trace": _trace(
@@ -283,6 +310,7 @@ def build_graph(
             }
 
     async def reason(state: AgentState) -> dict[str, Any]:
+        await notify_stage("reason")
         try:
             context = builder.build(
                 state["analysis"],
@@ -304,7 +332,7 @@ def build_graph(
                 ),
             }
         except Exception as exc:
-            error = _error_dict(exc, "REASONING_FAILED")
+            error = node_error(exc, "REASONING_FAILED")
             return {
                 "error": error,
                 "trace": _trace(
@@ -313,6 +341,7 @@ def build_graph(
             }
 
     async def retrieve_knowledge(state: AgentState) -> dict[str, Any]:
+        await notify_stage("retrieve_knowledge")
         mode = rag_runtime.mode
         try:
             query = rag_runtime.query_builder.build(
@@ -359,6 +388,7 @@ def build_graph(
             }
 
     async def augment_hypotheses(state: AgentState) -> dict[str, Any]:
+        await notify_stage("augment_hypotheses")
         try:
             augmentation = await diagnosis_model.augment_hypotheses(
                 state["context"],
@@ -426,6 +456,7 @@ def build_graph(
             }
 
     async def inspect_evidence(state: AgentState) -> dict[str, Any]:
+        await notify_stage("inspect_evidence")
         try:
             responses: list[EvidenceResponse] = []
             requests = state.get("evidence_requests", [])[:MAX_REQUESTS_PER_ROUND]
@@ -482,7 +513,7 @@ def build_graph(
                 ),
             }
         except Exception as exc:
-            error = _error_dict(exc, "EVIDENCE_FAILED")
+            error = node_error(exc, "EVIDENCE_FAILED")
             return {
                 "error": error,
                 "trace": _trace(
@@ -494,6 +525,7 @@ def build_graph(
             }
 
     async def verify(state: AgentState) -> dict[str, Any]:
+        await notify_stage("verify")
         try:
             result = await diagnosis_model.verify(
                 state["context"],
@@ -515,7 +547,7 @@ def build_graph(
                 ),
             }
         except Exception as exc:
-            error = _error_dict(exc, "VERIFICATION_FAILED")
+            error = node_error(exc, "VERIFICATION_FAILED")
             return {
                 "error": error,
                 "trace": _trace(
@@ -652,10 +684,11 @@ def build_graph(
         }
 
     async def report(state: AgentState) -> dict[str, Any]:
+        await notify_stage("report")
         try:
             return await _report_impl(state)
         except Exception as exc:
-            error = _error_dict(exc, "REPORT_FAILED")
+            error = node_error(exc, "REPORT_FAILED")
             try:
                 fallback_target = Target(state.get("target", Target.DOWNLOAD))
             except (TypeError, ValueError):
@@ -772,4 +805,4 @@ def build_graph(
         {"inspect_evidence": "inspect_evidence", "report": "report"},
     )
     graph.add_edge("report", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)

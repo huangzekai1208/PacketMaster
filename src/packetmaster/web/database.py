@@ -22,7 +22,15 @@ from packetmaster.web.contracts import (
     WebMessage,
 )
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
+_ACTIVE_ANALYSIS_STATUSES = (
+    TaskStatus.QUEUED,
+    TaskStatus.VALIDATING,
+    TaskStatus.ANALYZING,
+    TaskStatus.REASONING,
+    TaskStatus.VERIFYING,
+    TaskStatus.REPORTING,
+)
 _MIGRATIONS = {
     1: """
         CREATE TABLE sessions (
@@ -164,6 +172,14 @@ _MIGRATIONS = {
         ALTER TABLE analyses ADD COLUMN error_details_json TEXT
             NOT NULL DEFAULT '{}';
     """,
+    9: """
+        ALTER TABLE analyses ADD COLUMN checkpoint_thread_id TEXT;
+        UPDATE analyses
+        SET checkpoint_thread_id = analysis_id
+        WHERE checkpoint_thread_id IS NULL;
+        CREATE INDEX analyses_checkpoint_thread_idx
+            ON analyses(checkpoint_thread_id, created_at);
+    """,
 }
 
 
@@ -289,19 +305,53 @@ class SessionRepository:
         return [_session(row) for row in rows], total
 
     def delete(self, session_id: str) -> bool:
-        try:
-            with self.database.transaction(immediate=True) as connection:
-                cursor = connection.execute(
-                    "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+        with self.database.transaction(immediate=True) as connection:
+            active = connection.execute(
+                f"""
+                SELECT analysis_id FROM analyses
+                WHERE session_id = ?
+                  AND status IN ({','.join('?' for _ in _ACTIVE_ANALYSIS_STATUSES)})
+                LIMIT 1
+                """,
+                (
+                    session_id,
+                    *(status.value for status in _ACTIVE_ANALYSIS_STATUSES),
+                ),
+            ).fetchone()
+            if active is not None:
+                raise AppError(
+                    code="SESSION_ANALYSIS_ACTIVE",
+                    message="会话中仍有正在执行的分析任务",
+                    recoverable=True,
+                    suggested_action="请等待分析完成或取消任务后再删除会话。",
                 )
-        except sqlite3.IntegrityError as exc:
-            raise AppError(
-                code="SESSION_IN_USE",
-                message="会话仍有关联的分析任务",
-                recoverable=True,
-                suggested_action="请保留该会话，已完成任务的清理将在后续版本提供。",
-            ) from exc
-        return cursor.rowcount > 0
+
+            # confirmed_analysis_id 没有级联规则，必须在 analyses 之前清理。
+            connection.execute(
+                "DELETE FROM session_intents WHERE session_id = ?", (session_id,)
+            )
+            connection.execute(
+                "DELETE FROM chat_turns WHERE session_id = ?", (session_id,)
+            )
+            connection.execute(
+                """
+                DELETE FROM analysis_events
+                WHERE analysis_id IN (
+                    SELECT analysis_id FROM analyses WHERE session_id = ?
+                )
+                """,
+                (session_id,),
+            )
+            connection.execute(
+                "DELETE FROM analyses WHERE session_id = ?", (session_id,)
+            )
+            connection.execute(
+                "DELETE FROM messages WHERE session_id = ?", (session_id,)
+            )
+            cursor = connection.execute(
+                "DELETE FROM sessions WHERE session_id = ?", (session_id,)
+            )
+            return cursor.rowcount > 0
 
     def set_title_if_default(self, session_id: str, title: str) -> bool:
         with self.database.transaction(immediate=True) as connection:

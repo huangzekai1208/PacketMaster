@@ -6,7 +6,6 @@ import asyncio
 import builtins
 import hashlib
 import json
-import re
 import time
 from pathlib import Path
 from typing import Annotated
@@ -42,6 +41,7 @@ from packetmaster.mcp.client import SpeedMCPClient
 from packetmaster.mcp.server import create_server
 from packetmaster.model import DiagnosisModel
 from packetmaster.platform import is_absolute_path
+from packetmaster.progress import localize_progress_message
 from packetmaster.rag.cli import knowledge_app
 from packetmaster.rag.runtime import build_rag_runtime
 from packetmaster.report import render_chat_report, render_terminal, write_report
@@ -49,28 +49,6 @@ from packetmaster.web.runtime import run_web
 
 app = typer.Typer(help="PacketMaster TCP 测速不达标诊断")
 app.add_typer(knowledge_app, name="knowledge")
-
-_PROGRESS_MESSAGES = {
-    "Starting speed analysis": "正在启动测速分析",
-    "Inputs validated": "输入参数校验完成",
-    "Normalizing capture": "正在规范化报文文件",
-    "Capture normalized": "报文文件规范化完成",
-    "Fingerprinting capture": "正在计算报文指纹",
-    "Scanning capture flows": "正在扫描报文流",
-    "Fingerprint completed": "报文指纹计算完成",
-    "Capture scan completed": "报文扫描完成",
-    "Writing filtered captures": "正在写入筛选后的报文",
-    "Filtering completed": "报文筛选完成",
-    "Analysis completed": "分析完成",
-    "Analysis partial": "分析部分完成",
-    "Speed analysis process completed": "测速分析进程完成",
-}
-_DIRECTION_LABELS = {
-    "download": "下载方向",
-    "upload": "上行方向",
-    "both": "上下行方向",
-}
-
 
 def _cli_llm_observer(settings: Settings) -> LLMObservationCollector | None:
     if not settings.llm_observability_enabled:
@@ -85,36 +63,7 @@ def _cli_trace_id(kind: str, value: str) -> str:
 
 
 def _localize_progress_message(message: str) -> str:
-    localized = _PROGRESS_MESSAGES.get(message)
-    if localized is not None:
-        return localized
-
-    match = re.fullmatch(r"Scanned (\d+) packets", message)
-    if match is not None:
-        return f"已扫描 {match.group(1)} 个报文"
-
-    match = re.fullmatch(r"Extracting all (download|upload|both) TCP packets", message)
-    if match is not None:
-        direction = _DIRECTION_LABELS[match.group(1)]
-        return f"正在提取全部{direction} TCP 报文"
-
-    match = re.fullmatch(
-        r"Extracted (\d+) (download|upload|both) TCP packets", message
-    )
-    if match is not None:
-        direction = _DIRECTION_LABELS[match.group(2)]
-        return f"已提取 {match.group(1)} 个{direction} TCP 报文"
-
-    match = re.fullmatch(
-        r"Completed (download|upload|both) TCP extraction", message
-    )
-    if match is not None:
-        direction = _DIRECTION_LABELS[match.group(1)]
-        return f"{direction} TCP 报文提取完成"
-
-    if any("\u4e00" <= character <= "\u9fff" for character in message):
-        return message
-    return "分析处理中"
+    return localize_progress_message(message)
 
 
 def _normalize_capture_path(value: str) -> str:

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 import packetmaster.graph as graph_module
 from packetmaster.domain import (
@@ -15,6 +16,7 @@ from packetmaster.domain import (
     HypothesisType,
     Observability,
 )
+from packetmaster.errors import AppError
 from packetmaster.graph import build_graph
 from packetmaster.rag.contracts import (
     KnowledgeAugmentation,
@@ -63,6 +65,58 @@ def test_graph_preserves_default_and_explicit_target(
     assert model.targets == [expected]
     assert result["target"] == expected
     assert result["report"].target.value == expected
+
+
+def test_graph_resumes_failed_reason_node_from_persistent_checkpoint(
+    tmp_path: Path,
+) -> None:
+    class FailsOnceModel(FakeDiagnosisModel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reason_attempts = 0
+
+        async def generate_hypotheses(self, context):
+            self.reason_attempts += 1
+            if self.reason_attempts == 1:
+                raise AppError(
+                    code="MODEL_CALL_FAILED",
+                    message="模型调用失败",
+                    recoverable=True,
+                    suggested_action="重试任务。",
+                )
+            return await super().generate_hypotheses(context)
+
+    async def scenario():
+        checkpoint_path = tmp_path / "checkpoints.sqlite"
+        config = {"configurable": {"thread_id": "analysis-resume"}}
+        mcp = FakeMCPClient()
+        model = FailsOnceModel()
+        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
+            graph = build_graph(
+                mcp_client=mcp,
+                diagnosis_model=model,
+                checkpointer=saver,
+                raise_node_errors=True,
+            )
+            with pytest.raises(AppError, match="模型调用失败"):
+                await graph.ainvoke(_input(tmp_path), config)
+
+        # 重新打开连接并重新编译图，模拟 Worker 退出或主机断电后恢复。
+        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
+            graph = build_graph(
+                mcp_client=mcp,
+                diagnosis_model=model,
+                checkpointer=saver,
+                raise_node_errors=True,
+            )
+            result = await graph.ainvoke(None, config)
+        return mcp, model, result
+
+    mcp, model, result = asyncio.run(scenario())
+
+    assert mcp.targets == ["download"]
+    assert model.reason_attempts == 2
+    assert result["report"].primary_cause == "开放式候选原因"
 
 
 def test_graph_caps_evidence_loop_at_three_rounds(tmp_path: Path) -> None:

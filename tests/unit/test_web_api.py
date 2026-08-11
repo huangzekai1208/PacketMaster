@@ -7,6 +7,8 @@ from packetmaster.config import Settings
 from packetmaster.domain import GeneralChatAnswer
 from packetmaster.model import DiagnosisModel
 from packetmaster.web.api import create_app
+from packetmaster.web.contracts import TaskStatus
+from packetmaster.web.database import WebDatabase
 
 
 def _client(tmp_path: Path) -> TestClient:
@@ -310,3 +312,55 @@ def test_session_and_capture_listing_and_deletion_api(tmp_path: Path) -> None:
     assert client.delete(f"/api/captures/{capture['capture_id']}").status_code == 200
     assert capture_path.is_file()
     assert client.delete(f"/api/sessions/{session['session_id']}").status_code == 200
+
+
+def test_session_deletion_removes_terminal_analysis_but_rejects_active_analysis(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path)
+    capture_path = tmp_path / "capture.pcap"
+    capture_path.write_bytes(b"capture")
+    capture = client.post(
+        "/api/captures/register", json={"path": str(capture_path)}
+    ).json()["data"]
+    database = WebDatabase(tmp_path / "web.sqlite")
+
+    terminal_session = client.post("/api/sessions", json={}).json()["data"]
+    active_session = client.post("/api/sessions", json={}).json()["data"]
+    with database.transaction(immediate=True) as connection:
+        for analysis_id, session_id, status in (
+            ("analysis-terminal", terminal_session["session_id"], TaskStatus.FAILED),
+            ("analysis-active", active_session["session_id"], TaskStatus.ANALYZING),
+        ):
+            connection.execute(
+                """
+                INSERT INTO analyses (
+                    analysis_id, session_id, capture_id, status,
+                    standard_bandwidth_mbps, actual_bandwidth_mbps, target,
+                    created_at, updated_at, checkpoint_thread_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    analysis_id,
+                    session_id,
+                    capture["capture_id"],
+                    status.value,
+                    1000,
+                    600,
+                    "download",
+                    "2026-08-06T00:00:00+00:00",
+                    "2026-08-06T00:00:00+00:00",
+                    analysis_id,
+                ),
+            )
+
+    deleted = client.delete(
+        f"/api/sessions/{terminal_session['session_id']}"
+    )
+    rejected = client.delete(f"/api/sessions/{active_session['session_id']}")
+
+    assert deleted.status_code == 200
+    assert deleted.json()["data"]["deleted"] is True
+    assert rejected.status_code == 409
+    assert rejected.json()["error"]["code"] == "SESSION_ANALYSIS_ACTIVE"
+    assert capture_path.is_file()

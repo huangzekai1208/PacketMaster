@@ -12,6 +12,7 @@ dependencies = [
     "fastmcp>=2,<3",
     "langchain-openai>=1,<2",
     "langgraph>=1,<2",
+    "langgraph-checkpoint-sqlite>=3,<4",
     "psutil>=5",
     "pydantic>=2,<3",
     "pydantic-settings>=2,<3",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 from collections.abc import Mapping
 from datetime import datetime
@@ -43,6 +44,63 @@ from packetmaster.llm_observability import (
     utc_now,
 )
 from packetmaster.rag.contracts import KnowledgeAugmentation, KnowledgeBundle
+
+_CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+_LATIN_WORD_PATTERN = re.compile(r"[A-Za-z]{2,}")
+
+
+class _ChineseOutputError(ValueError):
+    def __init__(self, count: int) -> None:
+        super().__init__("model user-facing output is not simplified Chinese")
+        self.count = count
+
+
+def _hypothesis_texts(batch: HypothesisBatch) -> list[str]:
+    values: list[str] = []
+    for hypothesis in batch.hypotheses:
+        values.extend(
+            [
+                hypothesis.cause,
+                *hypothesis.supporting_evidence,
+                *hypothesis.contradicting_evidence,
+                *hypothesis.missing_evidence,
+                hypothesis.explanation,
+                hypothesis.suggestion,
+            ]
+        )
+    return values
+
+
+def _english_narrative(value: str) -> bool:
+    if not value.strip() or _CJK_PATTERN.search(value):
+        return False
+    words = _LATIN_WORD_PATTERN.findall(value)
+    if not words:
+        return False
+    if all(word.isupper() and len(word) <= 8 for word in words):
+        return False
+    return len(words) >= 2 or sum(len(word) for word in words) >= 10
+
+
+def _ensure_chinese_user_text(value: BaseModel) -> None:
+    texts: list[str] = []
+    if isinstance(value, HypothesisBatch):
+        texts = _hypothesis_texts(value)
+    elif isinstance(value, VerificationResult):
+        texts = [
+            *_hypothesis_texts(HypothesisBatch(hypotheses=value.candidate_hypotheses)),
+            *value.rejected_causes,
+            *value.limitations,
+        ]
+    elif isinstance(value, KnowledgeAugmentation):
+        texts = [
+            *_hypothesis_texts(value.hypotheses),
+            *value.limitations,
+            *(citation.supported_statement for citation in value.citations),
+        ]
+    invalid_count = sum(_english_narrative(text) for text in texts)
+    if invalid_count:
+        raise _ChineseOutputError(invalid_count)
 
 
 class DiagnosisModel:
@@ -175,6 +233,7 @@ class DiagnosisModel:
                         if isinstance(parsed, schema)
                         else schema.model_validate(parsed)
                     )
+                    _ensure_chinese_user_text(validated)
                     self._record_call(
                         prompt_name=prompt_name,
                         system_prompt=system_prompt,
@@ -189,32 +248,63 @@ class DiagnosisModel:
                         usage=usage,
                     )
                     return validated
-                except (OutputParserException, ValidationError) as exc:
+                except (
+                    OutputParserException,
+                    ValidationError,
+                    _ChineseOutputError,
+                ) as exc:
                     if attempt == 1:
+                        language_error = isinstance(exc, _ChineseOutputError)
                         raise AppError(
-                            code="INVALID_MODEL_OUTPUT",
+                            code=(
+                                "INVALID_MODEL_LANGUAGE"
+                                if language_error
+                                else "INVALID_MODEL_OUTPUT"
+                            ),
                             message=(
-                                "Diagnosis model returned invalid structured output"
+                                "诊断模型未按要求使用简体中文"
+                                if language_error
+                                else (
+                                    "Diagnosis model returned invalid structured output"
+                                )
                             ),
                             recoverable=True,
                             suggested_action=(
-                                "Retry with the PacketMaster structured schema."
+                                "请从最近的诊断断点重试。"
+                                if language_error
+                                else "Retry with the PacketMaster structured schema."
                             ),
                             details={
                                 "attempts": 2,
                                 "exception_type": exc.__class__.__name__,
+                                **(
+                                    {"invalid_text_fields": exc.count}
+                                    if language_error
+                                    else {}
+                                ),
                             },
                         ) from exc
+                    if isinstance(exc, _ChineseOutputError):
+                        repair_instruction = (
+                            "上一次响应的结构正确，但面向用户的报告文字包含英文。"
+                            "请保持分析结论、数值、证据引用和 JSON 结构不变，仅将 "
+                            "cause、支持/反向/缺失证据、explanation、suggestion、"
+                            "rejected_causes、limitations 等叙述字段改写为简体中文。"
+                            "TCP、RTT、ACK、Mbps、IP、流 ID、协议字段、JSON 属性名和"
+                            "枚举值保持原样。只返回 JSON 对象。"
+                        )
+                    else:
+                        repair_instruction = (
+                            "上一次响应未通过结构化校验。请保持原分析结论，"
+                            "仅修复输出结构，使其严格符合系统消息中的 JSON "
+                            "Schema；只返回 JSON 对象，不要输出解释、Markdown "
+                            "或代码块。"
+                        )
                     messages = [
                         *messages,
                         {
                             "role": "user",
-                            "content": (
-                                "上一次响应未通过结构化校验。请保持原分析结论，"
-                                "仅修复输出结构，使其严格符合系统消息中的 JSON "
-                                "Schema；只返回 JSON 对象，不要输出解释、Markdown "
-                                "或代码块。"
-                            ),
+                            "content": repair_instruction,
                         },
                     ]
         except TimeoutError as exc:

@@ -51,6 +51,9 @@ _TRANSITIONS = {
     },
     TaskStatus.ANALYZING: {
         TaskStatus.REASONING,
+        TaskStatus.VERIFYING,
+        TaskStatus.REPORTING,
+        TaskStatus.COMPLETED,
         TaskStatus.PARTIAL,
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
@@ -59,6 +62,7 @@ _TRANSITIONS = {
     TaskStatus.REASONING: {
         TaskStatus.VERIFYING,
         TaskStatus.REPORTING,
+        TaskStatus.COMPLETED,
         TaskStatus.PARTIAL,
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
@@ -66,6 +70,7 @@ _TRANSITIONS = {
     },
     TaskStatus.VERIFYING: {
         TaskStatus.REPORTING,
+        TaskStatus.COMPLETED,
         TaskStatus.PARTIAL,
         TaskStatus.FAILED,
         TaskStatus.CANCELLED,
@@ -90,6 +95,8 @@ class ClaimedAnalysis:
     standard_bandwidth_mbps: float
     actual_bandwidth_mbps: float
     target: Target
+    checkpoint_thread_id: str
+    resume_from_checkpoint: bool
 
 
 class AnalysisTaskRepository:
@@ -108,6 +115,7 @@ class AnalysisTaskRepository:
         target: Target = Target.DOWNLOAD,
         analysis_id: str | None = None,
         retry_of_analysis_id: str | None = None,
+        checkpoint_thread_id: str | None = None,
         now: datetime | None = None,
     ) -> AnalysisSummary:
         # immediate 事务先锁定写入，确保一个会话在任意时刻至多有一个活动任务。
@@ -136,8 +144,9 @@ class AnalysisTaskRepository:
                     INSERT INTO analyses (
                         analysis_id, session_id, capture_id, status,
                         standard_bandwidth_mbps, actual_bandwidth_mbps,
-                        target, created_at, updated_at, retry_of_analysis_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        target, created_at, updated_at, retry_of_analysis_id,
+                        checkpoint_thread_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         identifier,
@@ -150,6 +159,7 @@ class AnalysisTaskRepository:
                         timestamp,
                         timestamp,
                         retry_of_analysis_id,
+                        checkpoint_thread_id or identifier,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -360,6 +370,8 @@ class AnalysisTaskRepository:
                 standard_bandwidth_mbps=row["standard_bandwidth_mbps"],
                 actual_bandwidth_mbps=row["actual_bandwidth_mbps"],
                 target=Target(row["target"]),
+                checkpoint_thread_id=row["checkpoint_thread_id"] or row["analysis_id"],
+                resume_from_checkpoint=bool(row["retry_of_analysis_id"]),
             )
 
     def heartbeat(
@@ -496,6 +508,7 @@ class AnalysisTaskRepository:
             target=Target(row["target"]),
             analysis_id=new_analysis_id,
             retry_of_analysis_id=analysis_id,
+            checkpoint_thread_id=row["checkpoint_thread_id"] or analysis_id,
             now=now,
         )
 

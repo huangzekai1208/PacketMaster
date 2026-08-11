@@ -36,6 +36,34 @@ it('呈现工作台、历史会话和任务视图标签', async () => {
   expect(screen.getByText('你好，我是 PacketMaster')).toBeInTheDocument()
 })
 
+it('支持切换到通用卡顿模式并携带分析意图', async () => {
+  let submitted = ''
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input)
+    if (init?.method === 'POST' && path.includes('/messages')) submitted = String(init.body)
+    const data = path.includes('/api/health')
+      ? { status: 'ok', model_configured: true, tshark_configured: true }
+      : path.includes('/api/sessions/session-1')
+        ? { session, messages: { items: [], total: 0, offset: 0, limit: 100 }, parameters: null }
+        : { items: [session], total: 1, offset: 0, limit: 50 }
+    return new Response(JSON.stringify({ ok: true, data }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }))
+  render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
+
+  const speed = await screen.findByRole('button', { name: '测速分析' })
+  const stall = screen.getByRole('button', { name: '通用卡顿' })
+  expect(speed).toHaveAttribute('aria-pressed', 'true')
+  fireEvent.click(stall)
+  expect(stall).toHaveAttribute('aria-pressed', 'true')
+  expect(localStorage.getItem('packetmaster.analysis-mode.session-1')).toBe('stall')
+
+  fireEvent.change(screen.getByLabelText('对话输入'), { target: { value: '12 秒左右开始变慢' } })
+  fireEvent.click(screen.getByTitle('发送'))
+
+  await waitFor(() => expect(submitted).toContain('请按通用卡顿分析模式处理'))
+  expect(submitted).toContain('12 秒左右开始变慢')
+})
+
 it('展示模型 Token、成本和调用明细', () => {
   render(<LLMUsageBadge costConfigured value={{
     call_count: 3,
@@ -228,6 +256,59 @@ it('发送普通消息时会在请求完成前立即显示在对话区', async (
   await waitFor(() => expect(input.closest('.chat-view')).not.toHaveClass('chat-view-initial'))
   expect(await screen.findByText('Thinking…')).toBeInTheDocument()
   resolveMessage?.(new Response(JSON.stringify({ ok: true, data: {} }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+})
+
+it('打开页面时自动丢弃已经失效的本地会话 ID', async () => {
+  localStorage.setItem('packetmaster.session', 'deleted-session')
+  const requests: string[] = []
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input)
+    if (init?.method === 'POST' && path.includes('/messages')) requests.push(path)
+    if (path.includes('/api/sessions/deleted-session')) {
+      return new Response(JSON.stringify({ ok: false, error: { code: 'SESSION_NOT_FOUND', message: '会话不存在', suggested_action: '请选择其他会话。', recoverable: true } }), { status: 404, headers: { 'Content-Type': 'application/json' } })
+    }
+    const data = path.includes('/api/health')
+      ? { status: 'ok', model_configured: true, tshark_configured: true }
+      : path.includes('/api/sessions/session-1')
+        ? { session, messages: { items: [], total: 0, offset: 0, limit: 100 }, parameters: null }
+        : { items: [session], total: 1, offset: 0, limit: 50 }
+    return new Response(JSON.stringify({ ok: true, data }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }))
+  render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
+
+  await screen.findByLabelText('对话输入')
+  await waitFor(() => expect(localStorage.getItem('packetmaster.session')).toBe('session-1'))
+  const input = screen.getByLabelText('对话输入')
+  fireEvent.change(input, { target: { value: '测试有效会话' } })
+  fireEvent.click(screen.getByTitle('发送'))
+
+  await waitFor(() => expect(requests).toContain('/api/sessions/session-1/messages'))
+  expect(requests).not.toContain('/api/sessions/deleted-session/messages')
+})
+
+it('初始会话发送失败时显示错误并恢复输入内容', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = String(input)
+    if (init?.method === 'POST' && path.includes('/messages')) {
+      return new Response(JSON.stringify({ ok: false, error: { code: 'REQUEST_FAILED', message: '消息发送失败', suggested_action: '请检查连接后重试。', recoverable: true } }), { status: 503, headers: { 'Content-Type': 'application/json' } })
+    }
+    const data = path.includes('/api/health')
+      ? { status: 'ok', model_configured: true, tshark_configured: true }
+      : path.includes('/api/sessions/session-1')
+        ? { session, messages: { items: [], total: 0, offset: 0, limit: 100 }, parameters: null }
+        : { items: [session], total: 1, offset: 0, limit: 50 }
+    return new Response(JSON.stringify({ ok: true, data }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }))
+  render(<QueryClientProvider client={new QueryClient()}><App /></QueryClientProvider>)
+
+  const input = await screen.findByLabelText('对话输入')
+  fireEvent.change(input, { target: { value: '不能丢失的消息' } })
+  fireEvent.click(screen.getByTitle('发送'))
+
+  expect(await screen.findByText('消息发送失败')).toBeInTheDocument()
+  expect(screen.getByText('请检查连接后重试。')).toBeInTheDocument()
+  expect(input).toHaveValue('不能丢失的消息')
+  expect(input.closest('.chat-view')).not.toHaveClass('chat-view-initial')
 })
 
 it('报告完成后的追问也会在请求完成前立即显示在对话区', async () => {

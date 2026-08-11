@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,6 +36,7 @@ class DiagnosisProgress:
 
 
 ProgressHandler = Callable[[DiagnosisProgress], Awaitable[None] | None]
+StageHandler = Callable[[str], Awaitable[None] | None]
 
 
 @dataclass(frozen=True)
@@ -98,6 +101,9 @@ class DiagnosisService:
         target: Target,
         request_id: str,
         progress_handler: ProgressHandler | None = None,
+        checkpoint_thread_id: str | None = None,
+        resume_from_checkpoint: bool = False,
+        stage_handler: StageHandler | None = None,
     ) -> DiagnosisOutcome:
         # MCP Server 与 Client 在一次调用内成对创建和关闭，避免跨任务共享状态。
         def progress(value: float | None, message: str | None):
@@ -105,29 +111,101 @@ class DiagnosisService:
                 return None
             return progress_handler(DiagnosisProgress(value, message))
 
+        initial_state = {
+            "request": {
+                "request_id": request_id,
+                "pcap_path": pcap_path,
+                "target": target.value,
+            },
+            "standard_bandwidth_mbps": standard,
+            "actual_bandwidth_mbps": actual,
+        }
         server = self.server_factory(self.adapter)
-        async with self.client_factory(
-            server, progress_callback=progress
-        ) as client:
+        async with self.client_factory(server, progress_callback=progress) as client:
+            with self.llm_observer.scope(request_id) as llm_calls:
+                if checkpoint_thread_id is None:
+                    graph = self.graph_factory(
+                        mcp_client=client,
+                        diagnosis_model=self.diagnosis_model,
+                        context_builder=self.context_builder,
+                        rag_runtime=self.rag_runtime,
+                    )
+                    result = await graph.ainvoke(initial_state)
+                else:
+                    result = await self._invoke_resumable_graph(
+                        client=client,
+                        initial_state=initial_state,
+                        checkpoint_thread_id=checkpoint_thread_id,
+                        resume_from_checkpoint=resume_from_checkpoint,
+                        progress=progress,
+                        stage_handler=stage_handler,
+                    )
+        return self._finalize(result, request_id, llm_calls=llm_calls)
+
+    async def _invoke_resumable_graph(
+        self,
+        *,
+        client: Any,
+        initial_state: dict[str, Any],
+        checkpoint_thread_id: str,
+        resume_from_checkpoint: bool,
+        progress: Callable[[float | None, str | None], Any],
+        stage_handler: StageHandler | None,
+    ) -> dict[str, Any]:
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+        checkpoint_path = self.settings.graph_checkpoint_database_path
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        thread_id = self._checkpoint_thread_id(checkpoint_thread_id, initial_state)
+        config = {"configurable": {"thread_id": thread_id}}
+        async with AsyncSqliteSaver.from_conn_string(str(checkpoint_path)) as saver:
             graph = self.graph_factory(
                 mcp_client=client,
                 diagnosis_model=self.diagnosis_model,
                 context_builder=self.context_builder,
                 rag_runtime=self.rag_runtime,
+                checkpointer=saver,
+                raise_node_errors=True,
+                stage_handler=stage_handler,
             )
-            with self.llm_observer.scope(request_id) as llm_calls:
-                result = await graph.ainvoke(
-                    {
-                        "request": {
-                            "request_id": request_id,
-                            "pcap_path": pcap_path,
-                            "target": target.value,
-                        },
-                        "standard_bandwidth_mbps": standard,
-                        "actual_bandwidth_mbps": actual,
-                    }
-                )
-        return self._finalize(result, request_id, llm_calls=llm_calls)
+            checkpoint = await saver.aget_tuple(config)
+            invocation: dict[str, Any] | None = initial_state
+            if resume_from_checkpoint and checkpoint is not None:
+                snapshot = await graph.aget_state(config)
+                # TShark 节点内部没有包级 checkpoint。若它尚未成功，清除图状态并
+                # 使用本次 analysis_id 重跑，避免复用中断任务的不完整目录。
+                if snapshot.next and set(snapshot.next) <= {"validate", "analyze"}:
+                    await saver.adelete_thread(thread_id)
+                else:
+                    invocation = None
+                    resumed = progress(None, "正在从最近的成功节点恢复分析")
+                    if resumed is not None:
+                        await resumed
+            return await graph.ainvoke(invocation, config)
+
+    def _checkpoint_thread_id(
+        self, checkpoint_thread_id: str, initial_state: dict[str, Any]
+    ) -> str:
+        settings = self.settings
+        identity = {
+            "schema": 1,
+            "pcap_path": initial_state["request"]["pcap_path"],
+            "standard": initial_state["standard_bandwidth_mbps"],
+            "actual": initial_state["actual_bandwidth_mbps"],
+            "target": initial_state["request"]["target"],
+            "model": settings.model_name,
+            "model_base_url": settings.model_base_url,
+            "structured_output": settings.model_structured_output_method,
+            "rag_enabled": settings.rag_enabled,
+            "rag_mode": settings.rag_mode.value,
+            "embedding_model": settings.embedding_model,
+            "reranker_enabled": settings.reranker_enabled,
+            "reranker_model": settings.reranker_model,
+        }
+        digest = hashlib.sha256(
+            json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()[:20]
+        return f"{checkpoint_thread_id}:diagnosis-v1:{digest}"
 
     def _finalize(
         self,

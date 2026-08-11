@@ -13,6 +13,7 @@ from typing import Any
 from packetmaster.application import DiagnosisProgress, DiagnosisService
 from packetmaster.config import Settings
 from packetmaster.errors import AppError
+from packetmaster.progress import localize_progress_message
 from packetmaster.web.contracts import TaskStatus
 from packetmaster.web.database import WebDatabase
 from packetmaster.web.tasks import AnalysisTaskRepository, ClaimedAnalysis
@@ -120,8 +121,36 @@ class AnalysisWorker:
                 self.repository.update_progress(
                     task.analysis_id,
                     fraction=event.fraction,
-                    stage_message=event.message or "正在分析报文",
+                    stage_message=localize_progress_message(event.message),
                 )
+
+            def stage(node: str) -> None:
+                mapping = {
+                    "analyze": (TaskStatus.ANALYZING, "正在分析报文"),
+                    "reason": (TaskStatus.REASONING, "正在整理候选原因"),
+                    "retrieve_knowledge": (TaskStatus.REASONING, "正在检索知识"),
+                    "augment_hypotheses": (TaskStatus.REASONING, "正在融合知识"),
+                    "inspect_evidence": (TaskStatus.VERIFYING, "正在查询诊断证据"),
+                    "verify": (TaskStatus.VERIFYING, "正在复核诊断证据"),
+                    "report": (TaskStatus.REPORTING, "正在生成诊断报告"),
+                }
+                desired = mapping.get(node)
+                if desired is None:
+                    return
+                current = self.repository.get(task.analysis_id)
+                if current is None:
+                    return
+                status, message = desired
+                if current.status is status:
+                    self.repository.update_progress(
+                        task.analysis_id,
+                        fraction=current.progress_fraction,
+                        stage_message=message,
+                    )
+                else:
+                    self.repository.transition(
+                        task.analysis_id, status, stage_message=message
+                    )
 
             outcome = await self.service_factory().run(
                 pcap_path=str(task.pcap_path),
@@ -130,6 +159,9 @@ class AnalysisWorker:
                 target=task.target,
                 request_id=task.analysis_id,
                 progress_handler=progress,
+                checkpoint_thread_id=task.checkpoint_thread_id,
+                resume_from_checkpoint=task.resume_from_checkpoint,
+                stage_handler=stage,
             )
             report_path = (
                 str(outcome.report_path) if outcome.report_path is not None else None
@@ -147,21 +179,6 @@ class AnalysisWorker:
                     report_path=report_path,
                 )
                 return
-            self.repository.transition(
-                task.analysis_id,
-                TaskStatus.REASONING,
-                stage_message="正在整理候选原因",
-            )
-            self.repository.transition(
-                task.analysis_id,
-                TaskStatus.VERIFYING,
-                stage_message="正在复核诊断证据",
-            )
-            self.repository.transition(
-                task.analysis_id,
-                TaskStatus.REPORTING,
-                stage_message="正在生成诊断报告",
-            )
             self.repository.transition(
                 task.analysis_id,
                 TaskStatus.COMPLETED,

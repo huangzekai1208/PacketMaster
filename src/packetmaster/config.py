@@ -66,7 +66,8 @@ class Settings(BaseSettings):
     model_structured_output_method: Literal[
         "auto", "json_schema", "function_calling", "json_mode"
     ] = LOCAL_STRUCTURED_OUTPUT_METHOD
-    model_timeout_seconds: int = Field(default=120, gt=0)
+    # 主模型默认不设客户端超时；仍可用环境变量配置正整数恢复超时。
+    model_timeout_seconds: int | None = Field(default=None, gt=0)
     model_input_cost_per_million_usd: float | None = Field(default=None, ge=0)
     model_output_cost_per_million_usd: float | None = Field(default=None, ge=0)
     llm_observability_enabled: bool = True
@@ -79,6 +80,11 @@ class Settings(BaseSettings):
     max_inspection_rounds: int = Field(default=3, ge=1, le=3)
     # Web 仅绑定 loopback。上传报文会被复制至 artifact_root/web-captures。
     web_database_path: Path = Path("artifacts/packetmaster-web.sqlite")
+    graph_checkpoint_database_path: Path = Field(
+        default=Path("artifacts/packetmaster-checkpoints.sqlite"),
+        exclude=True,
+        repr=False,
+    )
     web_allowed_capture_roots: list[Path] = Field(default_factory=lambda: [Path.cwd()])
     web_host: Literal["127.0.0.1"] = "127.0.0.1"
     web_port: int = Field(default=8765, ge=1024, le=65535)

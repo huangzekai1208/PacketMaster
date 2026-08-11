@@ -52,7 +52,7 @@ def test_worker_claims_task_reports_progress_and_completes(tmp_path: Path) -> No
     class Service:
         async def run(self, **kwargs):
             kwargs["progress_handler"](
-                DiagnosisProgress(fraction=0.5, message="扫描中")
+                DiagnosisProgress(fraction=0.5, message="Scanning capture flows")
             )
             return DiagnosisOutcome(report=_report())
 
@@ -62,6 +62,9 @@ def test_worker_claims_task_reports_progress_and_completes(tmp_path: Path) -> No
     task = repository.get("analysis-1")
     assert task.status is TaskStatus.COMPLETED
     assert task.progress_fraction == 0.5
+    events = repository.events("analysis-1", after_event_id=0)
+    assert any(event.stage_message == "正在扫描报文流" for event in events)
+    assert all("Scanning capture flows" not in event.stage_message for event in events)
     assert asyncio.run(worker.run_once()) is False
 
 
@@ -169,6 +172,10 @@ def test_retry_creates_new_task_without_overwriting_original(tmp_path: Path) -> 
     assert repository.get("analysis-1").status is TaskStatus.CANCELLED
     assert retry.analysis_id == "analysis-2"
     assert retry.status is TaskStatus.QUEUED
+    claimed = repository.claim_next("worker-2")
+    assert claimed is not None
+    assert claimed.checkpoint_thread_id == "analysis-1"
+    assert claimed.resume_from_checkpoint is True
 
 
 def test_worker_ignores_terminal_interrupt_owned_by_parent(monkeypatch) -> None:
