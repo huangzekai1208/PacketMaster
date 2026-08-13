@@ -50,8 +50,22 @@ def test_protocol_aggregation_associates_dns_sni_http_and_endpoints() -> None:
                     "ip.dst": "198.51.100.20",
                     "tcp.srcport": "50000",
                     "tcp.dstport": "443",
+                    "tcp.stream": "1",
                     "tls.handshake.type": "1",
                     "tls.handshake.extensions_server_name": "video.example.com",
+                }
+            ),
+            _row(
+                **{
+                    "frame.time_relative": "1.1",
+                    "frame.len": "100",
+                    "_ws.col.Protocol": "TLSv1.3",
+                    "ip.src": "198.51.100.20",
+                    "ip.dst": "192.0.2.10",
+                    "tcp.srcport": "443",
+                    "tcp.dstport": "50000",
+                    "tcp.stream": "1",
+                    "tls.handshake.type": "2",
                 }
             ),
             _row(
@@ -72,6 +86,7 @@ def test_protocol_aggregation_associates_dns_sni_http_and_endpoints() -> None:
     assert summary["dns_summary"]["latency_ms"]["p95"] == 800
     assert summary["dns_summary"]["unanswered_count"] == 0
     assert summary["tls_summary"]["sni"][0]["name"] == "video.example.com"
+    assert summary["tls_summary"]["sni"][0]["server_hello_count"] == 1
     assert summary["http_summary"]["error_response_count"] == 1
     endpoint = next(
         item for item in summary["endpoint_summary"] if item["ip"] == "198.51.100.20"

@@ -40,6 +40,19 @@ _CONTEXT_TERMS = {
     "latency": ("延迟", "延时", "ping", "响应慢", "慢"),
     "buffering": ("卡顿", "缓冲", "转圈", "加载", "停顿", "黑屏"),
     "disconnect": ("断流", "断开", "掉线", "重连", "连接失败"),
+    "login": ("登录", "登陆", "认证", "鉴权", "账号", "signin", "sign in", "login"),
+}
+
+_BUSINESS_PROFILES = {
+    "playstation": {
+        "device_terms": ("ps5", "ps4", "playstation", "psn", "游戏机"),
+        "service_name": "PlayStation Network",
+        "domain_suffixes": (
+            "playstation.net",
+            "playstation.com",
+            "sonyentertainmentnetwork.com",
+        ),
+    }
 }
 
 
@@ -65,6 +78,12 @@ def parse_stall_context(value: str) -> dict[str, Any]:
             )
         }
     )[:8]
+    profiles = [
+        profile_id
+        for profile_id, profile in _BUSINESS_PROFILES.items()
+        if any(term in lowered for term in profile["device_terms"])
+    ]
+    action = "login" if "login" in tags else "general"
     if requested_hosts and "web" not in tags:
         tags.append("web")
     time_match = re.search(
@@ -87,6 +106,8 @@ def parse_stall_context(value: str) -> dict[str, Any]:
         "specificity": "specific" if tags else "generic",
         "time_offset_seconds": time_offset_seconds,
         "requested_hosts": requested_hosts,
+        "business_profiles": profiles,
+        "action": action,
     }
 
 
@@ -101,6 +122,7 @@ def context_tag_label(tag: str) -> str:
         "latency": "高延迟",
         "buffering": "缓冲卡顿",
         "disconnect": "断流/重连",
+        "login": "登录/认证",
     }.get(tag, tag)
 
 
@@ -126,6 +148,169 @@ def _match_context_endpoints(
                 }
             )
     return matched[:32]
+
+
+def _business_analysis(
+    context: dict[str, Any], protocol: dict[str, Any]
+) -> dict[str, Any]:
+    profiles = context.get("business_profiles", [])
+    if not profiles:
+        return {"targeted": False, "coverage": "not_requested", "stages": []}
+    profile_id = str(profiles[0])
+    profile = _BUSINESS_PROFILES[profile_id]
+    suffixes = tuple(profile["domain_suffixes"])
+    dns_domains = [
+        item
+        for item in _list_of_mappings(
+            _mapping(protocol.get("dns_summary")).get("domains")
+        )
+        if _matches_suffix(str(item.get("name", "")), suffixes)
+    ]
+    tls_hosts = [
+        item
+        for item in _list_of_mappings(_mapping(protocol.get("tls_summary")).get("sni"))
+        if _matches_suffix(str(item.get("name", "")), suffixes)
+    ]
+    http_hosts = [
+        name
+        for name in _mapping(_mapping(protocol.get("http_summary")).get("hosts"))
+        if _matches_suffix(str(name), suffixes)
+    ]
+    observed_hosts = sorted(
+        {
+            *(str(item.get("name")) for item in dns_domains),
+            *(str(item.get("name")) for item in tls_hosts),
+            *(str(item) for item in http_hosts),
+        }
+        - {"None", ""}
+    )
+    endpoint_ips = {
+        str(address) for item in dns_domains for address in item.get("answer_ips", [])
+    } | {str(address) for item in tls_hosts for address in item.get("endpoint_ips", [])}
+    endpoints = [
+        item
+        for item in _list_of_mappings(protocol.get("endpoint_summary"))
+        if str(item.get("ip")) in endpoint_ips
+    ]
+    stages: list[dict[str, Any]] = []
+    dns_failures = sum(
+        sum(
+            _int_value(count)
+            for code, count in _mapping(item.get("rcodes")).items()
+            if code != "0"
+        )
+        for item in dns_domains
+    )
+    dns_unanswered = sum(
+        max(
+            0,
+            _int_value(item.get("query_count"))
+            - _int_value(item.get("response_count")),
+        )
+        for item in dns_domains
+    )
+    stages.append(
+        _stage(
+            "dns",
+            "域名解析",
+            "failed"
+            if dns_failures or dns_unanswered
+            else "ok"
+            if dns_domains
+            else "not_observed",
+            f"发现 {len(dns_domains)} 个相关域名，"
+            f"失败 {dns_failures}，未响应 {dns_unanswered}",
+        )
+    )
+    syn = sum(_int_value(item.get("tcp_syn")) for item in endpoints)
+    syn_ack = sum(_int_value(item.get("tcp_syn_ack")) for item in endpoints)
+    resets = sum(_int_value(item.get("tcp_resets")) for item in endpoints)
+    retransmissions = sum(
+        _int_value(item.get("tcp_retransmissions")) for item in endpoints
+    )
+    transport_status = "not_observed"
+    if endpoints:
+        transport_status = (
+            "failed"
+            if resets or (syn > syn_ack + 2)
+            else "degraded"
+            if retransmissions
+            else "ok"
+        )
+    stages.append(
+        _stage(
+            "transport",
+            "网络连接",
+            transport_status,
+            f"SYN/SYN-ACK {syn}/{syn_ack}，RST {resets}，重传 {retransmissions}",
+        )
+    )
+    tls_client = sum(_int_value(item.get("client_hello_count")) for item in tls_hosts)
+    tls_server = sum(_int_value(item.get("server_hello_count")) for item in tls_hosts)
+    tls_alerts = sum(_int_value(item.get("alert_count")) for item in tls_hosts)
+    tls_status = "not_observed"
+    if tls_hosts:
+        tls_status = "failed" if tls_alerts or tls_client > tls_server + 1 else "ok"
+    stages.append(
+        _stage(
+            "tls",
+            "TLS 安全协商",
+            tls_status,
+            f"ClientHello/ServerHello {tls_client}/{tls_server}，告警 {tls_alerts}",
+        )
+    )
+    stages.append(
+        _stage(
+            "authentication",
+            "账号认证",
+            "encrypted" if tls_hosts else "not_observed",
+            "HTTPS 加密下无法从报文直接读取账号、口令或认证业务码",
+        )
+    )
+    observed = bool(observed_hosts or endpoints)
+    failing = next((stage for stage in stages if stage["status"] == "failed"), None)
+    degraded = next((stage for stage in stages if stage["status"] == "degraded"), None)
+    if failing:
+        conclusion = (
+            f"{profile['service_name']} 登录链路异常集中在“{failing['name']}”阶段"
+        )
+    elif degraded:
+        conclusion = (
+            f"{profile['service_name']} 登录链路在“{degraded['name']}”阶段质量下降"
+        )
+    elif observed:
+        conclusion = (
+            f"已观察到 {profile['service_name']} 网络登录链路，"
+            "未发现明确的解析、连接或 TLS 失败；"
+            "账号认证结果因 HTTPS 加密不可见"
+        )
+    else:
+        conclusion = (
+            f"报文中未识别到 {profile['service_name']} 相关 DNS、SNI 或端点，"
+            "当前抓包可能未覆盖登录过程"
+        )
+    return {
+        "targeted": True,
+        "profile": profile_id,
+        "service_name": profile["service_name"],
+        "action": context.get("action"),
+        "coverage": "observed" if observed else "not_observed",
+        "observed_hosts": observed_hosts,
+        "endpoint_ips": sorted(endpoint_ips),
+        "stages": stages,
+        "conclusion": conclusion,
+    }
+
+
+def _matches_suffix(hostname: str, suffixes: tuple[str, ...]) -> bool:
+    hostname = hostname.lower().rstrip(".")
+    return any(
+        hostname == suffix or hostname.endswith(f".{suffix}") for suffix in suffixes
+    )
+
+
+def _stage(stage_id: str, name: str, status: str, evidence: str) -> dict[str, str]:
+    return {"stage": stage_id, "name": name, "status": status, "evidence": evidence}
 
 
 def _prioritize_events(
@@ -188,6 +373,32 @@ def _context_first_step(context: dict[str, Any]) -> str:
     if "game" in tags or "meeting" in tags:
         return prefix + "按实时业务时间点对照 UDP/QUIC 间断、时延和丢包迹象。"
     return prefix + "按卡顿事件时间窗定位受影响流。"
+
+
+def _business_first_step(business: dict[str, Any]) -> str:
+    if not business.get("targeted"):
+        return ""
+    if business.get("coverage") == "not_observed":
+        return (
+            f"重新抓取包含 {business.get('service_name', '目标业务')} "
+            "登录操作全过程的报文，"
+            "从点击登录前开始，持续到错误出现后至少 10 秒。"
+        )
+    return (
+        f"先沿 {business.get('service_name', '目标业务')} 登录链路逐阶段核对 "
+        "DNS、TCP/QUIC、TLS 和认证结果。"
+    )
+
+
+def _business_stage_suggestion(stage: str) -> str:
+    return {
+        "dns": "检查主机 DNS 配置、解析响应码、超时和 PlayStation 相关域名可达性。",
+        "transport": "检查到相关服务端 IP 的路由、防火墙、NAT、RST、重传和建连超时。",
+        "tls": "检查系统时间、证书链、TLS 中间设备、SNI 路由和服务端握手日志。",
+        "authentication": (
+            "结合 PS5 错误码、PSN 服务状态和账号认证日志确认应用层拒绝原因。"
+        ),
+    }.get(stage, "结合终端错误码和服务端日志继续定位。")
 
 
 @dataclass(frozen=True)
@@ -324,6 +535,7 @@ def build_stall_report(
     protocol = protocol or {}
     user_context = parse_stall_context(symptom_context)
     user_context["matched_endpoints"] = _match_context_endpoints(user_context, protocol)
+    business = _business_analysis(user_context, protocol)
     coverage = CoverageSummary.model_validate(summary.get("coverage_summary", {}))
     tcp = (
         summary.get("tcp_summary")
@@ -341,6 +553,34 @@ def build_stall_report(
     events, throughput_drops, gaps = _stall_events(intervals)
     events = _prioritize_events(events, user_context)
     candidates: list[Hypothesis] = []
+    if business.get("targeted"):
+        failed_stage = next(
+            (
+                stage
+                for stage in business.get("stages", [])
+                if stage.get("status") == "failed"
+            ),
+            None,
+        )
+        degraded_stage = next(
+            (
+                stage
+                for stage in business.get("stages", [])
+                if stage.get("status") == "degraded"
+            ),
+            None,
+        )
+        if failed_stage or degraded_stage:
+            stage = failed_stage or degraded_stage
+            candidates.append(
+                _hypothesis(
+                    f"{business['service_name']} 登录链路的{stage['name']}异常",
+                    96.0 if failed_stage else 84.0,
+                    [stage["evidence"], *business.get("observed_hosts", [])[:8]],
+                    _business_stage_suggestion(str(stage["stage"])),
+                    business.get("endpoint_ips", [])[:16],
+                )
+            )
 
     retransmissions = _count(tcp, "retransmission_count")
     packets = max(1, _count(tcp, "packet_count"))
@@ -520,7 +760,11 @@ def build_stall_report(
     if manifest.get("status") == "partial":
         limitations.append("报文分析覆盖不完整，候选原因置信度需要谨慎解释。")
     primary = (
-        candidates[0].cause if candidates else "未发现明确的网络层或应用协议卡顿原因"
+        str(business["conclusion"])
+        if business.get("targeted")
+        else candidates[0].cause
+        if candidates
+        else "未发现明确的网络层或应用协议卡顿原因"
     )
     confidence = candidates[0].confidence if candidates else 30.0
     return StallDiagnosticReport(
@@ -548,9 +792,10 @@ def build_stall_report(
         udp_summary=udp,
         keyword_summary={key: _int_value(value) for key, value in keywords.items()},
         user_context=user_context,
+        business_analysis=business,
         limitations=limitations,
         troubleshooting_steps=[
-            _context_first_step(user_context),
+            _business_first_step(business) or _context_first_step(user_context),
             "对照同一时间窗检查重传、RTT、接收窗口和吞吐变化。",
             "按端点关联的 DNS、SNI 和 HTTP Host 确认受影响业务。",
             "若协议指标正常，结合终端、播放器、服务端和无线侧日志继续定位。",

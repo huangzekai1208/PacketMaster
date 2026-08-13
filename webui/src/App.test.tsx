@@ -69,7 +69,7 @@ it('卡顿报告展示多协议关联且不展示带宽指标', async () => {
   vi.stubGlobal('EventSource', class { addEventListener() {} close() {} })
   const completedSession = { ...session, status: 'completed', current_analysis_id: 'analysis-1' }
   const analysis = { analysis_id: 'analysis-1', session_id: 'session-1', status: 'completed', stage_message: '分析完成', progress_fraction: 1, capture: { capture_id: 'capture-1', file_name: 'stall.pcapng', size_bytes: 1024 }, mode: 'stall', standard_bandwidth_mbps: 1, actual_bandwidth_mbps: 1, target: 'both', created_at: '2026-08-11T00:00:00Z', updated_at: '2026-08-11T00:00:01Z', elapsed_seconds: 1 }
-  const report = { mode: 'stall', analysis_id: 'analysis-1', primary_cause: 'DNS 解析失败或请求未获得响应', candidate_causes: [], key_evidence: [], confidence: 88, coverage_summary: { complete: true, truncated: false }, stall_events: [], protocol_summary: { tcp_flow_count: 1 }, endpoint_summary: [{ ip: '198.51.100.20', scope: 'public', packets: 20, protocols: ['TLSv1.3'], domains: ['video.example.com'], sni: ['video.example.com'] }], dns_summary: { failure_count: 1, unanswered_count: 1, latency_ms: { p95: 800 }, domains: [{ name: 'video.example.com', answer_ips: ['198.51.100.20'] }] }, tls_summary: { alert_count: 0, sni: [{ name: 'video.example.com', endpoint_ips: ['198.51.100.20'] }] }, http_summary: { error_response_count: 0, latency_ms: { p95: 120 } }, udp_summary: { quic_packet_count: 4 }, keyword_summary: {}, limitations: [], troubleshooting_steps: [], optimization_suggestions: [], analysis_metadata: {} }
+  const report = { mode: 'stall', analysis_id: 'analysis-1', primary_cause: 'PlayStation Network 登录链路异常集中在“域名解析”阶段', candidate_causes: [], key_evidence: [], confidence: 88, coverage_summary: { complete: true, truncated: false }, stall_events: [], protocol_summary: { tcp_flow_count: 1 }, endpoint_summary: [{ ip: '198.51.100.20', scope: 'public', packets: 20, protocols: ['TLSv1.3'], domains: ['auth.api.playstation.com'], sni: ['auth.api.playstation.com'] }], dns_summary: { failure_count: 1, unanswered_count: 1, latency_ms: { p95: 800 }, domains: [{ name: 'auth.api.playstation.com', answer_ips: ['198.51.100.20'] }] }, tls_summary: { alert_count: 0, sni: [{ name: 'auth.api.playstation.com', endpoint_ips: ['198.51.100.20'] }] }, http_summary: { error_response_count: 0, latency_ms: { p95: 120 } }, udp_summary: { quic_packet_count: 4 }, keyword_summary: {}, user_context: { summary: '游戏、登录/认证', tags: ['game', 'login'] }, business_analysis: { targeted: true, service_name: 'PlayStation Network', action: 'login', conclusion: 'PlayStation Network 登录链路异常集中在“域名解析”阶段', observed_hosts: ['auth.api.playstation.com'], stages: [{ stage: 'dns', name: '域名解析', status: 'failed', evidence: '发现 1 个相关域名，失败 1，未响应 1' }, { stage: 'transport', name: '网络连接', status: 'not_observed', evidence: 'SYN/SYN-ACK 0/0' }, { stage: 'tls', name: 'TLS 安全协商', status: 'not_observed', evidence: 'ClientHello/ServerHello 0/0' }, { stage: 'authentication', name: '账号认证', status: 'not_observed', evidence: '认证内容不可见' }] }, limitations: [], troubleshooting_steps: [], optimization_suggestions: [], analysis_metadata: {} }
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const path = String(input)
     const data = path.endsWith('/report') ? { analysis_id: 'analysis-1', report }
@@ -84,8 +84,9 @@ it('卡顿报告展示多协议关联且不展示带宽指标', async () => {
 
   fireEvent.click(await screen.findByRole('button', { name: /报告/ }))
 
-  expect(await screen.findByText('DNS 解析失败或请求未获得响应')).toBeInTheDocument()
-  expect(screen.getAllByText('video.example.com').length).toBeGreaterThan(0)
+  expect((await screen.findAllByText('PlayStation Network 登录链路异常集中在“域名解析”阶段')).length).toBeGreaterThan(0)
+  expect(screen.getByText('账号认证')).toBeInTheDocument()
+  expect(screen.getAllByText('auth.api.playstation.com').length).toBeGreaterThan(0)
   expect(screen.getByText('198.51.100.20')).toBeInTheDocument()
   expect(screen.queryByText('标准带宽')).not.toBeInTheDocument()
   expect(screen.queryByText('实际带宽')).not.toBeInTheDocument()

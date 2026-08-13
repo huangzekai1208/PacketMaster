@@ -26,6 +26,11 @@ FIELDS = [
     "ipv6.dst",
     "tcp.srcport",
     "tcp.dstport",
+    "tcp.stream",
+    "tcp.flags.syn",
+    "tcp.flags.ack",
+    "tcp.flags.reset",
+    "tcp.analysis.retransmission",
     "udp.srcport",
     "udp.dstport",
     "udp.length",
@@ -144,6 +149,7 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
     dns_latencies: list[float] = []
     dns_responses = dns_failures = 0
     sni: dict[str, dict[str, Any]] = defaultdict(_sni)
+    tls_stream_hosts: dict[str, str] = {}
     tls_client_hellos = tls_server_hellos = tls_alerts = 0
     http_hosts: Counter[str] = Counter()
     http_requests = http_responses = http_errors = 0
@@ -167,6 +173,15 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
         size = _int(row.get("frame.len"))
         _observe_endpoint(endpoints, src, protocol, sent=size)
         _observe_endpoint(endpoints, dst, protocol, received=size)
+        if row.get("tcp.analysis.retransmission"):
+            endpoints[src]["tcp_retransmissions"] += 1
+        if row.get("tcp.flags.reset") == "1":
+            endpoints[src]["tcp_resets"] += 1
+        if row.get("tcp.flags.syn") == "1":
+            if row.get("tcp.flags.ack") == "1":
+                endpoints[src]["tcp_syn_ack"] += 1
+            else:
+                endpoints[dst]["tcp_syn"] += 1
 
         query_name = _hostname(row.get("dns.qry.name"))
         dns_id = _bounded(row.get("dns.id"), 32)
@@ -192,6 +207,7 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
             if latency > 0:
                 dns_latencies.append(latency * 1000)
 
+        tcp_stream = _bounded(row.get("tcp.stream"), 32)
         handshake_types = set(_csv(row.get("tls.handshake.type")))
         hostname = _hostname(row.get("tls.handshake.extensions_server_name"))
         if "1" in handshake_types:
@@ -200,11 +216,19 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
             tls_server_hellos += 1
         if hostname:
             sni[hostname]["count"] += 1
+            sni[hostname]["client_hello_count"] += 1
+            if tcp_stream:
+                tls_stream_hosts[tcp_stream] = hostname
             if dst:
                 sni[hostname]["endpoint_ips"].add(dst)
                 endpoints[dst]["sni"].add(hostname)
+        stream_hostname = tls_stream_hosts.get(tcp_stream, "")
+        if "2" in handshake_types and stream_hostname:
+            sni[stream_hostname]["server_hello_count"] += 1
         if row.get("tls.alert_message.desc"):
             tls_alerts += 1
+            if stream_hostname:
+                sni[stream_hostname]["alert_count"] += 1
 
         method = _bounded(row.get("http.request.method"), 16)
         host = _hostname(row.get("http.host"))
@@ -336,6 +360,10 @@ def _serialize_endpoints(values: dict[str, dict[str, Any]]) -> list[dict[str, An
                 "sent_bytes": value["sent_bytes"],
                 "received_bytes": value["received_bytes"],
                 "protocols": sorted(value["protocols"])[:16],
+                "tcp_syn": value["tcp_syn"],
+                "tcp_syn_ack": value["tcp_syn_ack"],
+                "tcp_resets": value["tcp_resets"],
+                "tcp_retransmissions": value["tcp_retransmissions"],
                 "domains": sorted(value["domains"])[:32],
                 "sni": sorted(value["sni"])[:32],
             }
@@ -363,6 +391,9 @@ def _serialize_sni(values: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
         {
             "name": name,
             "count": value["count"],
+            "client_hello_count": value["client_hello_count"],
+            "server_hello_count": value["server_hello_count"],
+            "alert_count": value["alert_count"],
             "endpoint_ips": sorted(value["endpoint_ips"])[:32],
         }
         for name, value in sorted(
@@ -377,6 +408,10 @@ def _endpoint() -> dict[str, Any]:
         "sent_bytes": 0,
         "received_bytes": 0,
         "protocols": set(),
+        "tcp_syn": 0,
+        "tcp_syn_ack": 0,
+        "tcp_resets": 0,
+        "tcp_retransmissions": 0,
         "domains": set(),
         "sni": set(),
     }
@@ -392,7 +427,13 @@ def _domain() -> dict[str, Any]:
 
 
 def _sni() -> dict[str, Any]:
-    return {"count": 0, "endpoint_ips": set()}
+    return {
+        "count": 0,
+        "client_hello_count": 0,
+        "server_hello_count": 0,
+        "alert_count": 0,
+        "endpoint_ips": set(),
+    }
 
 
 def _observe_endpoint(
