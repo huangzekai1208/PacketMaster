@@ -18,6 +18,7 @@ from pydantic import BaseModel, ValidationError
 from packetmaster.config import Settings
 from packetmaster.context import DiagnosisContext, bounded_evidence
 from packetmaster.domain import (
+    BusinessTargetSelection,
     ChatAnswer,
     ChatModelContext,
     DiagnosisIntent,
@@ -47,6 +48,13 @@ from packetmaster.rag.contracts import KnowledgeAugmentation, KnowledgeBundle
 
 _CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 _LATIN_WORD_PATTERN = re.compile(r"[A-Za-z]{2,}")
+_BUSINESS_URL_PATTERN = re.compile(
+    r"https?://(?P<host>[a-z0-9.-]+)(?::\d+)?(?:/[^\s]*)?", re.IGNORECASE
+)
+_BUSINESS_SECRET_PATTERN = re.compile(
+    r"(?i)(?:bearer\s+\S+|sk-[a-z0-9_-]{12,}|"
+    r"(?:api[_-]?key|authorization|token|password|passwd|密码)\s*[:=：]\s*\S+)"
+)
 
 
 class _ChineseOutputError(ValueError):
@@ -80,6 +88,13 @@ def _english_narrative(value: str) -> bool:
     if all(word.isupper() and len(word) <= 8 for word in words):
         return False
     return len(words) >= 2 or sum(len(word) for word in words) >= 10
+
+
+def _bounded_business_symptom(value: str) -> str:
+    """Retain the business subject and action without URL paths or credentials."""
+    without_paths = _BUSINESS_URL_PATTERN.sub(lambda match: match.group("host"), value)
+    without_secrets = _BUSINESS_SECRET_PATTERN.sub("<敏感信息已隐藏>", without_paths)
+    return " ".join(without_secrets.split()).strip()[:500]
 
 
 def _ensure_chinese_user_text(value: BaseModel) -> None:
@@ -120,9 +135,7 @@ class DiagnosisModel:
         if configured != "auto":
             return configured
         provider_identity = " ".join(
-            value
-            for value in (settings.model_name, settings.model_base_url)
-            if value
+            value for value in (settings.model_name, settings.model_base_url) if value
         ).lower()
         return "json_mode" if "deepseek" in provider_identity else "json_schema"
 
@@ -155,8 +168,10 @@ class DiagnosisModel:
     @staticmethod
     def _prompt(name: str) -> str:
         try:
-            return files("packetmaster").joinpath("prompts", name).read_text(
-                encoding="utf-8"
+            return (
+                files("packetmaster")
+                .joinpath("prompts", name)
+                .read_text(encoding="utf-8")
             )
         except (FileNotFoundError, ModuleNotFoundError, OSError) as exc:
             raise AppError(
@@ -482,9 +497,7 @@ class DiagnosisModel:
                 operation=prompt_name.removesuffix(".md"),
                 model_name=settings.model_name,
                 prompt_name=prompt_name,
-                prompt_sha256=hashlib.sha256(
-                    system_prompt.encode("utf-8")
-                ).hexdigest(),
+                prompt_sha256=hashlib.sha256(system_prompt.encode("utf-8")).hexdigest(),
                 output_schema=schema.__name__,
                 structured_output_method=method,
                 started_at=started_at,
@@ -532,9 +545,7 @@ class DiagnosisModel:
             error_code=error.code,
         )
 
-    async def generate_hypotheses(
-        self, context: DiagnosisContext
-    ) -> HypothesisBatch:
+    async def generate_hypotheses(self, context: DiagnosisContext) -> HypothesisBatch:
         result = await self._invoke(
             HypothesisBatch,
             "hypothesis.md",
@@ -598,6 +609,39 @@ class DiagnosisModel:
             intent.capture = None
             intent.ambiguities.append("检测到多个报文路径")
         return merge_intent(previous, intent), extraction
+
+    async def select_business_target(
+        self,
+        symptom: str,
+        candidates: list[dict[str, Any]],
+    ) -> BusinessTargetSelection:
+        bounded = [
+            {
+                "family": str(item.get("family", ""))[:253],
+                "hosts": [str(host)[:253] for host in item.get("hosts", [])[:16]],
+                "reasons": [
+                    str(reason)[:128] for reason in item.get("reasons", [])[:8]
+                ],
+            }
+            for item in candidates[:16]
+        ]
+        result = await self._invoke(
+            BusinessTargetSelection,
+            "business_target.md",
+            {
+                "symptom": _bounded_business_symptom(symptom),
+                "candidate_businesses": bounded,
+            },
+        )
+        selection = BusinessTargetSelection.model_validate(result)
+        allowed = {item["family"] for item in bounded}
+        if selection.selected_family not in allowed:
+            return BusinessTargetSelection(
+                confidence=0,
+                ambiguous=True,
+                matched_subject=selection.matched_subject,
+            )
+        return selection
 
     async def verify(
         self,

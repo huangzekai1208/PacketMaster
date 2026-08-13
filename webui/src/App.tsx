@@ -296,9 +296,12 @@ function StallProtocolDetails({ report }: { report: Extract<Report, { mode: 'sta
 function BusinessPath({ value }: { value: Record<string, unknown> }) {
   const stages = objectArray(value.stages)
   const hosts = arrayValue(value.observed_hosts)
+  const candidates = objectArray(value.candidate_services)
   const statusText: Record<string, string> = { ok: '正常', failed: '异常', degraded: '质量下降', encrypted: '加密不可见', not_observed: '未观察到' }
-  return <Section title={`${String(value.service_name ?? '目标业务')} ${value.action === 'login' ? '登录链路' : '业务链路'}`}><p>{String(value.conclusion ?? '')}</p><div className="cause-list">{stages.map(stage => <div className="context-status" key={String(stage.stage)}><b>{String(stage.name)}</b><StatusPill value={statusText[String(stage.status)] ?? String(stage.status)} tone={String(stage.status)} /><span>{String(stage.evidence ?? '')}</span></div>)}</div>{hosts.length > 0 && <p><b>相关业务域名：</b>{hosts.join('、')}</p>}</Section>
+  return <Section title={`${String(value.service_name ?? '目标业务')} ${businessActionText(String(value.action ?? 'general'))}链路`}><p>{String(value.conclusion ?? '')}</p>{value.ambiguous === true && candidates.length > 0 && <div className="notice">候选业务：{candidates.map(item => `${String(item.family)}${numeric(item.score) > 0 ? `（异常分 ${numeric(item.score)}）` : ''}`).join('、')}</div>}<div className="cause-list">{stages.map(stage => <div className="context-status" key={String(stage.stage)}><b>{String(stage.name)}</b><StatusPill value={statusText[String(stage.status)] ?? String(stage.status)} tone={String(stage.status)} /><span>{String(stage.evidence ?? '')}</span></div>)}</div>{hosts.length > 0 && <p><b>相关业务域名：</b>{hosts.join('、')}</p>}</Section>
 }
+
+const businessActionText = (value: string): string => ({ login: '登录', play: '播放', download: '下载', connect: '连接', general: '业务' }[value] ?? '业务')
 
 function StatusPill({ value, tone }: { value: string; tone: string }) { return <small className={tone === 'failed' || tone === 'degraded' ? 'danger' : 'muted'}>{value}</small> }
 

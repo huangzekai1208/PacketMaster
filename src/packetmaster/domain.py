@@ -266,6 +266,13 @@ class StallDiagnosticReport(ContractModel):
     analysis_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class BusinessTargetSelection(ContractModel):
+    selected_family: str | None = Field(default=None, max_length=253)
+    confidence: ConfidencePercentage = 0
+    ambiguous: bool = True
+    matched_subject: str = Field(default="", max_length=128)
+
+
 class IntentFieldStatus(StrEnum):
     """Deterministic status for one natural-language intent field."""
 

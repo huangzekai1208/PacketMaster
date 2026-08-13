@@ -220,3 +220,137 @@ def test_ps5_login_reports_when_capture_does_not_cover_psn() -> None:
     assert report.troubleshooting_steps[0].startswith(
         "重新抓取包含 PlayStation Network"
     )
+
+
+def test_generic_description_selects_observed_business_cluster() -> None:
+    report = build_stall_report(
+        "generic-login",
+        {"coverage_summary": {"complete": True}},
+        {"status": "completed"},
+        {
+            "dns_summary": {
+                "domains": [
+                    {
+                        "name": "login.example.net",
+                        "query_count": 2,
+                        "response_count": 1,
+                        "rcodes": {"2": 1},
+                        "answer_ips": [],
+                    }
+                ]
+            },
+            "tls_summary": {"sni": []},
+            "http_summary": {"hosts": {}},
+            "endpoint_summary": [],
+        },
+        symptom_context="用户反馈账号无法登录",
+    )
+
+    assert report.business_analysis["resolution_source"] == "observed_anomaly"
+    assert report.business_analysis["service_name"] == "example.net"
+    assert report.business_analysis["stages"][0]["status"] == "failed"
+    assert "example.net" in report.primary_cause
+
+
+def test_generic_description_marks_competing_businesses_ambiguous() -> None:
+    report = build_stall_report(
+        "ambiguous-login",
+        {"coverage_summary": {"complete": True}},
+        {"status": "completed"},
+        {
+            "dns_summary": {
+                "domains": [
+                    {
+                        "name": "login.one.test",
+                        "query_count": 1,
+                        "response_count": 0,
+                        "rcodes": {},
+                        "answer_ips": [],
+                    },
+                    {
+                        "name": "login.two.example",
+                        "query_count": 1,
+                        "response_count": 0,
+                        "rcodes": {},
+                        "answer_ips": [],
+                    },
+                ]
+            },
+            "tls_summary": {"sni": []},
+            "http_summary": {"hosts": {}},
+            "endpoint_summary": [],
+        },
+        symptom_context="某网站登录失败",
+    )
+
+    assert report.business_analysis["ambiguous"] is True
+    assert "多个相关候选业务簇" in report.primary_cause
+
+
+def test_semantic_selection_targets_one_observed_business_cluster() -> None:
+    report = build_stall_report(
+        "semantic-game-login",
+        {"coverage_summary": {"complete": True}},
+        {"status": "completed"},
+        {
+            "dns_summary": {
+                "domains": [
+                    {
+                        "name": "auth.game-service.example",
+                        "query_count": 1,
+                        "response_count": 0,
+                        "rcodes": {},
+                        "answer_ips": [],
+                    },
+                    {
+                        "name": "updates.device-vendor.test",
+                        "query_count": 1,
+                        "response_count": 0,
+                        "rcodes": {},
+                        "answer_ips": [],
+                    },
+                ]
+            },
+            "tls_summary": {"sni": []},
+            "http_summary": {"hosts": {}},
+            "endpoint_summary": [],
+        },
+        symptom_context="某游戏客户端无法登录",
+        semantic_selection={
+            "selected_family": "game-service.example",
+            "confidence": 88,
+            "ambiguous": False,
+            "matched_subject": "某游戏客户端",
+        },
+    )
+
+    assert report.business_analysis["resolution_source"] == "semantic_match"
+    assert report.business_analysis["ambiguous"] is False
+    assert report.business_analysis["service_name"] == "game-service.example"
+    assert "game-service.example" in report.primary_cause
+
+
+def test_low_confidence_semantic_selection_remains_ambiguous() -> None:
+    report = build_stall_report(
+        "semantic-low-confidence",
+        {"coverage_summary": {"complete": True}},
+        {"status": "completed"},
+        {
+            "dns_summary": {
+                "domains": [
+                    {"name": "one.example", "query_count": 1},
+                    {"name": "two.test", "query_count": 1},
+                ]
+            }
+        },
+        symptom_context="应用打开后一直转圈",
+        semantic_selection={
+            "selected_family": "one.example",
+            "confidence": 40,
+            "ambiguous": False,
+            "matched_subject": "应用",
+        },
+    )
+
+    assert report.business_analysis["ambiguous"] is True
+    assert "多个相关候选业务簇" in report.primary_cause

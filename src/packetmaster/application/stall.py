@@ -27,6 +27,7 @@ from packetmaster.domain import (
     StallDiagnosticReport,
 )
 from packetmaster.errors import AppError
+from packetmaster.model import DiagnosisModel
 
 ProgressCallback = Callable[[float | None, str], None]
 
@@ -41,11 +42,12 @@ _CONTEXT_TERMS = {
     "buffering": ("卡顿", "缓冲", "转圈", "加载", "停顿", "黑屏"),
     "disconnect": ("断流", "断开", "掉线", "重连", "连接失败"),
     "login": ("登录", "登陆", "认证", "鉴权", "账号", "signin", "sign in", "login"),
+    "connect": ("无法连接", "连不上", "连接超时", "connect"),
 }
 
 _BUSINESS_PROFILES = {
     "playstation": {
-        "device_terms": ("ps5", "ps4", "playstation", "psn", "游戏机"),
+        "device_terms": ("ps5", "ps4", "playstation", "psn"),
         "service_name": "PlayStation Network",
         "domain_suffixes": (
             "playstation.net",
@@ -83,7 +85,17 @@ def parse_stall_context(value: str) -> dict[str, Any]:
         for profile_id, profile in _BUSINESS_PROFILES.items()
         if any(term in lowered for term in profile["device_terms"])
     ]
-    action = "login" if "login" in tags else "general"
+    action = (
+        "login"
+        if "login" in tags
+        else "play"
+        if "video" in tags
+        else "download"
+        if "download" in tags
+        else "connect"
+        if "connect" in tags
+        else "general"
+    )
     if requested_hosts and "web" not in tags:
         tags.append("web")
     time_match = re.search(
@@ -123,6 +135,7 @@ def context_tag_label(tag: str) -> str:
         "buffering": "缓冲卡顿",
         "disconnect": "断流/重连",
         "login": "登录/认证",
+        "connect": "连接",
     }.get(tag, tag)
 
 
@@ -151,14 +164,14 @@ def _match_context_endpoints(
 
 
 def _business_analysis(
-    context: dict[str, Any], protocol: dict[str, Any]
+    context: dict[str, Any],
+    protocol: dict[str, Any],
+    semantic_selection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    profiles = context.get("business_profiles", [])
-    if not profiles:
+    target = _resolve_business_target(context, protocol, semantic_selection)
+    if target is None:
         return {"targeted": False, "coverage": "not_requested", "stages": []}
-    profile_id = str(profiles[0])
-    profile = _BUSINESS_PROFILES[profile_id]
-    suffixes = tuple(profile["domain_suffixes"])
+    suffixes = tuple(target["domain_suffixes"])
     dns_domains = [
         item
         for item in _list_of_mappings(
@@ -262,37 +275,52 @@ def _business_analysis(
     stages.append(
         _stage(
             "authentication",
-            "账号认证",
+            "账号认证" if context.get("action") == "login" else "应用业务结果",
             "encrypted" if tls_hosts else "not_observed",
-            "HTTPS 加密下无法从报文直接读取账号、口令或认证业务码",
+            _encrypted_stage_evidence(str(context.get("action", "general"))),
         )
     )
     observed = bool(observed_hosts or endpoints)
     failing = next((stage for stage in stages if stage["status"] == "failed"), None)
     degraded = next((stage for stage in stages if stage["status"] == "degraded"), None)
-    if failing:
+    action_name = _action_label(str(context.get("action", "general")))
+    if target.get("ambiguous"):
+        names = "、".join(
+            str(item.get("family", item)) for item in target.get("candidates", [])[:4]
+        )
         conclusion = (
-            f"{profile['service_name']} 登录链路异常集中在“{failing['name']}”阶段"
+            f"描述未提供明确业务地址，报文中存在多个相关候选业务簇：{names}；"
+            "需结合操作时间或目标域名确认分析对象"
+        )
+    elif failing:
+        conclusion = (
+            f"{target['service_name']} {action_name}链路异常集中在"
+            f"“{failing['name']}”阶段"
         )
     elif degraded:
         conclusion = (
-            f"{profile['service_name']} 登录链路在“{degraded['name']}”阶段质量下降"
+            f"{target['service_name']} {action_name}链路在"
+            f"“{degraded['name']}”阶段质量下降"
         )
     elif observed:
         conclusion = (
-            f"已观察到 {profile['service_name']} 网络登录链路，"
+            f"已观察到 {target['service_name']} 网络{action_name}链路，"
             "未发现明确的解析、连接或 TLS 失败；"
-            "账号认证结果因 HTTPS 加密不可见"
+            f"{_encrypted_boundary(str(context.get('action', 'general')))}"
         )
     else:
         conclusion = (
-            f"报文中未识别到 {profile['service_name']} 相关 DNS、SNI 或端点，"
-            "当前抓包可能未覆盖登录过程"
+            f"报文中未识别到 {target['service_name']} 相关 DNS、SNI 或端点，"
+            f"当前抓包可能未覆盖{action_name}过程"
         )
     return {
         "targeted": True,
-        "profile": profile_id,
-        "service_name": profile["service_name"],
+        "profile": target.get("profile"),
+        "resolution_source": target["source"],
+        "resolution_confidence": target["confidence"],
+        "candidate_services": target.get("candidates", []),
+        "ambiguous": target.get("ambiguous", False),
+        "service_name": target["service_name"],
         "action": context.get("action"),
         "coverage": "observed" if observed else "not_observed",
         "observed_hosts": observed_hosts,
@@ -300,6 +328,171 @@ def _business_analysis(
         "stages": stages,
         "conclusion": conclusion,
     }
+
+
+def _resolve_business_target(
+    context: dict[str, Any],
+    protocol: dict[str, Any],
+    semantic_selection: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    requested_hosts = [str(host) for host in context.get("requested_hosts", [])]
+    if requested_hosts:
+        families = sorted({_domain_family(host) for host in requested_hosts})
+        return {
+            "service_name": "、".join(requested_hosts),
+            "domain_suffixes": tuple(families),
+            "source": "user_domain",
+            "confidence": 100,
+            "candidates": requested_hosts,
+            "ambiguous": len(families) > 1,
+        }
+    profiles = context.get("business_profiles", [])
+    if profiles:
+        profile_id = str(profiles[0])
+        profile = _BUSINESS_PROFILES[profile_id]
+        return {
+            "profile": profile_id,
+            "service_name": profile["service_name"],
+            "domain_suffixes": tuple(profile["domain_suffixes"]),
+            "source": "known_profile",
+            "confidence": 95,
+            "candidates": [],
+            "ambiguous": False,
+        }
+    if not context.get("provided"):
+        return None
+    candidates = _rank_observed_businesses(protocol)
+    if not candidates:
+        return None
+    semantic_family = str((semantic_selection or {}).get("selected_family") or "")
+    semantic_candidate = next(
+        (item for item in candidates if item["family"] == semantic_family), None
+    )
+    if semantic_candidate is not None:
+        semantic_confidence = _number((semantic_selection or {}).get("confidence"))
+        semantic_ambiguous = bool((semantic_selection or {}).get("ambiguous", True))
+        return {
+            "service_name": semantic_candidate["family"],
+            "domain_suffixes": (semantic_candidate["family"],),
+            "source": "semantic_match",
+            "confidence": semantic_confidence,
+            "candidates": candidates[:8],
+            "ambiguous": semantic_ambiguous or semantic_confidence < 65,
+            "matched_subject": (semantic_selection or {}).get("matched_subject", ""),
+        }
+    best = candidates[0]
+    second_score = candidates[1]["score"] if len(candidates) > 1 else -1
+    ambiguous = len(candidates) > 1 and best["score"] - second_score < 3
+    return {
+        "service_name": best["family"],
+        "domain_suffixes": (best["family"],),
+        "source": "observed_anomaly" if best["score"] > 0 else "observed_domain",
+        "confidence": 72 if best["score"] > 0 and not ambiguous else 45,
+        "candidates": candidates[:8],
+        "ambiguous": ambiguous,
+    }
+
+
+def _rank_observed_businesses(protocol: dict[str, Any]) -> list[dict[str, Any]]:
+    scores: dict[str, dict[str, Any]] = {}
+
+    def candidate(host: str) -> dict[str, Any]:
+        family = _domain_family(host)
+        return scores.setdefault(
+            family,
+            {"family": family, "score": 0, "hosts": set(), "reasons": []},
+        )
+
+    dns = _mapping(protocol.get("dns_summary"))
+    for item in _list_of_mappings(dns.get("domains")):
+        host = str(item.get("name", ""))
+        if not host:
+            continue
+        value = candidate(host)
+        value["hosts"].add(host)
+        failures = sum(
+            _int_value(count)
+            for code, count in _mapping(item.get("rcodes")).items()
+            if code != "0"
+        )
+        unanswered = max(
+            0,
+            _int_value(item.get("query_count"))
+            - _int_value(item.get("response_count")),
+        )
+        value["score"] += failures * 5 + unanswered * 4
+        if failures:
+            value["reasons"].append(f"DNS 失败 {failures}")
+        if unanswered:
+            value["reasons"].append(f"DNS 未响应 {unanswered}")
+    tls = _mapping(protocol.get("tls_summary"))
+    for item in _list_of_mappings(tls.get("sni")):
+        host = str(item.get("name", ""))
+        if not host:
+            continue
+        value = candidate(host)
+        value["hosts"].add(host)
+        missing = max(
+            0,
+            _int_value(item.get("client_hello_count"))
+            - _int_value(item.get("server_hello_count")),
+        )
+        alerts = _int_value(item.get("alert_count"))
+        value["score"] += missing * 4 + alerts * 6
+        if missing:
+            value["reasons"].append(f"TLS 未完成 {missing}")
+        if alerts:
+            value["reasons"].append(f"TLS 告警 {alerts}")
+    http_hosts = _mapping(_mapping(protocol.get("http_summary")).get("hosts"))
+    for host in http_hosts:
+        value = candidate(str(host))
+        value["hosts"].add(str(host))
+    output = []
+    for value in scores.values():
+        output.append(
+            {
+                **value,
+                "hosts": sorted(value["hosts"])[:16],
+                "reasons": list(dict.fromkeys(value["reasons"]))[:8],
+            }
+        )
+    return sorted(output, key=lambda item: (-item["score"], item["family"]))[:32]
+
+
+def _domain_family(hostname: str) -> str:
+    labels = hostname.lower().rstrip(".").split(".")
+    if len(labels) <= 2:
+        return ".".join(labels)
+    country_second_levels = {"com", "net", "org", "co"}
+    if (
+        len(labels[-1]) == 2
+        and labels[-2] in country_second_levels
+        and len(labels) >= 3
+    ):
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def _action_label(action: str) -> str:
+    return {
+        "login": "登录",
+        "play": "播放",
+        "download": "下载",
+        "connect": "连接",
+        "general": "业务",
+    }.get(action, "业务")
+
+
+def _encrypted_boundary(action: str) -> str:
+    if action == "login":
+        return "账号认证结果因 HTTPS 加密不可见"
+    return "加密后的应用业务结果无法仅从报文直接确认"
+
+
+def _encrypted_stage_evidence(action: str) -> str:
+    if action == "login":
+        return "HTTPS 加密下无法从报文直接读取账号、口令或认证业务码"
+    return "HTTPS/QUIC 加密下无法从报文直接读取应用业务结果"
 
 
 def _matches_suffix(hostname: str, suffixes: tuple[str, ...]) -> bool:
@@ -378,26 +571,30 @@ def _context_first_step(context: dict[str, Any]) -> str:
 def _business_first_step(business: dict[str, Any]) -> str:
     if not business.get("targeted"):
         return ""
+    if business.get("ambiguous"):
+        return (
+            "补充实际访问的网址、应用名称或操作时间，以便从候选业务域名中确定分析目标。"
+        )
     if business.get("coverage") == "not_observed":
+        action_name = _action_label(str(business.get("action", "general")))
         return (
             f"重新抓取包含 {business.get('service_name', '目标业务')} "
-            "登录操作全过程的报文，"
-            "从点击登录前开始，持续到错误出现后至少 10 秒。"
+            f"{action_name}操作全过程的报文，"
+            f"从开始{action_name}前持续到异常出现后至少 10 秒。"
         )
+    action_name = _action_label(str(business.get("action", "general")))
     return (
-        f"先沿 {business.get('service_name', '目标业务')} 登录链路逐阶段核对 "
-        "DNS、TCP/QUIC、TLS 和认证结果。"
+        f"先沿 {business.get('service_name', '目标业务')} {action_name}链路逐阶段核对 "
+        "DNS、TCP/QUIC、TLS 和应用业务结果。"
     )
 
 
 def _business_stage_suggestion(stage: str) -> str:
     return {
-        "dns": "检查主机 DNS 配置、解析响应码、超时和 PlayStation 相关域名可达性。",
+        "dns": "检查主机 DNS 配置、解析响应码、超时和目标业务域名可达性。",
         "transport": "检查到相关服务端 IP 的路由、防火墙、NAT、RST、重传和建连超时。",
         "tls": "检查系统时间、证书链、TLS 中间设备、SNI 路由和服务端握手日志。",
-        "authentication": (
-            "结合 PS5 错误码、PSN 服务状态和账号认证日志确认应用层拒绝原因。"
-        ),
+        "authentication": "结合终端错误码、服务状态和账号认证日志确认应用层拒绝原因。",
     }.get(stage, "结合终端错误码和服务端日志继续定位。")
 
 
@@ -483,6 +680,9 @@ class StallDiagnosisService:
             protocol = await protocol_task
         except AppError as exc:
             protocol = {"extraction_error": exc.message}
+        semantic_selection = await self._semantic_business_selection(
+            symptom_context, protocol
+        )
         manifest = _read_object(output / "manifest.json")
         pipeline_failed = returncode != 0 or manifest.get("status") == "failed"
         if pipeline_failed:
@@ -513,6 +713,7 @@ class StallDiagnosisService:
             manifest,
             protocol,
             symptom_context=symptom_context,
+            semantic_selection=semantic_selection,
         )
         report_path = output / "stall_report.json"
         _atomic_write(report_path, report.model_dump(mode="json"))
@@ -523,6 +724,27 @@ class StallDiagnosisService:
             partial=manifest.get("status") == "partial",
         )
 
+    async def _semantic_business_selection(
+        self, symptom_context: str, protocol: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        context = parse_stall_context(symptom_context)
+        if (
+            not context.get("provided")
+            or context.get("requested_hosts")
+            or context.get("business_profiles")
+        ):
+            return None
+        candidates = _rank_observed_businesses(protocol)
+        if len(candidates) < 2:
+            return None
+        try:
+            selection = await DiagnosisModel(
+                settings=self.settings
+            ).select_business_target(symptom_context, candidates)
+        except AppError:
+            return None
+        return selection.model_dump(mode="json")
+
 
 def build_stall_report(
     analysis_id: str,
@@ -531,11 +753,12 @@ def build_stall_report(
     protocol: dict[str, Any] | None = None,
     *,
     symptom_context: str = "",
+    semantic_selection: dict[str, Any] | None = None,
 ) -> StallDiagnosticReport:
     protocol = protocol or {}
     user_context = parse_stall_context(symptom_context)
     user_context["matched_endpoints"] = _match_context_endpoints(user_context, protocol)
-    business = _business_analysis(user_context, protocol)
+    business = _business_analysis(user_context, protocol, semantic_selection)
     coverage = CoverageSummary.model_validate(summary.get("coverage_summary", {}))
     tcp = (
         summary.get("tcp_summary")
@@ -570,11 +793,13 @@ def build_stall_report(
             ),
             None,
         )
-        if failed_stage or degraded_stage:
+        if (failed_stage or degraded_stage) and not business.get("ambiguous"):
             stage = failed_stage or degraded_stage
             candidates.append(
                 _hypothesis(
-                    f"{business['service_name']} 登录链路的{stage['name']}异常",
+                    f"{business['service_name']} "
+                    f"{_action_label(str(business.get('action', 'general')))}链路的"
+                    f"{stage['name']}异常",
                     96.0 if failed_stage else 84.0,
                     [stage["evidence"], *business.get("observed_hosts", [])[:8]],
                     _business_stage_suggestion(str(stage["stage"])),
