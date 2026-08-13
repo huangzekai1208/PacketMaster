@@ -258,6 +258,7 @@ class StallDiagnosticReport(ContractModel):
     http_summary: dict[str, Any] = Field(default_factory=dict)
     udp_summary: dict[str, Any] = Field(default_factory=dict)
     keyword_summary: dict[str, int] = Field(default_factory=dict)
+    user_context: dict[str, Any] = Field(default_factory=dict)
     limitations: list[str] = Field(default_factory=list)
     troubleshooting_steps: list[str] = Field(default_factory=list)
     optimization_suggestions: list[str] = Field(default_factory=list)

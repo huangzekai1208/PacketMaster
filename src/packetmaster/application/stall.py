@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -29,6 +30,165 @@ from packetmaster.errors import AppError
 
 ProgressCallback = Callable[[float | None, str], None]
 
+_CONTEXT_TERMS = {
+    "video": ("视频", "直播", "播放器", "video", "stream"),
+    "web": ("网页", "网站", "页面", "浏览器", "web", "http"),
+    "download": ("下载", "文件", "下载速度", "download"),
+    "game": ("游戏", "对战", "game", "fps"),
+    "meeting": ("会议", "通话", "语音", "视频会议", "zoom", "teams"),
+    "dns": ("dns", "解析", "域名"),
+    "latency": ("延迟", "延时", "ping", "响应慢", "慢"),
+    "buffering": ("卡顿", "缓冲", "转圈", "加载", "停顿", "黑屏"),
+    "disconnect": ("断流", "断开", "掉线", "重连", "连接失败"),
+}
+
+
+def parse_stall_context(value: str) -> dict[str, Any]:
+    text = " ".join(value.split()).strip()[:500]
+    if text in {
+        "请对所选报文进行通用卡顿分析",
+        "请对所选报文进行通用分析",
+    }:
+        text = ""
+    lowered = text.lower()
+    tags = [
+        tag
+        for tag, terms in _CONTEXT_TERMS.items()
+        if any(term.lower() in lowered for term in terms)
+    ]
+    requested_hosts = sorted(
+        {
+            match.group(1).lower().rstrip(".")
+            for match in re.finditer(
+                r"(?:https?://)?\b((?:[a-z0-9-]+\.)+[a-z]{2,63})\b",
+                lowered,
+            )
+        }
+    )[:8]
+    if requested_hosts and "web" not in tags:
+        tags.append("web")
+    time_match = re.search(
+        r"(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>秒|s|分钟|min)(?:左右|附近|后)?",
+        lowered,
+    )
+    time_offset_seconds: float | None = None
+    if time_match:
+        time_offset_seconds = float(time_match.group("value"))
+        if time_match.group("unit") in {"分钟", "min"}:
+            time_offset_seconds *= 60
+    summary_parts = [context_tag_label(tag) for tag in tags]
+    summary_parts.extend(requested_hosts)
+    if time_offset_seconds is not None:
+        summary_parts.append(f"约 {time_offset_seconds:g} 秒")
+    return {
+        "provided": bool(text),
+        "summary": "、".join(summary_parts) if summary_parts else "未提供具体现象描述",
+        "tags": tags,
+        "specificity": "specific" if tags else "generic",
+        "time_offset_seconds": time_offset_seconds,
+        "requested_hosts": requested_hosts,
+    }
+
+
+def context_tag_label(tag: str) -> str:
+    return {
+        "video": "视频",
+        "web": "网页",
+        "download": "下载",
+        "game": "游戏",
+        "meeting": "会议/通话",
+        "dns": "DNS",
+        "latency": "高延迟",
+        "buffering": "缓冲卡顿",
+        "disconnect": "断流/重连",
+    }.get(tag, tag)
+
+
+def _match_context_endpoints(
+    context: dict[str, Any], protocol: dict[str, Any]
+) -> list[dict[str, Any]]:
+    requested = set(context.get("requested_hosts", []))
+    if not requested:
+        return []
+    matched = []
+    for endpoint in _list_of_mappings(protocol.get("endpoint_summary")):
+        names = {
+            str(item).lower()
+            for key in ("domains", "sni")
+            for item in endpoint.get(key, [])
+        }
+        if requested & names:
+            matched.append(
+                {
+                    "ip": endpoint.get("ip"),
+                    "matched_hosts": sorted(requested & names),
+                    "protocols": endpoint.get("protocols", []),
+                }
+            )
+    return matched[:32]
+
+
+def _prioritize_events(
+    events: list[dict[str, Any]], context: dict[str, Any]
+) -> list[dict[str, Any]]:
+    offset = context.get("time_offset_seconds")
+    if not isinstance(offset, int | float):
+        return events
+    return sorted(
+        events,
+        key=lambda event: abs(_number(event.get("start_time")) - float(offset)),
+    )
+
+
+def _personalize_candidates(
+    candidates: list[Hypothesis], context: dict[str, Any]
+) -> list[Hypothesis]:
+    tags = set(context.get("tags", []))
+    if not tags:
+        return candidates
+    boosts = {
+        "video": ("吞吐", "数据空洞", "UDP", "QUIC", "HTTP"),
+        "web": ("HTTP", "DNS", "响应", "TLS"),
+        "download": ("吞吐", "TCP", "重传"),
+        "game": ("UDP", "QUIC", "时延", "延迟"),
+        "meeting": ("UDP", "QUIC", "时延", "丢包"),
+        "dns": ("DNS", "解析"),
+        "latency": ("时延", "响应", "RTT"),
+        "buffering": ("卡顿", "吞吐", "空洞", "数据"),
+        "disconnect": ("断流", "连接", "TLS", "重传"),
+    }
+    terms = tuple(term for tag in tags for term in boosts.get(tag, ()))
+    adjusted: list[Hypothesis] = []
+    for candidate in candidates:
+        haystack = f"{candidate.cause} {candidate.explanation}"
+        boost = 8.0 if any(term in haystack for term in terms) else 0.0
+        if boost:
+            adjusted.append(
+                candidate.model_copy(
+                    update={"confidence": min(100.0, candidate.confidence + boost)}
+                )
+            )
+        else:
+            adjusted.append(candidate)
+    return adjusted
+
+
+def _context_first_step(context: dict[str, Any]) -> str:
+    time_offset = context.get("time_offset_seconds")
+    prefix = (
+        f"优先检查抓包开始后约 {time_offset:g} 秒附近；"
+        if isinstance(time_offset, int | float)
+        else ""
+    )
+    tags = context.get("tags", [])
+    if "video" in tags or "buffering" in tags:
+        return prefix + "按视频/播放器卡顿时间点对照吞吐、空洞、DNS 和 QUIC 事件。"
+    if "web" in tags:
+        return prefix + "按网页加载时间点对照 DNS、TLS、HTTP 响应和 TCP 传输事件。"
+    if "game" in tags or "meeting" in tags:
+        return prefix + "按实时业务时间点对照 UDP/QUIC 间断、时延和丢包迹象。"
+    return prefix + "按卡顿事件时间窗定位受影响流。"
+
 
 @dataclass(frozen=True)
 class StallAnalysisOutcome:
@@ -51,6 +211,7 @@ class StallDiagnosisService:
         *,
         pcap_path: str,
         request_id: str,
+        symptom_context: str = "",
         progress: ProgressCallback | None = None,
     ) -> StallAnalysisOutcome:
         output = (self.artifact_root / request_id).resolve()
@@ -135,7 +296,13 @@ class StallDiagnosisService:
             if (output / "tcp_analysis.json").is_file()
             else {}
         )
-        report = build_stall_report(request_id, summary, manifest, protocol)
+        report = build_stall_report(
+            request_id,
+            summary,
+            manifest,
+            protocol,
+            symptom_context=symptom_context,
+        )
         report_path = output / "stall_report.json"
         _atomic_write(report_path, report.model_dump(mode="json"))
         if progress is not None:
@@ -151,8 +318,12 @@ def build_stall_report(
     summary: dict[str, Any],
     manifest: dict[str, Any],
     protocol: dict[str, Any] | None = None,
+    *,
+    symptom_context: str = "",
 ) -> StallDiagnosticReport:
     protocol = protocol or {}
+    user_context = parse_stall_context(symptom_context)
+    user_context["matched_endpoints"] = _match_context_endpoints(user_context, protocol)
     coverage = CoverageSummary.model_validate(summary.get("coverage_summary", {}))
     tcp = (
         summary.get("tcp_summary")
@@ -168,6 +339,7 @@ def build_stall_report(
         else {}
     )
     events, throughput_drops, gaps = _stall_events(intervals)
+    events = _prioritize_events(events, user_context)
     candidates: list[Hypothesis] = []
 
     retransmissions = _count(tcp, "retransmission_count")
@@ -337,6 +509,7 @@ def build_stall_report(
             )
         )
 
+    candidates = _personalize_candidates(candidates, user_context)
     candidates.sort(key=lambda item: item.confidence, reverse=True)
     limitations = [
         "仅凭报文无法直接证明用户界面发生卡顿，结论表示与卡顿一致的网络或业务等待现象。",
@@ -374,9 +547,10 @@ def build_stall_report(
         http_summary=http,
         udp_summary=udp,
         keyword_summary={key: _int_value(value) for key, value in keywords.items()},
+        user_context=user_context,
         limitations=limitations,
         troubleshooting_steps=[
-            "先按卡顿事件时间窗定位受影响流。",
+            _context_first_step(user_context),
             "对照同一时间窗检查重传、RTT、接收窗口和吞吐变化。",
             "按端点关联的 DNS、SNI 和 HTTP Host 确认受影响业务。",
             "若协议指标正常，结合终端、播放器、服务端和无线侧日志继续定位。",

@@ -379,6 +379,7 @@ class WebConversationService:
                     actual_bandwidth_mbps=1.0,
                     target=Target.BOTH,
                     mode=AnalysisMode.STALL,
+                    analysis_context=_stall_context_text(safe_content),
                     analysis_id=analysis_id,
                 )
             except AppError as exc:
@@ -493,6 +494,14 @@ def _domain_intent(record: PendingIntentRecord | None) -> DiagnosisIntent | None
 
 def _capture_reference(capture_id: str) -> PathReference:
     return PathReference(placeholder=f"capture_{capture_id[:8]}")
+
+
+def _stall_context_text(content: str) -> str:
+    """Keep a bounded, redacted symptom description for deterministic tagging."""
+    normalized = " ".join(content.split()).strip()
+    if normalized == "请对所选报文进行通用卡顿分析":
+        return ""
+    return normalized[:500]
 
 
 def _parameter_message(parameters: DiagnosisParameters) -> str:

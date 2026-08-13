@@ -94,6 +94,7 @@ class ClaimedAnalysis:
     capture_id: str
     pcap_path: Path
     mode: AnalysisMode
+    analysis_context: str
     standard_bandwidth_mbps: float
     actual_bandwidth_mbps: float
     target: Target
@@ -116,6 +117,7 @@ class AnalysisTaskRepository:
         actual_bandwidth_mbps: float,
         target: Target = Target.DOWNLOAD,
         mode: AnalysisMode = AnalysisMode.SPEED,
+        analysis_context: str = "",
         analysis_id: str | None = None,
         retry_of_analysis_id: str | None = None,
         checkpoint_thread_id: str | None = None,
@@ -145,17 +147,19 @@ class AnalysisTaskRepository:
                 connection.execute(
                     """
                     INSERT INTO analyses (
-                        analysis_id, session_id, capture_id, mode, status,
+                        analysis_id, session_id, capture_id, mode,
+                        analysis_context, status,
                         standard_bandwidth_mbps, actual_bandwidth_mbps,
                         target, created_at, updated_at, retry_of_analysis_id,
                         checkpoint_thread_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         identifier,
                         session_id,
                         capture_id,
                         mode.value,
+                        analysis_context[:2000],
                         TaskStatus.QUEUED.value,
                         standard_bandwidth_mbps,
                         actual_bandwidth_mbps,
@@ -372,6 +376,7 @@ class AnalysisTaskRepository:
                 capture_id=row["capture_id"],
                 pcap_path=Path(row["local_path"]),
                 mode=AnalysisMode(row["mode"]),
+                analysis_context=str(row["analysis_context"] or ""),
                 standard_bandwidth_mbps=row["standard_bandwidth_mbps"],
                 actual_bandwidth_mbps=row["actual_bandwidth_mbps"],
                 target=Target(row["target"]),
@@ -512,6 +517,7 @@ class AnalysisTaskRepository:
             actual_bandwidth_mbps=row["actual_bandwidth_mbps"],
             target=Target(row["target"]),
             mode=AnalysisMode(row["mode"]),
+            analysis_context=str(row["analysis_context"] or ""),
             analysis_id=new_analysis_id,
             retry_of_analysis_id=analysis_id,
             checkpoint_thread_id=row["checkpoint_thread_id"] or analysis_id,

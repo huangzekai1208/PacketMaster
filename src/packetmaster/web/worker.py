@@ -164,6 +164,7 @@ class AnalysisWorker:
                 outcome = await self.stall_service_factory().run(
                     pcap_path=str(task.pcap_path),
                     request_id=task.analysis_id,
+                    symptom_context=task.analysis_context,
                     progress=lambda fraction, message: self.repository.update_progress(
                         task.analysis_id,
                         fraction=fraction,

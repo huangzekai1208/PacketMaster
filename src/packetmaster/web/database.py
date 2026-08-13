@@ -23,7 +23,7 @@ from packetmaster.web.contracts import (
     WebMessage,
 )
 
-_SCHEMA_VERSION = 11
+_SCHEMA_VERSION = 12
 _ACTIVE_ANALYSIS_STATUSES = (
     TaskStatus.QUEUED,
     TaskStatus.VALIDATING,
@@ -78,6 +78,7 @@ _MIGRATIONS = {
             session_id TEXT NOT NULL REFERENCES sessions(session_id),
             capture_id TEXT NOT NULL REFERENCES captures(capture_id),
             mode TEXT NOT NULL DEFAULT 'speed',
+            analysis_context TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL,
             stage_message TEXT NOT NULL DEFAULT '',
             progress_fraction REAL,
@@ -187,6 +188,8 @@ _MIGRATIONS = {
     """,
     11: """
     """,
+    12: """
+    """,
 }
 
 
@@ -222,13 +225,18 @@ class WebDatabase:
             for next_version in range(version + 1, _SCHEMA_VERSION + 1):
                 migration = _MIGRATIONS[next_version]
                 with connection:
-                    if next_version in {10, 11}:
+                    if next_version in {10, 11, 12}:
                         table = "session_intents" if next_version == 10 else "analyses"
                         columns = {
                             row[1]
                             for row in connection.execute(f"PRAGMA table_info({table})")
                         }
-                        if "mode" not in columns:
+                        if next_version == 12 and "analysis_context" not in columns:
+                            connection.execute(
+                                "ALTER TABLE analyses ADD COLUMN analysis_context "
+                                "TEXT NOT NULL DEFAULT ''"
+                            )
+                        elif next_version != 12 and "mode" not in columns:
                             connection.execute(
                                 f"ALTER TABLE {table} "
                                 "ADD COLUMN mode TEXT NOT NULL DEFAULT 'speed'"

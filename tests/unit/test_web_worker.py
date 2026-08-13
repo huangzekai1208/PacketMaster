@@ -73,8 +73,8 @@ def test_worker_routes_stall_task_to_stall_service(tmp_path: Path) -> None:
     repository = _task(tmp_path)
     with repository.database.transaction(immediate=True) as connection:
         connection.execute(
-            "UPDATE analyses SET mode = ? WHERE analysis_id = ?",
-            (AnalysisMode.STALL.value, "analysis-1"),
+            "UPDATE analyses SET mode = ?, analysis_context = ? WHERE analysis_id = ?",
+            (AnalysisMode.STALL.value, "网页打开慢", "analysis-1"),
         )
     report_path = tmp_path / "stall_report.json"
     report_path.write_text("{}", encoding="utf-8")
@@ -96,6 +96,7 @@ def test_worker_routes_stall_task_to_stall_service(tmp_path: Path) -> None:
     assert asyncio.run(worker.run_once()) is True
     assert repository.get("analysis-1").status is TaskStatus.COMPLETED
     assert calls[0]["request_id"] == "analysis-1"
+    assert calls[0]["symptom_context"] == "网页打开慢"
 
 
 def test_worker_persists_recoverable_failure(tmp_path: Path) -> None:

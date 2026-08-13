@@ -39,9 +39,7 @@ def _service(tmp_path: Path, model=None, rag_runtime=None):
         sessions=SessionRepository(database),
         messages=MessageRepository(database),
         intents=PendingIntentRepository(database),
-        captures=CaptureRegistry(
-            CaptureRepository(database), allowed_roots=[tmp_path]
-        ),
+        captures=CaptureRegistry(CaptureRepository(database), allowed_roots=[tmp_path]),
         tasks=AnalysisTaskRepository(database),
         model=model or _Model(),
         rag_runtime=rag_runtime,
@@ -283,7 +281,11 @@ def test_stall_mode_starts_analysis_without_requesting_bandwidth(
     assert result.analysis is not None
     assert result.analysis.status is TaskStatus.QUEUED
     assert result.analysis.mode is AnalysisMode.STALL
-    assert AnalysisTaskRepository(database).count_for_session(session.session_id) == 1
+    tasks = AnalysisTaskRepository(database)
+    assert tasks.count_for_session(session.session_id) == 1
+    claimed = tasks.claim_next("worker-context")
+    assert claimed is not None
+    assert claimed.analysis_context == "观看视频时出现卡顿"
     assert result.assistant_message.content == "卡顿报文已接收，任务已进入分析队列。"
     assert "请提供标准带宽" not in result.assistant_message.content
 
@@ -301,9 +303,7 @@ def test_parameters_can_be_completed_across_turns_and_restart(tmp_path: Path) ->
         MissingParameter.STANDARD_BANDWIDTH,
         MissingParameter.ACTUAL_BANDWIDTH,
     ]
-    second = asyncio.run(
-        service.submit_message(session.session_id, content="1000")
-    )
+    second = asyncio.run(service.submit_message(session.session_id, content="1000"))
     assert second.parameters.missing == [MissingParameter.ACTUAL_BANDWIDTH]
 
     restored = WebConversationService(
@@ -316,9 +316,7 @@ def test_parameters_can_be_completed_across_turns_and_restart(tmp_path: Path) ->
         tasks=AnalysisTaskRepository(WebDatabase(database.path)),
         model=_Model(),
     )
-    third = asyncio.run(
-        restored.submit_message(session.session_id, content="20M")
-    )
+    third = asyncio.run(restored.submit_message(session.session_id, content="20M"))
     assert third.parameters.ready_for_confirmation is True
     assert third.parameters.standard_bandwidth_mbps == 1000
     assert third.parameters.actual_bandwidth_mbps == 20
