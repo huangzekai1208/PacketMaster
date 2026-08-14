@@ -294,7 +294,7 @@ function StallProtocolDetails({ report }: { report: Extract<Report, { mode: 'sta
     <Section title="本次分析关注点"><p>{String(userContext.summary ?? '未提供具体现象描述')}</p>{contextTags.length > 0 && <div className="notice">已按 {contextTags.map(contextTagText).join('、')} 场景调整候选原因优先级</div>}</Section>
     {business.targeted === true && <BusinessPath value={business} />}
     <Section title="协议分析概览"><div className="metric-strip"><Metric label="DNS 失败/未响应" value={`${numeric(report.dns_summary.failure_count)} / ${numeric(report.dns_summary.unanswered_count)}`} tone={numeric(report.dns_summary.failure_count) + numeric(report.dns_summary.unanswered_count) > 0 ? 'warn' : ''} /><Metric label="DNS P95" value={`${numeric(dnsLatency.p95)} ms`} /><Metric label="TLS 告警" value={number(numeric(report.tls_summary.alert_count))} tone={numeric(report.tls_summary.alert_count) > 0 ? 'warn' : ''} /><Metric label="HTTP 错误" value={number(numeric(report.http_summary.error_response_count))} tone={numeric(report.http_summary.error_response_count) > 0 ? 'warn' : ''} /><Metric label="HTTP P95" value={`${numeric(httpLatency.p95)} ms`} /><Metric label="QUIC 报文" value={number(numeric(report.udp_summary.quic_packet_count))} /></div></Section>
-    <div className="report-columns"><Section title={`DNS 域名 ${domains.length}`}><ProtocolNames value={domains} nameKey="name" detailKey="answer_ips" empty="未识别到 DNS 域名" /></Section><Section title={`TLS SNI ${sni.length}`}><ProtocolNames value={sni} nameKey="name" detailKey="endpoint_ips" empty="未识别到 TLS SNI" /></Section><Section title="载荷关键词命中">{keywords.length ? <ul>{keywords.map(([key, value]) => <li key={key}><b>{key}</b>：{value}</li>)}</ul> : <p className="muted">未命中受控卡顿关键词</p>}</Section></div>
+    <div className="report-columns"><Section title={`DNS 域名 ${domains.length}`}><DnsNames value={domains} /></Section><Section title={`TLS SNI ${sni.length}`}><ProtocolNames value={sni} nameKey="name" detailKey="endpoint_ips" empty="未识别到 TLS SNI" /></Section><Section title="载荷关键词命中">{keywords.length ? <ul>{keywords.map(([key, value]) => <li key={key}><b>{key}</b>：{value}</li>)}</ul> : <p className="muted">未命中受控卡顿关键词</p>}</Section></div>
     <Section title={`IP 与业务关联 ${report.endpoint_summary.length}`}><div className="table-scroll"><table><thead><tr><th>IP</th><th>范围</th><th>报文</th><th>协议</th><th>关联域名 / SNI</th></tr></thead><tbody>{report.endpoint_summary.slice(0, 128).map((endpoint, index) => <tr key={String(endpoint.ip ?? index)}><td className="flow-id">{String(endpoint.ip ?? '-')}</td><td>{String(endpoint.scope ?? '-')}</td><td>{number(numeric(endpoint.packets))}</td><td>{arrayValue(endpoint.protocols).join(', ') || '-'}</td><td>{[...arrayValue(endpoint.domains), ...arrayValue(endpoint.sni)].join(', ') || '-'}</td></tr>)}</tbody></table></div></Section>
   </>
 }
@@ -314,6 +314,11 @@ function StatusPill({ value, tone }: { value: string; tone: string }) { return <
 function ProtocolNames({ value, nameKey, detailKey, empty }: { value: Array<Record<string, unknown>>; nameKey: string; detailKey: string; empty: string }) {
   if (!value.length) return <p className="muted">{empty}</p>
   return <ul>{value.slice(0, 32).map((item, index) => <li key={String(item[nameKey] ?? index)}><b>{String(item[nameKey] ?? '-')}</b>{arrayValue(item[detailKey]).length > 0 ? `：${arrayValue(item[detailKey]).join(', ')}` : ''}</li>)}</ul>
+}
+
+function DnsNames({ value }: { value: Array<Record<string, unknown>> }) {
+  if (!value.length) return <p className="muted">未识别到 DNS 域名</p>
+  return <ul>{value.slice(0, 32).map((item, index) => { const aliases = arrayValue(item.cname_targets); const ips = arrayValue(item.answer_ips); return <li key={String(item.name ?? index)}><b>{String(item.name ?? '-')}</b>{ips.length ? `：${ips.join(', ')}` : ''}{aliases.length ? <small className="muted"> → CNAME {aliases.join(' → ')}</small> : null}</li> })}</ul>
 }
 
 const objectValue = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}

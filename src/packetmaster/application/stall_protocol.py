@@ -38,6 +38,7 @@ FIELDS = [
     "dns.flags.response",
     "dns.flags.rcode",
     "dns.qry.name",
+    "dns.cname",
     "dns.a",
     "dns.aaaa",
     "dns.time",
@@ -230,34 +231,57 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
         if query_name and not is_response:
             dns_queries[(dns_id, src, query_name)] = timestamp
             dns_domains[query_name]["query_count"] += 1
+        cname_targets = {
+            target
+            for target in (_hostname(item) for item in _csv(row.get("dns.cname")))
+            if target
+        }
         if is_response:
             dns_responses += 1
-            dns_answered.add((dns_id, dst, query_name))
+            # DNS CNAME 响应有时缺少 qry.name，或中间节点只返回别名。
+            # 优先同名匹配；找不到时按事务 ID + 客户端方向匹配，避免误报未响应。
+            exact_key = (dns_id, dst, query_name)
+            matching_queries = (
+                [exact_key]
+                if exact_key in dns_queries
+                else [key for key in dns_queries if key[0] == dns_id and key[1] == dst]
+            )
+            if not matching_queries:
+                matching_queries = [key for key in dns_queries if key[0] == dns_id]
+            dns_answered.update(matching_queries)
             rcode = _int(row.get("dns.flags.rcode"))
             if rcode:
                 dns_failures += 1
+            response_domains = {key[2] for key in matching_queries}
             if query_name:
-                domain = dns_domains[query_name]
+                response_domains.add(query_name)
+            for response_domain in response_domains:
+                domain = dns_domains[response_domain]
                 domain["response_count"] += 1
                 domain["rcodes"][str(rcode)] += 1
+                domain["cname_targets"].update(cname_targets)
                 answers = _answer_ips(row)
                 domain["answer_ips"].update(answers)
                 for address in answers:
-                    endpoints[address]["domains"].add(query_name)
+                    endpoints[address]["domains"].add(response_domain)
             latency = _float(row.get("dns.time"))
             if latency > 0:
                 dns_latencies.append(latency * 1000)
-        if query_name:
+        evidence_domain = query_name or (
+            matching_queries[0][2] if is_response and matching_queries else ""
+        )
+        if evidence_domain or cname_targets:
             add_evidence(
                 "dns",
                 row,
-                domain=query_name,
+                domain=evidence_domain,
                 response=is_response,
                 rcode=str(_int(row.get("dns.flags.rcode"))) if is_response else "",
                 latency_ms=round(_float(row.get("dns.time")) * 1000, 3)
                 if is_response and _float(row.get("dns.time")) > 0
                 else None,
                 answer_ips=sorted(_answer_ips(row)) if is_response else [],
+                cname_targets=sorted(cname_targets) if is_response else [],
             )
 
         tcp_stream = _bounded(row.get("tcp.stream"), 32)
@@ -469,6 +493,7 @@ def _serialize_domains(values: dict[str, dict[str, Any]]) -> list[dict[str, Any]
             "response_count": value["response_count"],
             "rcodes": dict(value["rcodes"]),
             "answer_ips": sorted(value["answer_ips"])[:32],
+            "cname_targets": sorted(value["cname_targets"])[:32],
         }
         for name, value in sorted(
             values.items(), key=lambda item: item[1]["query_count"], reverse=True
@@ -513,6 +538,7 @@ def _domain() -> dict[str, Any]:
         "response_count": 0,
         "rcodes": Counter(),
         "answer_ips": set(),
+        "cname_targets": set(),
     }
 
 

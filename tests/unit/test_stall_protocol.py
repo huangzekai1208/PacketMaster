@@ -142,3 +142,51 @@ def test_protocol_aggregation_detects_dns_failure_and_quic_gap() -> None:
     evidence = summary["evidence_index"]
     assert {item["evidence_type"] for item in evidence} >= {"dns", "udp_gap"}
     assert all("payload" not in item for item in evidence)
+
+
+def test_protocol_aggregation_matches_cname_response_without_query_name() -> None:
+    summary = aggregate_protocol_rows(
+        [
+            _row(
+                **{
+                    "frame.number": "1",
+                    "frame.time_relative": "0",
+                    "_ws.col.Protocol": "DNS",
+                    "ip.src": "192.0.2.10",
+                    "ip.dst": "8.8.8.8",
+                    "dns.id": "100",
+                    "dns.flags.response": "0",
+                    "dns.qry.name": "login.console.example.com",
+                }
+            ),
+            _row(
+                **{
+                    "frame.number": "2",
+                    "frame.time_relative": "0.05",
+                    "_ws.col.Protocol": "DNS",
+                    "ip.src": "8.8.8.8",
+                    "ip.dst": "192.0.2.10",
+                    "dns.id": "100",
+                    "dns.flags.response": "1",
+                    "dns.flags.rcode": "0",
+                    "dns.qry.name": "",
+                    "dns.cname": "auth.edge.example.net,global.edge.example.net",
+                    "dns.time": "0.05",
+                }
+            ),
+        ]
+    )
+
+    assert summary["dns_summary"]["unanswered_count"] == 0
+    domain = summary["dns_summary"]["domains"][0]
+    assert domain["name"] == "login.console.example.com"
+    assert domain["response_count"] == 1
+    assert domain["cname_targets"] == [
+        "auth.edge.example.net",
+        "global.edge.example.net",
+    ]
+    response = next(
+        item for item in summary["evidence_index"] if item["frame.number"] == "2"
+    )
+    assert response["domain"] == "login.console.example.com"
+    assert response["cname_targets"] == domain["cname_targets"]
