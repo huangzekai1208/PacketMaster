@@ -160,6 +160,31 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
     first_time: float | None = None
     last_time = 0.0
     packet_count = 0
+    evidence_index: list[dict[str, Any]] = []
+    evidence_counts: Counter[str] = Counter()
+
+    def add_evidence(kind: str, row: dict[str, str], **extra: Any) -> None:
+        if evidence_counts[kind] >= 800 or len(evidence_index) >= 3000:
+            return
+        frame = _bounded(row.get("frame.number"), 32)
+        timestamp = _float(row.get("frame.time_relative"))
+        evidence_id = f"stall:{kind}:{frame or len(evidence_index) + 1}"
+        item: dict[str, Any] = {
+            "evidence_id": evidence_id,
+            "evidence_type": kind,
+            "frame.number": frame,
+            "frame.time_relative": timestamp,
+            "protocol": _bounded(row.get("_ws.col.Protocol"), 32).upper(),
+            "src_ip": row.get("ip.src") or row.get("ipv6.src") or "",
+            "dst_ip": row.get("ip.dst") or row.get("ipv6.dst") or "",
+            "src_port": row.get("tcp.srcport") or row.get("udp.srcport") or "",
+            "dst_port": row.get("tcp.dstport") or row.get("udp.dstport") or "",
+        }
+        item.update(
+            {key: value for key, value in extra.items() if value not in ("", None)}
+        )
+        evidence_index.append(item)
+        evidence_counts[kind] += 1
 
     for row in rows:
         packet_count += 1
@@ -182,6 +207,22 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
                 endpoints[src]["tcp_syn_ack"] += 1
             else:
                 endpoints[dst]["tcp_syn"] += 1
+        if (
+            row.get("tcp.analysis.retransmission")
+            or row.get("tcp.flags.reset") == "1"
+            or row.get("tcp.flags.syn") == "1"
+        ):
+            add_evidence(
+                "tcp_anomaly",
+                row,
+                tcp_stream=row.get("tcp.stream") or "",
+                syn=row.get("tcp.flags.syn") == "1",
+                syn_ack=(
+                    row.get("tcp.flags.syn") == "1" and row.get("tcp.flags.ack") == "1"
+                ),
+                reset=row.get("tcp.flags.reset") == "1",
+                retransmission=bool(row.get("tcp.analysis.retransmission")),
+            )
 
         query_name = _hostname(row.get("dns.qry.name"))
         dns_id = _bounded(row.get("dns.id"), 32)
@@ -206,6 +247,18 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
             latency = _float(row.get("dns.time"))
             if latency > 0:
                 dns_latencies.append(latency * 1000)
+        if query_name:
+            add_evidence(
+                "dns",
+                row,
+                domain=query_name,
+                response=is_response,
+                rcode=str(_int(row.get("dns.flags.rcode"))) if is_response else "",
+                latency_ms=round(_float(row.get("dns.time")) * 1000, 3)
+                if is_response and _float(row.get("dns.time")) > 0
+                else None,
+                answer_ips=sorted(_answer_ips(row)) if is_response else [],
+            )
 
         tcp_stream = _bounded(row.get("tcp.stream"), 32)
         handshake_types = set(_csv(row.get("tls.handshake.type")))
@@ -229,6 +282,15 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
             tls_alerts += 1
             if stream_hostname:
                 sni[stream_hostname]["alert_count"] += 1
+        if hostname or row.get("tls.alert_message.desc"):
+            add_evidence(
+                "tls",
+                row,
+                sni=hostname or stream_hostname,
+                tcp_stream=tcp_stream,
+                handshake_types=sorted(handshake_types),
+                alert=_bounded(row.get("tls.alert_message.desc"), 96),
+            )
 
         method = _bounded(row.get("http.request.method"), 16)
         host = _hostname(row.get("http.host"))
@@ -249,6 +311,16 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
         content_type = _bounded(row.get("http.content_type"), 96)
         if content_type:
             content_types[content_type] += 1
+        if method or status:
+            add_evidence(
+                "http",
+                row,
+                host=host,
+                method=method,
+                status=status if status else None,
+                latency_ms=round(http_time * 1000, 3) if http_time > 0 else None,
+                content_type=content_type,
+            )
 
         src_port = row.get("udp.srcport") or ""
         dst_port = row.get("udp.dstport") or ""
@@ -266,12 +338,24 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
                     "first": timestamp,
                     "last": timestamp,
                     "max_gap": 0.0,
+                    "last_frame": "",
                 },
             )
+            gap = timestamp - flow["last"]
+            if gap > 2:
+                add_evidence(
+                    "udp_gap",
+                    row,
+                    gap_seconds=round(gap, 6),
+                    previous_time=flow["last"],
+                    flow_id="|".join(key),
+                    quic=protocol == "QUIC" or src_port == "443" or dst_port == "443",
+                )
             flow["packet_count"] += 1
             flow["bytes"] += _int(row.get("udp.length"))
-            flow["max_gap"] = max(flow["max_gap"], timestamp - flow["last"])
+            flow["max_gap"] = max(flow["max_gap"], gap)
             flow["last"] = timestamp
+            flow["last_frame"] = row.get("frame.number", "")
 
     return {
         "capture_summary": {
@@ -310,6 +394,12 @@ def aggregate_protocol_rows(rows: Iterable[dict[str, str]]) -> dict[str, Any]:
             "long_gap_flow_count": sum(
                 1 for flow in udp_flows.values() if flow["max_gap"] > 2
             ),
+        },
+        "evidence_index": evidence_index,
+        "evidence_summary": {
+            "total": len(evidence_index),
+            "by_type": dict(evidence_counts),
+            "truncated": len(evidence_index) >= 3000,
         },
     }
 

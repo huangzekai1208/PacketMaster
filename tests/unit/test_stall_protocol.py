@@ -139,3 +139,6 @@ def test_protocol_aggregation_detects_dns_failure_and_quic_gap() -> None:
     assert summary["dns_summary"]["unanswered_count"] == 1
     assert summary["udp_summary"]["quic_packet_count"] == 2
     assert summary["udp_summary"]["long_gap_flow_count"] == 1
+    evidence = summary["evidence_index"]
+    assert {item["evidence_type"] for item in evidence} >= {"dns", "udp_gap"}
+    assert all("payload" not in item for item in evidence)

@@ -25,6 +25,8 @@ from packetmaster.domain import (
     EvidenceResponse,
     GeneralChatAnswer,
     HypothesisBatch,
+    StallHypothesisBatch,
+    StallVerificationResult,
     VerificationResult,
 )
 from packetmaster.errors import AppError
@@ -99,9 +101,9 @@ def _bounded_business_symptom(value: str) -> str:
 
 def _ensure_chinese_user_text(value: BaseModel) -> None:
     texts: list[str] = []
-    if isinstance(value, HypothesisBatch):
+    if isinstance(value, HypothesisBatch | StallHypothesisBatch):
         texts = _hypothesis_texts(value)
-    elif isinstance(value, VerificationResult):
+    elif isinstance(value, VerificationResult | StallVerificationResult):
         texts = [
             *_hypothesis_texts(HypothesisBatch(hypotheses=value.candidate_hypotheses)),
             *value.rejected_causes,
@@ -642,6 +644,44 @@ class DiagnosisModel:
                 matched_subject=selection.matched_subject,
             )
         return selection
+
+    async def generate_stall_hypotheses(
+        self,
+        *,
+        analysis_id: str,
+        symptom: str,
+        protocol_context: dict[str, Any],
+    ) -> StallHypothesisBatch:
+        result = await self._invoke(
+            StallHypothesisBatch,
+            "stall_hypothesis.md",
+            {
+                "analysis_id": analysis_id,
+                "user_symptom": _bounded_business_symptom(symptom),
+                "protocol_context": protocol_context,
+            },
+        )
+        return StallHypothesisBatch.model_validate(result)
+
+    async def verify_stall_hypotheses(
+        self,
+        *,
+        symptom: str,
+        protocol_context: dict[str, Any],
+        hypotheses: StallHypothesisBatch,
+        evidence: list[EvidenceResponse],
+    ) -> StallVerificationResult:
+        result = await self._invoke(
+            StallVerificationResult,
+            "stall_verification.md",
+            {
+                "user_symptom": _bounded_business_symptom(symptom),
+                "protocol_context": protocol_context,
+                "hypotheses": hypotheses.model_dump(mode="json"),
+                "queried_evidence": bounded_evidence(evidence),
+            },
+        )
+        return StallVerificationResult.model_validate(result)
 
     async def verify(
         self,

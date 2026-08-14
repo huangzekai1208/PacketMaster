@@ -55,6 +55,15 @@ class EvidenceType(StrEnum):
     CUSTOM_PACKET_QUERY = "custom_packet_query"
 
 
+class StallEvidenceType(StrEnum):
+    DNS = "dns"
+    TCP_HANDSHAKE = "tcp_handshake"
+    TCP_ANOMALY = "tcp_anomaly"
+    TLS = "tls"
+    HTTP = "http"
+    UDP_GAP = "udp_gap"
+
+
 class EvidenceField(StrEnum):
     EVIDENCE_ID = "evidence_id"
     EVENT_TYPE = "event_type"
@@ -193,6 +202,16 @@ class EvidenceResponse(ContractModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class StallEvidenceRequest(ContractModel):
+    analysis_id: str
+    evidence_type: StallEvidenceType
+    hosts: list[BoundedQueryString] = Field(default_factory=list, max_length=16)
+    ips: list[BoundedQueryString] = Field(default_factory=list, max_length=16)
+    time_start: float | None = Field(default=None, ge=0)
+    time_end: float | None = Field(default=None, ge=0)
+    limit: int = Field(default=50, ge=1, le=100)
+
+
 class Hypothesis(ContractModel):
     cause: str
     hypothesis_type: HypothesisType
@@ -202,6 +221,7 @@ class Hypothesis(ContractModel):
     contradicting_evidence: list[str] = Field(default_factory=list)
     missing_evidence: list[str] = Field(default_factory=list)
     affected_flows: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=64)
     explanation: str = ""
     suggestion: str = ""
 
@@ -211,12 +231,29 @@ class HypothesisBatch(ContractModel):
     requested_evidence: list[EvidenceRequest] = Field(default_factory=list)
 
 
+class StallHypothesisBatch(ContractModel):
+    hypotheses: list[Hypothesis] = Field(default_factory=list, max_length=12)
+    requested_evidence: list[StallEvidenceRequest] = Field(
+        default_factory=list, max_length=12
+    )
+
+
 class VerificationResult(ContractModel):
     candidate_hypotheses: list[Hypothesis] = Field(default_factory=list)
     rejected_causes: list[str] = Field(default_factory=list)
     requested_evidence: list[EvidenceRequest] = Field(default_factory=list)
     ready_for_report: bool = False
     limitations: list[str] = Field(default_factory=list)
+
+
+class StallVerificationResult(ContractModel):
+    candidate_hypotheses: list[Hypothesis] = Field(default_factory=list, max_length=12)
+    rejected_causes: list[str] = Field(default_factory=list, max_length=12)
+    requested_evidence: list[StallEvidenceRequest] = Field(
+        default_factory=list, max_length=12
+    )
+    ready_for_report: bool = False
+    limitations: list[str] = Field(default_factory=list, max_length=20)
 
 
 class DiagnosticReport(ContractModel):

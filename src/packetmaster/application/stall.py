@@ -14,6 +14,7 @@ from statistics import median
 from typing import Any
 
 from packetmaster.analyzer.real import default_pipeline_script
+from packetmaster.application.stall_agent import StallAgentResult, run_stall_agent
 from packetmaster.application.stall_protocol import (
     extract_protocol_summary,
     find_tshark,
@@ -680,9 +681,29 @@ class StallDiagnosisService:
             protocol = await protocol_task
         except AppError as exc:
             protocol = {"extraction_error": exc.message}
-        semantic_selection = await self._semantic_business_selection(
-            symptom_context, protocol
-        )
+        try:
+            semantic_selection = await asyncio.wait_for(
+                self._semantic_business_selection(symptom_context, protocol),
+                timeout=30,
+            )
+        except TimeoutError:
+            semantic_selection = None
+        agent_result = None
+        if symptom_context.strip():
+            if progress is not None:
+                progress(0.82, "正在按场景生成卡顿候选原因")
+            try:
+                agent_result = await asyncio.wait_for(
+                    run_stall_agent(
+                        model=DiagnosisModel(settings=self.settings),
+                        analysis_id=request_id,
+                        symptom=symptom_context,
+                        protocol=protocol,
+                    ),
+                    timeout=90,
+                )
+            except TimeoutError:
+                agent_result = None
         manifest = _read_object(output / "manifest.json")
         pipeline_failed = returncode != 0 or manifest.get("status") == "failed"
         if pipeline_failed:
@@ -714,6 +735,7 @@ class StallDiagnosisService:
             protocol,
             symptom_context=symptom_context,
             semantic_selection=semantic_selection,
+            agent_result=agent_result,
         )
         report_path = output / "stall_report.json"
         _atomic_write(report_path, report.model_dump(mode="json"))
@@ -754,6 +776,7 @@ def build_stall_report(
     *,
     symptom_context: str = "",
     semantic_selection: dict[str, Any] | None = None,
+    agent_result: StallAgentResult | None = None,
 ) -> StallDiagnosticReport:
     protocol = protocol or {}
     user_context = parse_stall_context(symptom_context)
@@ -976,6 +999,13 @@ def build_stall_report(
 
     candidates = _personalize_candidates(candidates, user_context)
     candidates.sort(key=lambda item: item.confidence, reverse=True)
+    agent_evidence = _agent_evidence_records(agent_result)
+    if agent_result is not None and agent_result.hypotheses:
+        candidates = sorted(
+            agent_result.hypotheses,
+            key=lambda item: item.confidence,
+            reverse=True,
+        )
     limitations = [
         "仅凭报文无法直接证明用户界面发生卡顿，结论表示与卡顿一致的网络或业务等待现象。",
         "加密后的应用内容和播放器缓冲状态不可见，需结合终端、播放器和服务端日志确认。",
@@ -984,19 +1014,32 @@ def build_stall_report(
     ]
     if manifest.get("status") == "partial":
         limitations.append("报文分析覆盖不完整，候选原因置信度需要谨慎解释。")
+    if agent_result is not None:
+        limitations.extend(agent_result.limitations)
+        limitations.append("候选原因由场景描述和受控多协议证据经 Agent 复核生成。")
+    primary_candidate = next((item for item in candidates if item.evidence_refs), None)
     primary = (
-        str(business["conclusion"])
+        primary_candidate.cause
+        if primary_candidate is not None
+        else str(business["conclusion"])
         if business.get("targeted")
         else candidates[0].cause
         if candidates
         else "未发现明确的网络层或应用协议卡顿原因"
     )
-    confidence = candidates[0].confidence if candidates else 30.0
+    confidence = (
+        primary_candidate.confidence
+        if primary_candidate
+        else (candidates[0].confidence if candidates else 30.0)
+    )
     return StallDiagnosticReport(
         analysis_id=analysis_id,
         primary_cause=primary,
         candidate_causes=candidates,
-        key_evidence=events[:32],
+        key_evidence=[
+            *agent_evidence[:32],
+            *events[: max(0, 32 - len(agent_evidence))],
+        ],
         confidence=confidence,
         coverage_summary=coverage,
         stall_events=events[:512],
@@ -1009,6 +1052,7 @@ def build_stall_report(
             "throughput_drop_count": len(throughput_drops),
             "data_gap_count": len(gaps),
             **_mapping(protocol.get("capture_summary")),
+            "agent_evidence_count": len(agent_evidence),
         },
         endpoint_summary=_list_of_mappings(protocol.get("endpoint_summary")),
         dns_summary=dns,
@@ -1032,8 +1076,21 @@ def build_stall_report(
         analysis_metadata={
             "analysis_mode": "stall",
             "analyzer": "generic-multiprotocol-v1",
+            "agent_rounds": agent_result.rounds if agent_result else 0,
+            "agent_used": agent_result is not None,
         },
     )
+
+
+def _agent_evidence_records(
+    result: StallAgentResult | None,
+) -> list[dict[str, Any]]:
+    if result is None:
+        return []
+    records: list[dict[str, Any]] = []
+    for response in result.evidence:
+        records.extend(response.items[:64])
+    return records[:256]
 
 
 def _stall_events(
