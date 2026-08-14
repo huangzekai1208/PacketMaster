@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from packetmaster.config import Settings
 from packetmaster.domain import (
@@ -12,6 +13,7 @@ from packetmaster.domain import (
     EvidenceRequest,
     EvidenceResponse,
     EvidenceType,
+    StallDiagnosticReport,
     Target,
 )
 from packetmaster.web.analysis import AnalysisReadService
@@ -169,6 +171,59 @@ def test_completed_analysis_chat_is_persistent(tmp_path: Path) -> None:
     assert restored.items[0].knowledge_citations == []
 
 
+def test_stall_analysis_chat_uses_protocol_context_without_speed_metrics() -> None:
+    report = StallDiagnosticReport(
+        analysis_id="stall-1",
+        primary_cause="登录域名解析异常",
+        confidence=88,
+        coverage_summary=CoverageSummary(complete=True),
+        dns_summary={"failure_count": 1},
+        key_evidence=[{"evidence_id": "stall:dns:12", "frame.number": "12"}],
+    )
+
+    class Reads:
+        def detail(self, analysis_id):
+            return SimpleNamespace(
+                analysis=SimpleNamespace(
+                    status=TaskStatus.COMPLETED,
+                    session_id="session-1",
+                    target=Target.BOTH,
+                )
+            )
+
+        def report(self, analysis_id):
+            return SimpleNamespace(report=report)
+
+        def metrics(self, analysis_id):
+            raise AssertionError("stall follow-up must not read speed metrics")
+
+    class Model:
+        def __init__(self):
+            self.context = None
+
+        async def answer_question(self, context):
+            self.context = context
+            return ChatAnswer(answer="DNS 证据位于报文 12。", ready=True)
+
+    class Turns:
+        def list(self, analysis_id, **kwargs):
+            return [], 0
+
+        def append(self, **kwargs):
+            return SimpleNamespace(**kwargs)
+
+    model = Model()
+    chat = AnalysisChatService(reads=Reads(), turns=Turns(), model=model)
+
+    answer = asyncio.run(chat.ask("stall-1", "DNS 证据是什么？"))
+
+    assert answer.answer == "DNS 证据位于报文 12。"
+    assert model.context.diagnosis_context["mode"] == "stall"
+    assert model.context.diagnosis_context["key_evidence"][0]["evidence_id"] == (
+        "stall:dns:12"
+    )
+
+
 def test_sse_stream_is_ordered_and_resumes_after_last_event(tmp_path: Path) -> None:
     _, tasks, _ = _completed(tmp_path)
 
@@ -178,8 +233,7 @@ def test_sse_stream_is_ordered_and_resumes_after_last_event(tmp_path: Path) -> N
 
     async def collect(after: int):
         return [
-            item
-            async for item in _event_stream(Request(), tasks, "analysis-1", after)
+            item async for item in _event_stream(Request(), tasks, "analysis-1", after)
         ]
 
     all_events = asyncio.run(collect(0))

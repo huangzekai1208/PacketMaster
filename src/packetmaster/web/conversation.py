@@ -28,6 +28,7 @@ from packetmaster.web.contracts import (
     AnalysisMode,
     AnalysisSummary,
     CaptureSummary,
+    ChatTurnResult,
     ConversationResult,
     DiagnosisParameters,
     MessageType,
@@ -85,6 +86,7 @@ class WebConversationService:
         model: Any,
         rag_runtime: Any | None = None,
         llm_observer: LLMObservationCollector | None = None,
+        analysis_chat: Any | None = None,
     ) -> None:
         self.sessions = sessions
         self.messages = messages
@@ -94,6 +96,7 @@ class WebConversationService:
         self.model = model
         self.rag_runtime = rag_runtime
         self.llm_observer = llm_observer
+        self.analysis_chat = analysis_chat
 
     def create_session(self, *, title: str = "新会话") -> SessionSummary:
         return self.sessions.create(title=title)
@@ -152,7 +155,7 @@ class WebConversationService:
             if route is ConversationRoute.GENERAL:
                 result = await self._general(session_id, content)
             elif route is ConversationRoute.ANALYSIS_QUESTION:
-                result = self._analysis_question(session_id, content)
+                result = await self._analysis_question(session_id, content)
             else:
                 result = await self._diagnosis(
                     session_id,
@@ -276,7 +279,24 @@ class WebConversationService:
             reason = exc.code if isinstance(exc, AppError) else "RAG_RETRIEVAL_FAILED"
             return _GeneralKnowledgeTrace(status="degraded", reason=reason)
 
-    def _analysis_question(self, session_id: str, content: str) -> ConversationResult:
+    async def _analysis_question(
+        self, session_id: str, content: str
+    ) -> ConversationResult:
+        session = self._session(session_id)
+        analysis_id = session.current_analysis_id
+        analysis = self.tasks.get(analysis_id) if analysis_id is not None else None
+        if (
+            analysis is not None
+            and analysis.status in {TaskStatus.COMPLETED, TaskStatus.PARTIAL}
+            and self.analysis_chat is not None
+        ):
+            turn: ChatTurnResult = await self.analysis_chat.ask(
+                analysis.analysis_id, content
+            )
+            return ConversationResult(
+                route="analysis_question",
+                chat_turn=turn,
+            )
         self.messages.append(
             session_id=session_id,
             message_type=MessageType.USER,

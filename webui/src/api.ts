@@ -20,6 +20,7 @@ export interface Metrics { tcp_summary: Record<string, number>; coverage_summary
 export interface Flow { flow_id: string; direction: Target; packet_count: number; payload_bytes: number; throughput_mbps: number; duration_seconds: number; retransmission_count: number; duplicate_ack_count: number; out_of_order_count: number; zero_window_count: number; window_full_count: number; window_min?: number; window_max?: number }
 export interface Evidence { analysis_id: string; evidence_type: string; items: Array<Record<string, string | number | boolean>>; total: number; next_offset?: number; truncated: boolean; warnings: string[] }
 export interface ChatTurn { turn_id: string; analysis_id: string; question: string; answer: string; citations: Array<Record<string, unknown>>; knowledge_citations?: KnowledgeCitation[]; limitations: string[]; suggestions: string[]; created_at: string }
+export interface ConversationResult { route: 'general' | 'diagnosis' | 'analysis_question'; assistant_message?: Message; chat_turn?: ChatTurn; parameters?: Parameters; analysis?: Analysis }
 export type KnowledgeStatus = 'draft' | 'approved' | 'disabled' | 'superseded'
 export type KnowledgeType = 'standard' | 'vendor' | 'runbook' | 'case'
 export type AuthorityLevel = 'high' | 'medium_high' | 'medium' | 'low'
@@ -55,7 +56,7 @@ export const api = {
   createSession: () => request<Session>('/api/sessions', { method: 'POST', body: '{}' }),
   deleteSession: (id: string) => request<{ deleted: boolean }>(`/api/sessions/${id}`, { method: 'DELETE' }),
   session: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),
-  send: (id: string, content: string, capture_id?: string, mode: AnalysisMode = 'speed') => request<{ parameters?: Parameters }>(`/api/sessions/${id}/messages`, { method: 'POST', body: JSON.stringify({ content, capture_id, mode }) }),
+  send: (id: string, content: string, capture_id?: string, mode: AnalysisMode = 'speed') => request<ConversationResult>(`/api/sessions/${id}/messages`, { method: 'POST', body: JSON.stringify({ content, capture_id, mode }) }),
   register: (path: string) => request<Capture>('/api/captures/register', { method: 'POST', body: JSON.stringify({ path }) }),
   uploadCapture: async (file: File) => {
     // 上传使用 multipart，不能附带默认 JSON Content-Type，否则浏览器不会生成 boundary。

@@ -442,7 +442,7 @@ class ChatSessionState(ContractModel):
     target: Target = Target.DOWNLOAD
     standard_bandwidth_mbps: float | None = Field(default=None, gt=0)
     actual_bandwidth_mbps: float | None = Field(default=None, gt=0)
-    report: DiagnosticReport | dict[str, Any] | None = None
+    report: DiagnosticReport | StallDiagnosticReport | dict[str, Any] | None = None
     report_path: str | None = None
     local_capture_paths: dict[str, str] = Field(default_factory=dict, max_length=8)
     diagnosis_context: dict[str, Any] = Field(default_factory=dict)
@@ -464,7 +464,7 @@ class ChatSessionState(ContractModel):
     def model_context(self) -> ChatModelContext:
         if not self.analysis_id or not self.question:
             raise ValueError("analysis_id and question are required for model context")
-        if isinstance(self.report, DiagnosticReport):
+        if isinstance(self.report, DiagnosticReport | StallDiagnosticReport):
             report = self.report.model_dump(mode="json")
         else:
             report = self.report or {}

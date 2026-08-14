@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import type { EChartsOption } from 'echarts'
 import { Activity, AlertTriangle, BarChart3, BookOpen, CheckCircle2, ChevronLeft, ChevronRight, Coins, FileSearch, FileUp, Menu, MessageSquare, Network, PanelLeft, PanelRight, Plus, RefreshCw, Send, Square, Trash2, X } from 'lucide-react'
 import { ChangeEvent, CSSProperties, FormEvent, lazy, PointerEvent as ReactPointerEvent, Suspense, useEffect, useMemo, useRef, useState } from 'react'
-import { Analysis, AnalysisDetail, AnalysisMode, api, ApiFailure, Capture, ChatTurn, Evidence, formatBytes, isReportReady, isRunning, KnowledgeCitation, LLMUsageSummary, Message, Metrics, Page, Parameters, Report, Session, SessionDetail, TaskStatus } from './api'
+import { Analysis, AnalysisDetail, AnalysisMode, api, ApiFailure, Capture, ChatTurn, ConversationResult, Evidence, formatBytes, isReportReady, isRunning, KnowledgeCitation, LLMUsageSummary, Message, Metrics, Page, Parameters, Report, Session, SessionDetail, TaskStatus } from './api'
 import { KnowledgeManagement } from './KnowledgeManagement'
 const Chart = lazy(() => import('./Chart'))
 
@@ -124,26 +124,9 @@ function ChatView({ sessionId, detail, analysisDetail, pendingCapture, captureUp
   const [analysisMode, setAnalysisMode] = useState<AnalysisMode>(() => readAnalysisMode(sessionId))
   const bottom = useRef<HTMLDivElement>(null)
   const history = useQuery({ queryKey: ['chat-history', analysis?.analysis_id], queryFn: () => api.chatHistory(analysis!.analysis_id), enabled: Boolean(analysis && isReportReady(analysis.status)) })
-  const send = useMutation<ChatTurn | { parameters?: Parameters }, Error, ChatSendInput, { previous?: SessionDetail; previousHistory?: Page<ChatTurn> }>({
-    mutationFn: ({ content, capture, analysisMode }) => analysis && isReportReady(analysis.status) ? api.chat(analysis.analysis_id, content) : api.send(sessionId, content, capture?.capture_id, analysisMode),
+  const send = useMutation<ConversationResult, Error, ChatSendInput, { previous?: SessionDetail }>({
+    mutationFn: ({ content, capture, analysisMode }) => api.send(sessionId, content, capture?.capture_id, analysisMode),
     onMutate: async ({ content, capture }) => {
-      if (analysis && isReportReady(analysis.status)) {
-        const historyKey = ['chat-history', analysis.analysis_id]
-        await client.cancelQueries({ queryKey: historyKey })
-        const previousHistory = client.getQueryData<Page<ChatTurn>>(historyKey)
-        // 追问接口同样先展示问题；正式回答返回后会替换这条临时记录。
-        client.setQueryData<Page<ChatTurn>>(historyKey, current => {
-          const page = current ?? { items: [], total: 0, offset: 0, limit: 100 }
-          return {
-            ...page,
-            items: [...page.items, { turn_id: `pending-${Date.now()}`, analysis_id: analysis.analysis_id, question: content, answer: '', citations: [], limitations: [], suggestions: [], created_at: new Date().toISOString() }],
-            total: page.total + 1,
-          }
-        })
-        setDraft('')
-        localStorage.removeItem(`packetmaster.draft.${sessionId}`)
-        return { previousHistory }
-      }
       await client.cancelQueries({ queryKey: ['session', sessionId] })
       const previous = client.getQueryData<SessionDetail>(['session', sessionId])
       if (previous) {
@@ -163,19 +146,16 @@ function ChatView({ sessionId, detail, analysisDetail, pendingCapture, captureUp
       return { previous }
     },
     onError: (_error, input, context) => {
-      if (analysis && isReportReady(analysis.status)) {
-        client.setQueryData(['chat-history', analysis.analysis_id], context?.previousHistory)
-      }
       if (context?.previous) client.setQueryData(['session', sessionId], context.previous)
       setDraft(input.draft)
       onRestoreCapture(input.capture)
     },
     onSuccess: (result) => {
-      if (!analysis || !isReportReady(analysis.status) || !('turn_id' in result)) return
-      client.setQueryData<Page<ChatTurn>>(['chat-history', analysis.analysis_id], current => current ? {
-        ...current,
-        items: current.items.map(turn => turn.turn_id.startsWith('pending-') ? result : turn),
-      } : current)
+      if (!analysis || !result.chat_turn) return
+      client.setQueryData<Page<ChatTurn>>(['chat-history', analysis.analysis_id], current => {
+        const page = current ?? { items: [], total: 0, offset: 0, limit: 100 }
+        return { ...page, items: [...page.items, result.chat_turn!], total: page.total + 1 }
+      })
     },
     onSettled: () => { refresh(); history.refetch() },
   })

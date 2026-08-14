@@ -315,13 +315,6 @@ class DeleteResult(WebContract):
     deleted: bool
 
 
-class ConversationResult(WebContract):
-    route: Literal["general", "diagnosis", "analysis_question"]
-    assistant_message: WebMessage
-    parameters: DiagnosisParameters | None = None
-    analysis: AnalysisSummary | None = None
-
-
 class SessionDetail(WebContract):
     session: SessionSummary
     messages: Page[WebMessage]
@@ -390,6 +383,14 @@ class ChatTurnResult(WebContract):
     limitations: list[str] = Field(default_factory=list, max_length=32)
     suggestions: list[str] = Field(default_factory=list, max_length=32)
     created_at: datetime
+
+
+class ConversationResult(WebContract):
+    route: Literal["general", "diagnosis", "analysis_question"]
+    assistant_message: WebMessage | None = None
+    chat_turn: ChatTurnResult | None = None
+    parameters: DiagnosisParameters | None = None
+    analysis: AnalysisSummary | None = None
 
 
 def public_json(value: WebContract) -> dict[str, Any]:

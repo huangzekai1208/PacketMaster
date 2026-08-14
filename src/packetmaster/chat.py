@@ -103,6 +103,16 @@ def route_conversation(
             "窗口",
             "rtt",
             "流",
+            "卡顿",
+            "异常",
+            "域名",
+            "dns",
+            "cname",
+            "tls",
+            "http",
+            "quic",
+            "报文",
+            "ip",
         )
     )
     short_parameter = bool(
@@ -176,7 +186,7 @@ class ChatSession:
         turn = ConversationTurn(question=validate_question(question), answer=answer)
         turns = [*self.state.conversation_turns, turn]
         if len(turns) > self.max_turns:
-            archived = turns[:-self.max_turns]
+            archived = turns[: -self.max_turns]
             summary = "\n".join(
                 f"问：{item.question}\n答：{item.answer}" for item in archived
             )

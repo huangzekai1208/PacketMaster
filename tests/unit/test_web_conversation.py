@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,7 +9,12 @@ from packetmaster.domain import GeneralChatAnswer, Target
 from packetmaster.rag.contracts import KnowledgeBundle, RagMode, RetrievalCandidate
 from packetmaster.rag.query import KnowledgeQueryBuilder
 from packetmaster.web.captures import CaptureRegistry, CaptureRepository
-from packetmaster.web.contracts import AnalysisMode, MissingParameter, TaskStatus
+from packetmaster.web.contracts import (
+    AnalysisMode,
+    ChatTurnResult,
+    MissingParameter,
+    TaskStatus,
+)
 from packetmaster.web.conversation import WebConversationService
 from packetmaster.web.database import (
     MessageRepository,
@@ -61,6 +67,59 @@ def test_general_question_does_not_enter_diagnosis(tmp_path: Path) -> None:
     assert AnalysisTaskRepository(database).count_for_session(session.session_id) == 0
     assert model.questions == ["TCP 是什么？"]
     assert SessionRepository(database).get(session.session_id).title == "TCP 是什么"
+
+
+def test_completed_analysis_routes_general_chat_and_report_follow_up(
+    tmp_path: Path,
+) -> None:
+    model = _Model()
+    service, _ = _service(tmp_path, model)
+    session = service.create_session()
+    capture_path = tmp_path / "capture.pcapng"
+    capture_path.write_bytes(b"capture")
+    capture = service.captures.register(str(capture_path))
+    task = service.tasks.create_queued(
+        session_id=session.session_id,
+        capture_id=capture.capture_id,
+        standard_bandwidth_mbps=1000,
+        actual_bandwidth_mbps=20,
+        analysis_id="analysis-1",
+    )
+    for status in (
+        TaskStatus.VALIDATING,
+        TaskStatus.ANALYZING,
+        TaskStatus.REASONING,
+        TaskStatus.REPORTING,
+        TaskStatus.COMPLETED,
+    ):
+        task = service.tasks.transition(task.analysis_id, status)
+
+    class AnalysisChat:
+        async def ask(self, analysis_id, question):
+            return ChatTurnResult(
+                turn_id="turn-1",
+                analysis_id=analysis_id,
+                question=question,
+                answer="报告证据显示 DNS 响应正常。",
+                created_at=datetime.now(UTC),
+            )
+
+    service.analysis_chat = AnalysisChat()
+    general = asyncio.run(
+        service.submit_message(session.session_id, content="你好，今天聊点别的")
+    )
+    follow_up = asyncio.run(
+        service.submit_message(
+            session.session_id, content="这个报告的 DNS 证据是什么？"
+        )
+    )
+
+    assert general.route == "general"
+    assert general.assistant_message is not None
+    assert model.questions[-1] == "你好，今天聊点别的"
+    assert follow_up.route == "analysis_question"
+    assert follow_up.chat_turn is not None
+    assert follow_up.chat_turn.answer.startswith("报告证据")
 
 
 def test_session_waits_for_meaningful_content_before_generating_title(

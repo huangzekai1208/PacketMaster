@@ -6,7 +6,11 @@ from contextlib import nullcontext
 from typing import Any
 
 from packetmaster.chat_graph import build_chat_graph
-from packetmaster.domain import ChatSessionState, ConversationTurn
+from packetmaster.domain import (
+    ChatSessionState,
+    ConversationTurn,
+    StallDiagnosticReport,
+)
 from packetmaster.errors import AppError
 from packetmaster.llm_observability import LLMObservationCollector
 from packetmaster.web.analysis import AnalysisReadService
@@ -51,12 +55,27 @@ class AnalysisChatService:
         safe_question = redact_message(question)
         history, _ = self.turns.list(analysis_id, limit=50)
         report = self.reads.report(analysis_id).report
+        diagnosis_context = (
+            {
+                "mode": "stall",
+                "protocol_summary": report.protocol_summary,
+                "dns_summary": report.dns_summary,
+                "tls_summary": report.tls_summary,
+                "http_summary": report.http_summary,
+                "udp_summary": report.udp_summary,
+                "business_analysis": report.business_analysis,
+                "key_evidence": report.key_evidence[:32],
+                "stall_events": report.stall_events[:64],
+            }
+            if isinstance(report, StallDiagnosticReport)
+            else self.reads.metrics(analysis_id).model_dump(mode="json")
+        )
         session = ChatSessionState(
             session_id=detail.analysis.session_id,
             analysis_id=analysis_id,
             target=detail.analysis.target,
             report=report,
-            diagnosis_context=self.reads.metrics(analysis_id).model_dump(mode="json"),
+            diagnosis_context=diagnosis_context,
             conversation_turns=[
                 ConversationTurn(question=item.question, answer=item.answer)
                 for item in history[-8:]

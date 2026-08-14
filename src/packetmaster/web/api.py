@@ -102,11 +102,13 @@ def create_app(
     app.state.database = database
     # 浏览器无法把本机绝对路径交给服务端；所选报文统一落入受管目录。
     capture_upload_root = (
-        runtime.artifact_root / "web-captures"
-    ).expanduser().resolve()
+        (runtime.artifact_root / "web-captures").expanduser().resolve()
+    )
     llm_calls_path = (
-        runtime.artifact_root / "llm-observability" / "llm_calls.jsonl"
-    ).expanduser().resolve()
+        (runtime.artifact_root / "llm-observability" / "llm_calls.jsonl")
+        .expanduser()
+        .resolve()
+    )
     llm_observer = (
         LLMObservationCollector(JsonlLLMCallObserver(llm_calls_path))
         if runtime.llm_observability_enabled
@@ -140,9 +142,10 @@ def create_app(
         rag_runtime=conversation.rag_runtime,
         llm_observer=llm_observer,
     )
+    conversation.analysis_chat = analysis_chat
     app.state.analysis_reads = analysis_reads
     app.state.analysis_chat = analysis_chat
-    allowed_hosts = {*_LOOPBACK_HOSTS, *( ["testserver"] if testing else [])}
+    allowed_hosts = {*_LOOPBACK_HOSTS, *(["testserver"] if testing else [])}
 
     def knowledge_store() -> tuple[KnowledgeDatabase, SQLiteKnowledgeStore]:
         knowledge_database = KnowledgeDatabase(runtime.knowledge_database_path)
@@ -586,9 +589,7 @@ def create_app(
         limit: int = Query(default=100, ge=1, le=100),
     ) -> SuccessEnvelope[SessionDetail]:
         return SuccessEnvelope(
-            data=conversation.session_detail(
-                session_id, offset=offset, limit=limit
-            ),
+            data=conversation.session_detail(session_id, offset=offset, limit=limit),
             request_id=request.state.request_id,
         )
 
@@ -958,7 +959,7 @@ async def _event_stream(request, tasks, analysis_id: str, cursor: int):
 
 def _allowed_origin(value: str, *, testing: bool) -> bool:
     parsed = urlsplit(value)
-    allowed = {*_LOOPBACK_HOSTS, *( ["testserver"] if testing else [])}
+    allowed = {*_LOOPBACK_HOSTS, *(["testserver"] if testing else [])}
     return parsed.scheme in {"http", "https"} and parsed.hostname in allowed
 
 
